@@ -1,0 +1,32 @@
+version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  default: standard
+  enable:
+    - forbidigo   # enforce the create-only storage invariant
+    - bodyclose
+    - misspell
+    - unconvert
+  settings:
+    forbidigo:
+      analyze-types: true
+      forbid:
+        # Invariant #3: storage is append-only; no deletion anywhere in the tree.
+        - pattern: 'DeleteObjects?\('
+          msg: "storage is create-only; object deletion is forbidden (invariant #3)"
+        - pattern: 'DeleteBucket\('
+          msg: "storage is create-only; bucket deletion is forbidden (invariant #3)"
+  exclusions:
+    generated: lax
+    rules:
+      - path: _test\.go
+        linters:
+          - forbidigo
+
+formatters:
+  enable:
+    - gofmt
+    - goimports

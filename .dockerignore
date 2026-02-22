@@ -1,0 +1,11 @@
+.git
+.claude
+.vscode
+bin
+dist
+coverage.out
+*.pem
+*.key
+*.bundle
+*.prom
+.DS_Store
