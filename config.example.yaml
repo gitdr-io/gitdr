@@ -1,0 +1,59 @@
+# gitdr config. Secrets are NOT set here, supply them via env:
+#   GITDR_GITHUB_APP_PRIVATE_KEY    PEM contents (or source.github.privateKeyPath)
+#   GITDR_MANIFEST_SIGNING_KEY      PEM contents (or manifest.signingKeyPath)
+#   AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY   S3-compatible static keys (opt-in)
+# Any field can be overridden via GITDR_<PATH>, e.g. GITDR_DESTINATION_S3_BUCKET=foo.
+
+source:
+  type: github                 # github | gitlab
+  baseURL: ""                  # github: GHES /api/v3; gitlab: self-managed https://gitlab.example.com
+  repo: "octo-org/octo-repo"   # single repo selector; empty = all accessible (filtered)
+  include: []
+  exclude: []
+  github:
+    appID: 0
+    installationID: 0
+    privateKeyPath: ""         # or set GITDR_GITHUB_APP_PRIVATE_KEY
+  gitlab: {}                   # token is a secret: set GITDR_GITLAB_TOKEN (read_api, read_repository)
+
+destination:
+  type: s3                     # s3 (AWS + S3-compatible) | gcs
+  s3:
+    bucket: "my-worm-bucket"
+    region: "us-east-1"
+    endpoint: ""               # empty = AWS; MinIO: http://localhost:9000
+    usePathStyle: false        # true for MinIO and most S3-compatible stores
+  gcs:
+    bucket: ""                 # GCS bucket with a LOCKED retention policy (Bucket Lock)
+    endpoint: ""               # empty = real GCS; set for an emulator
+  azure:
+    account: ""                # storage account (real Azure; uses DefaultAzureCredential)
+    container: ""              # blob container with an immutability policy
+    endpoint: ""               # optional service URL override
+    # connection string is a secret: set GITDR_DESTINATION_AZURE_CONNECTIONSTRING (e.g. Azurite)
+  retention:
+    mode: COMPLIANCE           # COMPLIANCE (true WORM) or GOVERNANCE, S3 only; GCS uses bucket retention
+    days: 30
+
+backup:
+  concurrency: 4               # repositories backed up in parallel
+  resume: true                 # skip repos already backed up for the run date
+  lfs: true                    # fetch Git LFS objects (stored as a separate .lfs.tar artifact)
+
+manifest:
+  signingKeyPath: ""           # ed25519 private key, PEM (or GITDR_MANIFEST_SIGNING_KEY)
+  publicKeyPath: ""            # ed25519 public key, PEM (for `gitdr verify`)
+
+metrics:
+  textfilePath: ""             # Prometheus .prom file for node_exporter's textfile collector; empty = off
+
+encryption:
+  enabled: false               # optional client-side envelope encryption of artifacts before upload
+  # key is a secret: set GITDR_ENCRYPTION_KEY (32-byte AES-256 key as 64-char hex, base64, or raw)
+
+worm:
+  require: false               # false = warn on non-WORM and proceed; true = fail closed (--require-worm)
+
+log:
+  level: info                  # debug|info|warn|error
+  format: json                 # json|text
