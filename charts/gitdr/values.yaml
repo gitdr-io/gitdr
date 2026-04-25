@@ -1,0 +1,80 @@
+image:
+  repository: ghcr.io/gitdr-io/gitdr
+  # Pin by digest in production (preferred). If empty, tag (or appVersion) is used.
+  digest: ""
+  tag: ""
+  pullPolicy: IfNotPresent
+
+# Run as a scheduled CronJob (default) or, with cronjob.enabled=false, a one-shot Job.
+cronjob:
+  enabled: true
+  schedule: "0 2 * * *" # daily 02:00
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+
+restartPolicy: Never
+backoffLimit: 2
+
+# gitdr subcommand + flags. Default: a backup run reading the mounted config.
+args:
+  - backup
+  - --config
+  - /etc/gitdr/config.yaml
+
+# Non-secret gitdr config, rendered into a ConfigMap at /etc/gitdr/config.yaml.
+# Secrets (GitHub App key, manifest signing key, encryption key, static cloud keys)
+# come from the referenced Secret via envFrom, never put them here.
+config:
+  source:
+    type: github
+    repo: "octo-org/octo-repo"
+    github:
+      appID: 0
+      installationID: 0
+  destination:
+    type: s3
+    s3:
+      bucket: my-worm-bucket
+      region: us-east-1
+    retention:
+      mode: COMPLIANCE
+      days: 30
+  worm:
+    require: false # false: warn on non-WORM and proceed (adoption-first); true: fail closed
+  log:
+    level: info
+    format: json
+
+# Secret env (GITDR_GITHUB_APP_PRIVATE_KEY, GITDR_MANIFEST_SIGNING_KEY, AWS_*, ...).
+# Provide a Secret and reference it here; values are never inlined in the chart.
+envFrom: []
+# - secretRef:
+#     name: gitdr-secrets
+env: []
+
+serviceAccount:
+  create: true
+  name: ""
+  # Keyless identity (preferred): annotate for IRSA / GKE Workload Identity / Azure WI.
+  annotations: {}
+
+resources: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL

@@ -1,0 +1,15 @@
+apiVersion: v2
+name: gitdr
+description: Disaster recovery for Git, to WORM-immutable object storage.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+home: https://gitdr.io
+sources:
+  - https://github.com/gitdr-io/gitdr
+keywords:
+  - backup
+  - git
+  - disaster-recovery
+  - worm
+  - immutable

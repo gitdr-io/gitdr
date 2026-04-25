@@ -1,0 +1,34 @@
+gitdr {{ .Chart.AppVersion }} installed as release {{ .Release.Name }}.
+
+{{ if .Values.cronjob.enabled -}}
+Scheduled backup (CronJob): {{ .Values.cronjob.schedule }}
+  kubectl -n {{ .Release.Namespace }} get cronjob {{ include "gitdr.fullname" . }}
+
+Trigger an off-schedule run:
+  kubectl -n {{ .Release.Namespace }} create job --from=cronjob/{{ include "gitdr.fullname" . }} {{ include "gitdr.fullname" . }}-manual
+{{- else -}}
+One-shot backup (Job): {{ include "gitdr.fullname" . }}
+  kubectl -n {{ .Release.Namespace }} get job {{ include "gitdr.fullname" . }}
+{{- end }}
+
+Logs:
+  kubectl -n {{ .Release.Namespace }} logs -l app.kubernetes.io/instance={{ .Release.Name }} -f
+
+Before this backs anything up, gitdr verifies the destination's immutability. WORM is
+strongly recommended; it warns and proceeds if it's missing. Two things to confirm:
+
+{{ if .Values.config.worm.require }}
+  - config.worm.require is TRUE, the run FAILS if the destination isn't WORM-immutable.
+    Make sure the bucket has object-lock / retention enabled and locked.
+{{- else -}}
+  - WORM recommended, not required (config.worm.require=false): gitdr warns if the
+    destination isn't immutable and proceeds. Enable object-lock for real protection.
+{{- end }}
+{{ if not .Values.envFrom }}
+  - No secret source is wired (envFrom is empty). gitdr needs credentials,
+    GitHub App key / cloud creds / manifest signing key, from a Secret. Set
+    envFrom in values.yaml to reference it; secrets are never rendered into the chart.
+{{- else -}}
+  - Secrets sourced via envFrom. Keep cloud creds least-privilege (create/put only),
+    or prefer keyless workload identity via serviceAccount.annotations.
+{{- end }}
