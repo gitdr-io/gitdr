@@ -1,0 +1,42 @@
+# Oneshot backup, activated by gitdr.timer (don't enable this unit directly).
+# Install to /etc/systemd/system/. See deploy/README.md.
+[Unit]
+Description=gitdr, immutable backup of Git repositories
+Documentation=https://gitdr.io
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=gitdr
+Group=gitdr
+
+# Secrets live here (GITDR_GITHUB_APP_PRIVATE_KEY, GITDR_MANIFEST_SIGNING_KEY, AWS_*,
+# GITDR_ENCRYPTION_KEY, ...). KEY=value per line; own it gitdr:gitdr, mode 0600.
+EnvironmentFile=/etc/gitdr/gitdr.env
+
+ExecStart=/usr/local/bin/gitdr backup --config /etc/gitdr/config.yaml
+
+# Transient working area for clones/bundles (disk-backed, auto-created at /var/cache/gitdr).
+CacheDirectory=gitdr
+Environment=TMPDIR=/var/cache/gitdr HOME=/var/cache/gitdr
+UMask=0077
+
+# Hardening: gitdr only needs network + its cache dir. Lock the rest down.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=true
+LockPersonality=true
+RestrictSUIDSGID=true
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+CapabilityBoundingSet=
+# If metrics.textfilePath is set, allow writing it, e.g.:
+# ReadWritePaths=/var/lib/node_exporter/textfile_collector

@@ -1,0 +1,12 @@
+# Daily backup schedule. Enable with: systemctl enable --now gitdr.timer
+[Unit]
+Description=Run gitdr backup daily
+Documentation=https://gitdr.io
+
+[Timer]
+OnCalendar=*-*-* 02:00:00
+RandomizedDelaySec=15m
+Persistent=true
+
+[Install]
+WantedBy=timers.target

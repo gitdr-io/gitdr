@@ -1,0 +1,4 @@
+# /etc/cron.d/gitdr, daily immutable backup at 02:00 as the gitdr user.
+# cron mails stdout/stderr to MAILTO on failure (non-zero exit = failed backup).
+MAILTO=root
+0 2 * * *  gitdr  /usr/local/bin/gitdr-backup.sh
