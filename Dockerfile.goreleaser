@@ -1,0 +1,16 @@
+# syntax=docker/dockerfile:1
+#
+# Runtime image used by GoReleaser. GoReleaser builds the static gitdr binary and drops
+# it into the build context, so this Dockerfile just packages it into the hardened Wolfi
+# runtime (git + git-lfs, non-root), same hardening as ./Dockerfile, minus the build
+# stage. ./Dockerfile (multi-stage, build-from-source) stays for `make image`.
+#
+# Pin the base by @sha256 digest in release CI.
+
+FROM cgr.dev/chainguard/wolfi-base:latest
+RUN apk add --no-cache git git-lfs ca-certificates-bundle && \
+    git lfs install --system
+COPY gitdr /usr/bin/gitdr
+USER 65532:65532
+ENV GIT_TERMINAL_PROMPT=0
+ENTRYPOINT ["/usr/bin/gitdr"]

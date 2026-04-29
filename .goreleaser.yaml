@@ -1,0 +1,116 @@
+# gitdr release config (GoReleaser v2). Static linux binaries (amd64/arm64), a multi-arch
+# image to GHCR, SBOMs (syft), keyless cosign signatures, and a GitHub Release.
+#
+# The release runs from GitHub Actions (.github/workflows/release.yml) on a v*.*.* tag
+# and publishes to GitHub + GHCR; nothing here references the private origin. Validate
+# before relying on it:
+#   goreleaser check
+#   goreleaser release --snapshot --clean   # local dry run, no publish
+#
+# cosign v2 is keyless by default; in GitHub Actions it consumes the workflow's OIDC token
+# (the release job sets id-token: write), so signatures carry a github.com identity.
+
+version: 2
+project_name: gitdr
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: gitdr
+    main: ./cmd/gitdr
+    binary: gitdr
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X gitdr.io/gitdr/internal/cli.Version={{ .Version }}
+    goos: [linux] # Linux-only, by invariant
+    goarch: [amd64, arm64]
+    mod_timestamp: "{{ .CommitTimestamp }}" # reproducible builds
+
+archives:
+  - id: gitdr
+    formats: [tar.gz]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - LICENSE
+      - README.md
+
+checksum:
+  name_template: checksums.txt
+  algorithm: sha256
+
+# SBOM per archive (syft must be on PATH in CI).
+sboms:
+  - id: archive
+    artifacts: archive
+
+# Multi-arch image: one build per arch joined by a manifest. Uses Dockerfile.goreleaser
+# (slim: it copies the pre-built binary, it does not build from source).
+dockers:
+  - id: amd64
+    use: buildx
+    goos: linux
+    goarch: amd64
+    dockerfile: Dockerfile.goreleaser
+    image_templates:
+      - "ghcr.io/gitdr-io/gitdr:{{ .Version }}-amd64"
+    build_flag_templates:
+      - "--platform=linux/amd64"
+      - "--label=org.opencontainers.image.version={{ .Version }}"
+      - "--label=org.opencontainers.image.revision={{ .FullCommit }}"
+      - "--label=org.opencontainers.image.source=https://github.com/gitdr-io/gitdr"
+  - id: arm64
+    use: buildx
+    goos: linux
+    goarch: arm64
+    dockerfile: Dockerfile.goreleaser
+    image_templates:
+      - "ghcr.io/gitdr-io/gitdr:{{ .Version }}-arm64"
+    build_flag_templates:
+      - "--platform=linux/arm64"
+      - "--label=org.opencontainers.image.version={{ .Version }}"
+      - "--label=org.opencontainers.image.revision={{ .FullCommit }}"
+      - "--label=org.opencontainers.image.source=https://github.com/gitdr-io/gitdr"
+
+docker_manifests:
+  - name_template: "ghcr.io/gitdr-io/gitdr:{{ .Version }}"
+    image_templates:
+      - "ghcr.io/gitdr-io/gitdr:{{ .Version }}-amd64"
+      - "ghcr.io/gitdr-io/gitdr:{{ .Version }}-arm64"
+  - name_template: "ghcr.io/gitdr-io/gitdr:latest"
+    image_templates:
+      - "ghcr.io/gitdr-io/gitdr:{{ .Version }}-amd64"
+      - "ghcr.io/gitdr-io/gitdr:{{ .Version }}-arm64"
+
+# Keyless signature over the checksums file (which covers the archives + SBOMs).
+signs:
+  - cmd: cosign
+    certificate: "${artifact}.pem"
+    args:
+      - sign-blob
+      - "--output-certificate=${certificate}"
+      - "--output-signature=${signature}"
+      - "${artifact}"
+      - "--yes"
+    artifacts: checksum
+    output: true
+
+# Keyless signature over the published multi-arch image.
+docker_signs:
+  - cmd: cosign
+    artifacts: manifests
+    args:
+      - sign
+      - "${artifact}@${digest}"
+      - "--yes"
+
+release:
+  github:
+    owner: gitdr-io
+    name: gitdr
+  draft: false
+  prerelease: auto
