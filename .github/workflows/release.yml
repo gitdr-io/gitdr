@@ -1,0 +1,139 @@
+# Release, triggered by a v*.*.* tag (GitLab CI mirrors the tag to GitHub, which fires
+# this). GoReleaser builds the static linux binaries + multi-arch GHCR image, cosign
+# keyless-signs the checksums and the image (GitHub OIDC, no key material), and publishes
+# a GitHub Release. A second job attaches SLSA build provenance. Uses the built-in
+# GITHUB_TOKEN for GHCR and Releases, no personal access token.
+name: release
+
+on:
+  push:
+    tags: ['v*.*.*']
+
+permissions: {}
+
+jobs:
+  goreleaser:
+    name: goreleaser
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the GitHub Release
+      packages: write # push the image to GHCR
+      id-token: write # cosign keyless signing (Sigstore OIDC)
+    outputs:
+      hashes: ${{ steps.hash.outputs.hashes }}
+    steps:
+      - name: Harden the runner
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0 # full history for the changelog
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version: '1.26.4'
+          check-latest: false
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          # Pin: cosign >= 2.6 defaults to the new Sigstore bundle format, which breaks
+          # GoReleaser's --output-signature/--output-certificate sign-blob config. v2.5.3
+          # keeps the classic .sig/.pem outputs that any cosign version can verify.
+          cosign-release: 'v2.5.3'
+      - name: Install syft (SBOMs)
+        uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+      - name: Log in to GHCR
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Run GoReleaser
+        uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
+        with:
+          version: '~> v2'
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Generate SLSA subjects
+        id: hash
+        run: echo "hashes=$(base64 -w0 < dist/checksums.txt)" >> "$GITHUB_OUTPUT"
+
+  # Package the Helm chart and push it to GHCR as an OCI artifact, then cosign-sign it by
+  # digest (keyless, GitHub OIDC). Install: helm install oci://ghcr.io/gitdr-io/charts/gitdr
+  chart:
+    name: helm chart
+    needs: [goreleaser]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read # checkout
+      packages: write # push the chart to GHCR
+      id-token: write # cosign keyless
+    steps:
+      - name: Harden the runner
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Set up Helm
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          # Pin: cosign >= 2.6 defaults to the new Sigstore bundle format, which breaks
+          # GoReleaser's --output-signature/--output-certificate sign-blob config. v2.5.3
+          # keeps the classic .sig/.pem outputs that any cosign version can verify.
+          cosign-release: 'v2.5.3'
+      - name: Log in to GHCR
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Helm registry login
+        env:
+          GHCR_USER: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: printf '%s' "$GHCR_TOKEN" | helm registry login ghcr.io -u "$GHCR_USER" --password-stdin
+      - name: Package and push chart
+        id: push
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          v="${REF_NAME#v}"
+          helm package charts/gitdr --version "$v" --app-version "$v"
+          out=$(helm push "gitdr-${v}.tgz" oci://ghcr.io/gitdr-io/charts 2>&1) || { echo "$out"; exit 1; }
+          echo "$out"
+          echo "digest=$(printf '%s' "$out" | awk '/[Dd]igest:/{print $NF}')" >> "$GITHUB_OUTPUT"
+      - name: Sign chart
+        env:
+          CHART_REF: ghcr.io/gitdr-io/charts/gitdr@${{ steps.push.outputs.digest }}
+        run: cosign sign --yes "$CHART_REF"
+
+  # SLSA build provenance for the release archives. The generator reusable workflow MUST be
+  # referenced by version tag (not a SHA), it verifies its own ref, so a digest pin breaks
+  # it. This is the one intentional exception to SHA-pinning.
+  provenance:
+    name: slsa provenance
+    needs: [goreleaser]
+    # SLSA's generator refuses to run on a private repo (it would leak the repo name to the
+    # public Rekor log). Skip while private; it activates automatically once the repo is public.
+    if: github.event.repository.visibility == 'public'
+    permissions:
+      actions: read   # read the run for provenance
+      id-token: write # sign the provenance
+      contents: write # attach it to the release
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.1.0
+    with:
+      base64-subjects: ${{ needs.goreleaser.outputs.hashes }}
+      upload-assets: true
