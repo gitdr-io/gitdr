@@ -9,8 +9,11 @@ Please don't open a public issue for a security problem.
 
 Report it privately, either way works.
 
-- Email security@gitdr.io. Encrypt if you can, ask for the key first if you need it.
+- Email security@gitdr.io. Encrypt it with the key below.
 - GitHub, the repo's "Report a vulnerability" button (a private security advisory).
+
+PGP key: [`security-pgp-key.asc`](./security-pgp-key.asc)
+Fingerprint: `FE90 9F5A 371E 83DB EAC9  1C3D C860 E582 7266 289A`
 
 Include enough to reproduce it. Affected version (`gitdr version`), config with secrets
 redacted, and the impact you saw. If you have a fix in mind, mention it. Never send real
