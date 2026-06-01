@@ -112,4 +112,4 @@ AGPL-3.0. A commercial license is available if the AGPL doesn't fit, just ask.
 
 ---
 
-*gitdr is a solo project. There's no SOC2 or ISO audit for a CLI tool, no service to audit, just code you can read yourself. Found a bug or have an idea? Open an issue.*
+*gitdr is a solo project. The code is short enough to read end to end, so audit it yourself. Found a bug or have an idea? Open an issue.*
