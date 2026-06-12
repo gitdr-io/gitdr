@@ -1,7 +1,7 @@
 # Contributing
 
-Short version. gitdr is a solo project, kept small and boring on purpose. The best way to
-help is to open an issue.
+Short version. gitdr is kept small and boring on purpose. The best way to help is to
+open an issue.
 
 ## Issues welcome
 
@@ -11,9 +11,9 @@ help is to open an issue.
 
 ## Pull requests
 
-I'm not taking code contributions right now. It's a one-person project, and keeping the
-contributor surface small is part of the security story. This is a backup tool, so supply
-chain matters. No hard feelings, issues are genuinely the most useful thing you can send.
+I'm not taking code contributions right now. Keeping the contributor surface small is
+part of the security story. This is a backup tool, so supply chain matters. No hard
+feelings, issues are genuinely the most useful thing you can send.
 
 ## Building it yourself
 

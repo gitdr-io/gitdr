@@ -112,4 +112,4 @@ AGPL-3.0. A commercial license is available if the AGPL doesn't fit, just ask.
 
 ---
 
-*gitdr is a solo project. The code is short enough to read end to end, so audit it yourself. Found a bug or have an idea? Open an issue.*
+*The code is short enough to read end to end, so audit it yourself. Found a bug or have an idea? Open an issue.*
