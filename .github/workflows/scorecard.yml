@@ -10,15 +10,22 @@ on:
   push:
     branches: [main]
 
-permissions: read-all
+permissions: {}
 
 jobs:
   analysis:
     name: scorecard analysis
     runs-on: ubuntu-latest
+    # A job-level block replaces the workflow-level one, so every scope Scorecard
+    # needs is listed here. The reads are what its checks query, without them the
+    # checkout of a private repo 404s and several checks score blind.
     permissions:
       security-events: write # upload the SARIF result
       id-token: write        # publish results to the Scorecard API
+      contents: read         # checkout
+      issues: read           # maintained / code-review checks
+      pull-requests: read    # code-review check
+      checks: read           # ci-tests check
     steps:
       - name: Harden the runner
         uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
