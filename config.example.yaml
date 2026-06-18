@@ -17,7 +17,7 @@ source:
   gitlab: {}                   # token is a secret: set GITDR_GITLAB_TOKEN (read_api, read_repository)
 
 destination:
-  type: s3                     # s3 (AWS + S3-compatible) | gcs
+  type: s3                     # s3 (AWS + S3-compatible) | gcs | azure
   s3:
     bucket: "my-worm-bucket"
     region: "us-east-1"
