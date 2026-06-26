@@ -16,6 +16,12 @@
       "groupName": "go modules"
     },
     {
+      "description": "Indirect Go deps too. Renovate skips them by default, so an advisory in a transitive module sits there unnoticed even when it isn't reachable from our code.",
+      "matchManagers": ["gomod"],
+      "matchDepTypes": ["indirect"],
+      "enabled": true
+    },
+    {
       "description": "Group GitHub Actions digest bumps together.",
       "matchManagers": ["github-actions"],
       "groupName": "github actions"
