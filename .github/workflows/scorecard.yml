@@ -23,6 +23,7 @@ jobs:
       security-events: write # upload the SARIF result
       id-token: write        # publish results to the Scorecard API
       contents: read         # checkout
+      actions: read          # upload-sarif reads the run it is attaching to
       issues: read           # maintained / code-review checks
       pull-requests: read    # code-review check
       checks: read           # ci-tests check
@@ -48,6 +49,6 @@ jobs:
           path: results.sarif
           retention-days: 5
       - name: Upload to code scanning
-        uses: github/codeql-action/upload-sarif@411c4c9a36b3fca4d674f06b6396b2c6d23522c6 # v3.36.3
+        uses: github/codeql-action/upload-sarif@24ea975727876cf496b1eb0c5b36e96e01600b51 # v4.37.0
         with:
           sarif_file: results.sarif
