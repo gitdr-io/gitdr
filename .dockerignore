@@ -1,6 +1,7 @@
-.git
-.claude
-.vscode
+# The build context is Go sources and nothing else. Everything dot-prefixed (vcs, editor
+# and tool state), every build output, and anything key-shaped stays out of the context so
+# it can never end up in an image layer.
+.*
 bin
 dist
 coverage.out
@@ -8,4 +9,3 @@ coverage.out
 *.key
 *.bundle
 *.prom
-.DS_Store
