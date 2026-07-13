@@ -7,10 +7,11 @@ VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -s -w -X $(PKG)/internal/cli.Version=$(VERSION)
 
 # Tools run via pinned `go run` so they stay out of go.mod (keeps the dep graph minimal).
-GOLANGCI_VERSION ?= v2.12.2
-GOVULN_VERSION   ?= v1.3.0
+GOLANGCI_VERSION  ?= v2.12.2
+GOVULN_VERSION    ?= v1.3.0
+ACTIONLINT_VERSION ?= v1.7.9
 
-.PHONY: build build-dist test test-integration lint vuln semgrep image fmt tidy ci clean
+.PHONY: build build-dist test test-integration lint vuln actionlint semgrep image fmt tidy ci clean
 
 build:
 	CGO_ENABLED=0 $(GO) build -trimpath -ldflags '$(LDFLAGS)' -o bin/$(BINARY) $(CMD)
@@ -33,6 +34,11 @@ lint:
 vuln:
 	$(GO) run golang.org/x/vuln/cmd/govulncheck@$(GOVULN_VERSION) ./...
 
+# The mirror's workflows. A bad one only shows up as a red run on a public main, so parse
+# them here, where it costs nothing.
+actionlint:
+	$(GO) run github.com/rhysd/actionlint/cmd/actionlint@$(ACTIONLINT_VERSION) -color
+
 # SAST. Requires semgrep on PATH (pip install semgrep / brew install semgrep).
 semgrep:
 	semgrep scan --error
@@ -50,7 +56,7 @@ fmt:
 tidy:
 	$(GO) mod tidy
 
-ci: tidy fmt lint test vuln
+ci: tidy fmt lint test vuln actionlint
 
 clean:
 	rm -rf bin dist
