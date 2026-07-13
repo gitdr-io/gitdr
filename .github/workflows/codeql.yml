@@ -4,7 +4,7 @@ name: codeql
 
 on:
   push:
-    branches: [main]
+    branches: [main, 'ci/**'] # ci/** proves a workflow change green before it lands on main
   pull_request:
     branches: [main]
   schedule:
@@ -22,10 +22,20 @@ jobs:
       contents: read
       actions: read
     steps:
+      # Deny egress by default; see ci.yml. uploads.github.com is where the SARIF result goes,
+      # storage.googleapis.com is where setup-go falls back for a toolchain the runner has
+      # not cached.
       - name: Harden the runner
         uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
         with:
-          egress-policy: audit
+          egress-policy: block
+          allowed-endpoints: >
+            api.github.com:443
+            github.com:443
+            proxy.golang.org:443
+            release-assets.githubusercontent.com:443
+            storage.googleapis.com:443
+            uploads.github.com:443
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
