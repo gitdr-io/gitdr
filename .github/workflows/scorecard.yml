@@ -7,6 +7,7 @@ on:
   branch_protection_rule:
   schedule:
     - cron: '20 7 * * 2' # Tuesdays 07:20 UTC
+  workflow_dispatch: # so a run can be kicked off without inventing a commit
   push:
     branches: [main]
 

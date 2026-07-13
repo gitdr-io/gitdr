@@ -9,6 +9,7 @@ on:
     branches: [main]
   schedule:
     - cron: '27 3 * * 1' # Mondays 03:27 UTC
+  workflow_dispatch: # so a run can be kicked off without inventing a commit
 
 permissions: {}
 
