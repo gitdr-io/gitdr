@@ -4,7 +4,7 @@
 [![CodeQL](https://github.com/gitdr-io/gitdr/actions/workflows/codeql.yml/badge.svg)](https://github.com/gitdr-io/gitdr/actions/workflows/codeql.yml)
 [![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/gitdr-io/gitdr/badge)](https://scorecard.dev/viewer/?uri=github.com/gitdr-io/gitdr)
 [![SLSA 3](https://slsa.dev/images/gh-badge-level3.svg)](https://slsa.dev)
-[![License](https://img.shields.io/github/license/gitdr-io/gitdr)](./LICENSE)
+[![License](https://img.shields.io/github/license/gitdr-io/gitdr?color=blue)](./LICENSE)
 
 **Back up your whole git org to storage nobody can delete.**
 
