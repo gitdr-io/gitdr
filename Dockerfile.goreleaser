@@ -5,9 +5,9 @@
 # runtime (git + git-lfs, non-root), same hardening as ./Dockerfile, minus the build
 # stage. ./Dockerfile (multi-stage, build-from-source) stays for `make image`.
 #
-# Pin the base by @sha256 digest in release CI.
+# The base is pinned by digest; Renovate moves it when Chainguard rebuilds.
 
-FROM cgr.dev/chainguard/wolfi-base:latest
+FROM cgr.dev/chainguard/wolfi-base:latest@sha256:02dab76bd852a70556b5b2002195c8a5fdab77d323c433bf6642aab080489795
 RUN apk add --no-cache git git-lfs ca-certificates-bundle && \
     git lfs install --system
 COPY gitdr /usr/bin/gitdr
