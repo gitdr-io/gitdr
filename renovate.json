@@ -9,6 +9,7 @@
   "labels": ["dependencies"],
   "postUpdateOptions": ["gomodTidy"],
   "prConcurrentLimit": 5,
+  "minimumReleaseAge": "7 days",
   "packageRules": [
     {
       "description": "Group Go module updates together.",
