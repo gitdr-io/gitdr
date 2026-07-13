@@ -3,7 +3,7 @@
 [![CI](https://github.com/gitdr-io/gitdr/actions/workflows/ci.yml/badge.svg)](https://github.com/gitdr-io/gitdr/actions/workflows/ci.yml)
 [![CodeQL](https://github.com/gitdr-io/gitdr/actions/workflows/codeql.yml/badge.svg)](https://github.com/gitdr-io/gitdr/actions/workflows/codeql.yml)
 [![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/gitdr-io/gitdr/badge)](https://scorecard.dev/viewer/?uri=github.com/gitdr-io/gitdr)
-[![SLSA 3](https://slsa.dev/images/gh-badge-level3.svg)](https://slsa.dev)
+[![SLSA Build L2](https://slsa.dev/images/gh-badge-level2.svg)](https://slsa.dev/spec/v1.0/levels)
 [![License](https://img.shields.io/github/license/gitdr-io/gitdr?color=blue)](./LICENSE)
 
 **Back up your whole git org to storage nobody can delete.**
@@ -98,7 +98,13 @@ New here? Start with [`docs/QUICKSTART.md`](./docs/QUICKSTART.md). The artifacts
 - Static binaries on the [Releases](https://github.com/gitdr-io/gitdr/releases) page, `linux/amd64` and `linux/arm64`, with checksums and cosign signatures
 - Helm chart `oci://ghcr.io/gitdr-io/charts/gitdr`
 
-Everything ships signed with cosign (keyless) and carries an SBOM.
+Everything ships signed with cosign (keyless) and carries an SBOM. Binaries also carry build
+provenance, so you can check a download really came from this repo's release workflow before
+you trust it:
+
+```
+gh attestation verify gitdr_0.1.1_linux_amd64.tar.gz --repo gitdr-io/gitdr
+```
 
 ## Security
 

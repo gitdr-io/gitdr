@@ -1,8 +1,7 @@
-# Release, triggered by a v*.*.* tag (GitLab CI mirrors the tag to GitHub, which fires
-# this). GoReleaser builds the static linux binaries + multi-arch GHCR image, cosign
-# keyless-signs the checksums and the image (GitHub OIDC, no key material), and publishes
-# a GitHub Release. A second job attaches SLSA build provenance. Uses the built-in
-# GITHUB_TOKEN for GHCR and Releases, no personal access token.
+# Release, triggered by a v*.*.* tag. GoReleaser builds the static linux binaries +
+# multi-arch GHCR image, cosign keyless-signs the checksums and the image (GitHub OIDC, no
+# key material), publishes a GitHub Release, and attaches build provenance to the binaries.
+# Uses the built-in GITHUB_TOKEN for GHCR and Releases, no personal access token.
 name: release
 
 on:
@@ -16,12 +15,15 @@ jobs:
     name: goreleaser
     runs-on: ubuntu-latest
     permissions:
-      contents: write # create the GitHub Release
-      packages: write # push the image to GHCR
-      id-token: write # cosign keyless signing (Sigstore OIDC)
-    outputs:
-      hashes: ${{ steps.hash.outputs.hashes }}
+      contents: write      # create the GitHub Release
+      packages: write      # push the image to GHCR
+      id-token: write      # cosign keyless signing (Sigstore OIDC)
+      attestations: write  # store the build provenance
     steps:
+      # Audit, not block, and deliberately: a release reaches Sigstore, GHCR, the Go proxy,
+      # the Docker and Chainguard registries, and three tool downloads. One endpoint missing
+      # from an allowlist here means a failed release, not a caught intrusion. The read-only
+      # workflows are blocked; this one is watched, and its egress is reviewed per release.
       - name: Harden the runner
         uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
         with:
@@ -53,7 +55,7 @@ jobs:
         uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
         with:
           registry: ghcr.io
-          username: ${{ github.actor }}
+          username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
@@ -62,9 +64,14 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      - name: Generate SLSA subjects
-        id: hash
-        run: echo "hashes=$(base64 -w0 < dist/checksums.txt)" >> "$GITHUB_OUTPUT"
+      # Build provenance for every artifact in checksums.txt: what built it, from which
+      # commit, in which workflow. Signed through Sigstore and written to the public
+      # transparency log. Verify with:
+      #   gh attestation verify gitdr_0.1.0_linux_amd64.tar.gz --repo gitdr-io/gitdr
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        with:
+          subject-checksums: dist/checksums.txt
 
   # Package the Helm chart and push it to GHCR as an OCI artifact, then cosign-sign it by
   # digest (keyless, GitHub OIDC). Install: helm install oci://ghcr.io/gitdr-io/charts/gitdr
@@ -98,11 +105,11 @@ jobs:
         uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
         with:
           registry: ghcr.io
-          username: ${{ github.actor }}
+          username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Helm registry login
         env:
-          GHCR_USER: ${{ github.actor }}
+          GHCR_USER: ${{ github.repository_owner }}
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: printf '%s' "$GHCR_TOKEN" | helm registry login ghcr.io -u "$GHCR_USER" --password-stdin
       - name: Package and push chart
@@ -119,21 +126,3 @@ jobs:
         env:
           CHART_REF: ghcr.io/gitdr-io/charts/gitdr@${{ steps.push.outputs.digest }}
         run: cosign sign --yes "$CHART_REF"
-
-  # SLSA build provenance for the release archives. The generator reusable workflow MUST be
-  # referenced by version tag (not a SHA), it verifies its own ref, so a digest pin breaks
-  # it. This is the one intentional exception to SHA-pinning.
-  provenance:
-    name: slsa provenance
-    needs: [goreleaser]
-    # SLSA's generator refuses to run on a private repo (it would leak the repo name to the
-    # public Rekor log). Skip while private; it activates automatically once the repo is public.
-    if: github.event.repository.visibility == 'public'
-    permissions:
-      actions: read   # read the run for provenance
-      id-token: write # sign the provenance
-      contents: write # attach it to the release
-    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.1.0
-    with:
-      base64-subjects: ${{ needs.goreleaser.outputs.hashes }}
-      upload-assets: true
