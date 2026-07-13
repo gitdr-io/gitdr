@@ -8,6 +8,7 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch: # so a run can be kicked off without inventing a commit
 
 # Least privilege by default; the one job re-grants only read.
 permissions: {}
