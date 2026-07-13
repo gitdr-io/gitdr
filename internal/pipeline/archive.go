@@ -29,6 +29,12 @@ func writeTarFile(srcDir, dstFile string) error {
 		if err != nil {
 			return err
 		}
+		// Only directories and regular files go in. A symlink would be written with an
+		// empty link target and, on the way back out, is the one entry type that can make
+		// a later write land outside the destination.
+		if !d.IsDir() && !info.Mode().IsRegular() {
+			return nil
+		}
 		hdr, err := tar.FileInfoHeader(info, "")
 		if err != nil {
 			return err
@@ -36,12 +42,13 @@ func writeTarFile(srcDir, dstFile string) error {
 		hdr.Name = filepath.ToSlash(rel)
 		if d.IsDir() {
 			hdr.Name += "/"
+			if err := tw.WriteHeader(hdr); err != nil {
+				return err
+			}
+			return nil
 		}
 		if err := tw.WriteHeader(hdr); err != nil {
 			return err
-		}
-		if !info.Mode().IsRegular() {
-			return nil // dirs/symlinks: header only
 		}
 		src, err := os.Open(path)
 		if err != nil {
@@ -61,8 +68,12 @@ func writeTarFile(srcDir, dstFile string) error {
 	return closeErr
 }
 
-// extractTarFile extracts srcFile into destDir, refusing any entry that would escape
-// destDir (tar-slip guard).
+// extractTarFile extracts srcFile into destDir. The archive comes back from the
+// destination, which the threat model treats as hostile, and restore unpacks it into an
+// operator-supplied directory. So containment is enforced by the kernel rather than by
+// inspecting entry names: every write goes through an os.Root anchored at destDir, which
+// refuses any path resolving outside it, including through a symlink that was already
+// sitting in the destination. The name checks below are the second layer, not the only one.
 func extractTarFile(srcFile, destDir string) error {
 	f, err := os.Open(srcFile)
 	if err != nil {
@@ -72,7 +83,12 @@ func extractTarFile(srcFile, destDir string) error {
 	if err := os.MkdirAll(destDir, 0o755); err != nil {
 		return err
 	}
-	clean := filepath.Clean(destDir)
+	root, err := os.OpenRoot(destDir)
+	if err != nil {
+		return fmt.Errorf("open destination %q: %w", destDir, err)
+	}
+	defer func() { _ = root.Close() }()
+
 	tr := tar.NewReader(f)
 	for {
 		hdr, err := tr.Next()
@@ -82,20 +98,25 @@ func extractTarFile(srcFile, destDir string) error {
 		if err != nil {
 			return fmt.Errorf("tar read: %w", err)
 		}
-		target := filepath.Join(destDir, filepath.FromSlash(hdr.Name))
-		if target != clean && !strings.HasPrefix(target, clean+string(os.PathSeparator)) {
-			return fmt.Errorf("tar entry escapes destination: %q", hdr.Name)
+		name, err := tarEntryPath(hdr.Name)
+		if err != nil {
+			return err
+		}
+		if name == "." {
+			continue
 		}
 		switch hdr.Typeflag {
 		case tar.TypeDir:
-			if err := os.MkdirAll(target, 0o755); err != nil {
+			if err := root.MkdirAll(name, 0o755); err != nil {
 				return err
 			}
 		case tar.TypeReg:
-			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-				return err
+			if dir := filepath.Dir(name); dir != "." {
+				if err := root.MkdirAll(dir, 0o755); err != nil {
+					return err
+				}
 			}
-			out, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+			out, err := root.OpenFile(name, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 			if err != nil {
 				return err
 			}
@@ -110,8 +131,27 @@ func extractTarFile(srcFile, destDir string) error {
 			if err := out.Close(); err != nil {
 				return err
 			}
+		default:
+			// Fail, don't skip. A symlink or hard link entry is the one shape that can
+			// turn a later write into an escape, and writeTarFile never emits one, so an
+			// archive carrying it is not ours.
+			return fmt.Errorf("tar entry %q has unsupported type %q", hdr.Name, hdr.Typeflag)
 		}
 	}
+}
+
+// tarEntryPath turns a tar entry name into a path relative to the destination, rejecting
+// the shapes writeTarFile never produces. An absolute name would otherwise be re-rooted
+// under the destination and restore a file the backup never held.
+func tarEntryPath(raw string) (string, error) {
+	name := filepath.Clean(filepath.FromSlash(raw))
+	if filepath.IsAbs(name) {
+		return "", fmt.Errorf("tar entry is absolute: %q", raw)
+	}
+	if name == ".." || strings.HasPrefix(name, ".."+string(os.PathSeparator)) {
+		return "", fmt.Errorf("tar entry escapes destination: %q", raw)
+	}
+	return name, nil
 }
 
 // dirHasFiles reports whether dir exists and contains at least one regular file.
