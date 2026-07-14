@@ -10,6 +10,8 @@
   "postUpdateOptions": ["gomodTidy"],
   "prConcurrentLimit": 5,
   "minimumReleaseAge": "7 days",
+  "osvVulnerabilityAlerts": true,
+  "dependencyDashboardOSVVulnerabilitySummary": "unresolved",
   "packageRules": [
     {
       "description": "Group Go module updates together.",
@@ -35,6 +37,10 @@
     }
   ],
   "vulnerabilityAlerts": {
-    "labels": ["security"]
+    "enabled": true,
+    "labels": ["security"],
+    "minimumReleaseAge": null,
+    "prCreation": "immediate",
+    "schedule": []
   }
 }
