@@ -13,8 +13,8 @@ require (
 	github.com/aws/smithy-go v1.27.3
 	github.com/bradleyfalzon/ghinstallation/v2 v2.19.0
 	github.com/fsouza/fake-gcs-server v1.54.0
-	github.com/google/go-github/v88 v88.0.0
-	gitlab.com/gitlab-org/api/client-go v1.46.0
+	github.com/google/go-github/v89 v89.0.0
+	gitlab.com/gitlab-org/api/client-go/v2 v2.47.0
 	google.golang.org/api v0.287.0
 	gopkg.in/yaml.v3 v3.0.1
 )
@@ -57,6 +57,7 @@ require (
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/golang-jwt/jwt/v4 v4.5.2 // indirect
 	github.com/golang-jwt/jwt/v5 v5.3.1 // indirect
+	github.com/google/go-github/v88 v88.0.0 // indirect
 	github.com/google/go-querystring v1.2.0 // indirect
 	github.com/google/renameio/v2 v2.0.2 // indirect
 	github.com/google/s2a-go v0.1.9 // indirect

@@ -13,7 +13,7 @@ import (
 	"path"
 	"strings"
 
-	gitlab "gitlab.com/gitlab-org/api/client-go"
+	gitlab "gitlab.com/gitlab-org/api/client-go/v2"
 
 	"gitdr.io/gitdr/internal/source"
 )

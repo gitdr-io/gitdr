@@ -17,7 +17,7 @@ import (
 	"time"
 
 	ghinstallation "github.com/bradleyfalzon/ghinstallation/v2"
-	"github.com/google/go-github/v88/github"
+	"github.com/google/go-github/v89/github"
 
 	"gitdr.io/gitdr/internal/source"
 )
