@@ -1,7 +1,10 @@
 version: "2"
 
 run:
-  timeout: 5m
+  # Loading packages means type-checking every dependency, and on a cold build cache that is
+  # slow enough to blow through 5m before a single linter runs. This is a guard against a
+  # pathological hang, not a speed limit; the CI job timeout is the real bound.
+  timeout: 15m
 
 linters:
   default: standard
