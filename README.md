@@ -103,7 +103,7 @@ provenance, so you can check a download really came from this repo's release wor
 you trust it:
 
 ```
-gh attestation verify gitdr_0.1.1_linux_amd64.tar.gz --repo gitdr-io/gitdr
+gh attestation verify gitdr_*_linux_amd64.tar.gz --repo gitdr-io/gitdr
 ```
 
 ## Security
