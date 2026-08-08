@@ -15,7 +15,7 @@
 #     (tracked separately). This Dockerfile is the portable, buildable form.
 
 # ---- build: fully static gitdr binary ----
-FROM cgr.dev/chainguard/go:latest@sha256:fd4cfadccffc600948b4d9b3dedb2f447748c5743b58aa66701076a47892c289 AS build
+FROM cgr.dev/chainguard/go:latest@sha256:27d8f9caf2083b6527fa9b4c8aeaba5abfcba6af40004356b3b280ac9e0813b0 AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
