@@ -25,6 +25,13 @@
       "enabled": true
     },
     {
+      "description": "But never a MAJOR bump of an indirect dep. A major changes the import path, which only the direct dependency that pulls the module can act on; forcing it here yields a merge request that cannot compile (go.mod needs updates -mod=readonly forbids). Example: go-github and golang-jwt are pinned by ghinstallation, so their v88->v89 / v4->v5 can only move when ghinstallation does. Minor and patch indirect bumps stay enabled above, so advisories are still caught.",
+      "matchManagers": ["gomod"],
+      "matchDepTypes": ["indirect"],
+      "matchUpdateTypes": ["major"],
+      "enabled": false
+    },
+    {
       "description": "Group GitHub Actions digest bumps together.",
       "matchManagers": ["github-actions"],
       "groupName": "github actions"
