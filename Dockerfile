@@ -28,7 +28,7 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
     -o /out/gitdr ./cmd/gitdr
 
 # ---- runtime: wolfi + git + git-lfs, non-root ----
-FROM cgr.dev/chainguard/wolfi-base:latest@sha256:02dab76bd852a70556b5b2002195c8a5fdab77d323c433bf6642aab080489795
+FROM cgr.dev/chainguard/wolfi-base:latest@sha256:30f03343947c7ae3581fda727a6e2aa7b8ce7009b7bfc2ab8d5c9483ace5812f
 RUN apk add --no-cache git git-lfs ca-certificates-bundle && \
     git lfs install --system
 COPY --from=build /out/gitdr /usr/bin/gitdr
