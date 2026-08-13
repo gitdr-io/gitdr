@@ -13,7 +13,7 @@ require (
 	github.com/aws/smithy-go v1.27.6
 	github.com/bradleyfalzon/ghinstallation/v2 v2.19.0
 	github.com/fsouza/fake-gcs-server v1.55.1
-	github.com/google/go-github/v89 v89.0.0
+	github.com/google/go-github/v90 v90.0.0
 	gitlab.com/gitlab-org/api/client-go/v2 v2.55.1
 	google.golang.org/api v0.291.0
 	gopkg.in/yaml.v3 v3.0.1
