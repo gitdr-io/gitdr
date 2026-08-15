@@ -230,8 +230,9 @@ Every object is written create-only under object-lock retention.
   - `already backed up for this date` — the resume path found the artifacts already written.
   - `repository has no commits` — nothing to bundle. A repository created and never pushed to
     has no refs, and `git bundle create` refuses to write an empty bundle. Skipping it is what
-    keeps one unused project in an organisation from failing every backup of it for ever;
-    nothing is written because there is nothing to write, and nothing is lost.
+    keeps one unused project in an organisation from failing every backup of it for ever.
+    The **metadata is still stored**: a repository with no code can still carry issues, labels
+    and milestones, so such an entry has a `meta` artifact and no `bundle` or `sha256`.
 
   Neither case fails the run. Added as a field rather than as new `status` values, so a
   consumer switching on `status` is unaffected; the field is optional and absent on any repo

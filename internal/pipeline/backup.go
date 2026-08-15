@@ -271,26 +271,35 @@ func (r *backupRun) backupRepo(ctx context.Context, repo source.Repo, authHeader
 	if err != nil {
 		return fail(fmt.Errorf("check refs: %w", err))
 	}
-	if !hasRefs {
-		r.log.Info("repo skipped (no commits)", "repo", repo.Slug())
-		entry.Status = StatusSkipped
-		entry.Reason = ReasonEmpty
-		return entry
-	}
-
-	if err := r.git.BundleAll(ctx, mirror, bundlePath); err != nil {
-		return fail(err)
-	}
 
 	date := r.now().UTC().Format("2006-01-02")
 	prefix := path.Join(repo.Host, repo.Owner, repo.Name, date)
 
-	// bundle (git data); the stored SHA covers the on-disk object (ciphertext if encrypted).
-	bres, bundleSHA, err := r.putFile(ctx, path.Join(prefix, repo.Name+".bundle"), bundlePath, ret)
-	if err != nil {
-		return fail(err)
+	// No commits, so no bundle — but the metadata is still stored below. A repository with no
+	// code can still carry issues, labels and milestones, and dropping those because nobody
+	// pushed a commit would be a silent loss of exactly the kind this tool exists to prevent.
+	if !hasRefs {
+		r.log.Info("repo has no commits; storing metadata only", "repo", repo.Slug())
+		entry.Status = StatusSkipped
+		entry.Reason = ReasonEmpty
+	} else {
+		if err := r.git.BundleAll(ctx, mirror, bundlePath); err != nil {
+			return fail(err)
+		}
 	}
-	entry.Artifacts = append(entry.Artifacts, artifact("bundle", bres, bundleSHA))
+
+	// bundle (git data); the stored SHA covers the on-disk object (ciphertext if encrypted).
+	// Skipped entirely for a repository with no commits: there is no bundle, and so no sha256
+	// sidecar either, since that file describes the bundle.
+	var bundleSHA string
+	if hasRefs {
+		bres, sha, err := r.putFile(ctx, path.Join(prefix, repo.Name+".bundle"), bundlePath, ret)
+		if err != nil {
+			return fail(err)
+		}
+		bundleSHA = sha
+		entry.Artifacts = append(entry.Artifacts, artifact("bundle", bres, bundleSHA))
+	}
 
 	// per-resource metadata
 	meta, err := r.src.FetchMetadata(ctx, repo)
@@ -304,15 +313,18 @@ func (r *backupRun) backupRepo(ctx context.Context, repo source.Repo, authHeader
 	entry.Artifacts = append(entry.Artifacts, artifact("meta", mres, metaSHA))
 
 	// sha256 sidecar (sha256sum format) over the stored bundle object
-	shaLine := fmt.Sprintf("%s  %s\n", bundleSHA, repo.Name+".bundle")
-	sres, shaSHA, err := r.putBytes(ctx, path.Join(prefix, repo.Name+".sha256"), []byte(shaLine), ret)
-	if err != nil {
-		return fail(err)
+	if hasRefs {
+		shaLine := fmt.Sprintf("%s  %s\n", bundleSHA, repo.Name+".bundle")
+		sres, shaSHA, err := r.putBytes(ctx, path.Join(prefix, repo.Name+".sha256"), []byte(shaLine), ret)
+		if err != nil {
+			return fail(err)
+		}
+		entry.Artifacts = append(entry.Artifacts, artifact("sha256", sres, shaSHA))
 	}
-	entry.Artifacts = append(entry.Artifacts, artifact("sha256", sres, shaSHA))
 
 	// LFS objects (optional): fetch and store as a separate immutable tar artifact.
-	if r.cfg.Backup.LFS && gitexec.LFSAvailable() {
+	// Nothing to fetch without refs: LFS objects are pointed at by commits.
+	if hasRefs && r.cfg.Backup.LFS && gitexec.LFSAvailable() {
 		if err := r.git.LFSFetchAll(ctx, mirror, cloneURL, gitexec.Options{AuthHeader: authHeader}); err != nil {
 			return fail(fmt.Errorf("lfs fetch: %w", err))
 		}
