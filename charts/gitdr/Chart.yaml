@@ -13,3 +13,22 @@ keywords:
   - disaster-recovery
   - worm
   - immutable
+
+# Artifact Hub reads these when the chart is indexed from ghcr.io. `images` is the one that
+# matters most: it points the scanner at the published image, so the security report on the
+# listing is generated from what we actually ship rather than left blank.
+annotations:
+  artifacthub.io/license: AGPL-3.0-or-later
+  artifacthub.io/signKey: |
+    fingerprint: keyless, Sigstore
+    url: https://github.com/gitdr-io/gitdr#verifying-a-release
+  artifacthub.io/links: |
+    - name: source
+      url: https://github.com/gitdr-io/gitdr
+    - name: threat model
+      url: https://github.com/gitdr-io/gitdr/blob/main/THREAT-MODEL.md
+    - name: restore runbook
+      url: https://github.com/gitdr-io/gitdr/blob/main/RESTORE-RUNBOOK.md
+  artifacthub.io/images: |
+    - name: gitdr
+      image: ghcr.io/gitdr-io/gitdr:0.1.6

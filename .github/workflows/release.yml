@@ -167,6 +167,9 @@ jobs:
           REF_NAME: ${{ github.ref_name }}
         run: |
           v="${REF_NAME#v}"
+          # Artifact Hub scans the image named in the chart's annotations; pin it to the
+          # version being released rather than whatever was last committed.
+          sed -i "s|image: ghcr.io/gitdr-io/gitdr:.*|image: ghcr.io/gitdr-io/gitdr:$v|" charts/gitdr/Chart.yaml
           helm package charts/gitdr --version "$v" --app-version "$v"
           out=$(helm push "gitdr-${v}.tgz" oci://ghcr.io/gitdr-io/charts 2>&1) || { echo "$out"; exit 1; }
           echo "$out"
