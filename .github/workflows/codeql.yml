@@ -1,5 +1,4 @@
-# CodeQL static analysis (Go) on the GitHub mirror -> Security tab. Satisfies OpenSSF
-# Scorecard's SAST check. Actions pinned to SHAs; Renovate updates them.
+# CodeQL static analysis (Go), results to the Security tab.
 name: codeql
 
 on:

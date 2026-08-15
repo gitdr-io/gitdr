@@ -1,6 +1,4 @@
-# Dependency Review, on PRs, block newly-introduced dependencies with known vulns or
-# disallowed licenses before they merge. Satisfies OpenSSF Scorecard's Dependency-Update
-# posture alongside Renovate. Actions pinned to SHAs.
+# Blocks pull requests that introduce dependencies with known vulns or bad licenses.
 name: dependency-review
 
 on:

@@ -1,7 +1,4 @@
-# Release, triggered by a v*.*.* tag. GoReleaser builds the static linux binaries +
-# multi-arch GHCR image, cosign keyless-signs the checksums and the image (GitHub OIDC, no
-# key material), publishes a GitHub Release, and attaches build provenance to the binaries.
-# Uses the built-in GITHUB_TOKEN for GHCR and Releases, no personal access token.
+# Build, sign, attest, publish, then read it all back. Triggered by a v*.*.* tag.
 name: release
 
 on:
@@ -19,20 +16,39 @@ jobs:
       packages: write      # push the image to GHCR
       id-token: write      # cosign keyless signing (Sigstore OIDC)
       attestations: write  # store the build provenance
-      # Lets the attest action also record where the artifact is hosted and whether it is
-      # still active — the "linked artifacts" view. Separate from the attestation itself,
-      # which works without it; push-to-registry without this permission is what produced
-      # the storage-record warnings on v0.1.6.
-      artifact-metadata: write
+      artifact-metadata: write  # required by push-to-registry, else it warns and skips
     steps:
-      # Audit, not block, and deliberately: a release reaches Sigstore, GHCR, the Go proxy,
-      # the Docker and Chainguard registries, and three tool downloads. One endpoint missing
-      # from an allowlist here means a failed release, not a caught intrusion. The read-only
-      # workflows are blocked; this one is watched, and its egress is reviewed per release.
+      # Allowlist built from audited runs. A new dependency that phones somewhere new fails
+      # here, loudly, which is the point. Add the endpoint only after checking what it is.
       - name: Harden the runner
         uses: step-security/harden-runner@b09bb98e06d4d774595224525879c09bc6e98c40 # v2.20.1
         with:
-          egress-policy: audit
+          egress-policy: block
+          allowed-endpoints: >
+            *.actions.githubusercontent.com:443
+            *.blob.core.windows.net:443
+            api.github.com:443
+            github.com:443
+            objects.githubusercontent.com:443
+            raw.githubusercontent.com:443
+            release-assets.githubusercontent.com:443
+            apk.cgr.dev:443
+            auth.docker.io:443
+            cgr.dev:443
+            fulcio.sigstore.dev:443
+            get.anchore.io:443
+            ghcr.io:443
+            goreleaser.com:443
+            pkg-containers.githubusercontent.com:443
+            production.cloudfront.docker.com:443
+            proxy.golang.org:443
+            registry-1.docker.io:443
+            rekor.sigstore.dev:443
+            toolbox-data.anchore.io:443
+            tuf-repo-cdn.sigstore.dev:443
+            tuf-repo.github.com:443
+            uploads.github.com:443
+            *.r2.cloudflarestorage.com:443
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -50,9 +66,7 @@ jobs:
       - name: Install cosign
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
         with:
-          # Pin: cosign >= 2.6 defaults to the new Sigstore bundle format, which breaks
-          # GoReleaser's --output-signature/--output-certificate sign-blob config. v2.5.3
-          # keeps the classic .sig/.pem outputs that any cosign version can verify.
+          # >= 2.6 emits Sigstore bundles, which GoReleaser's sign-blob config cannot consume.
           cosign-release: 'v2.5.3'
       - name: Install syft (SBOMs)
         uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
@@ -69,27 +83,16 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Build the tag that triggered this run, not whatever `git describe` picks.
-          #
-          # When two tags sit on the same commit — a release candidate and the release that
-          # promotes it unchanged — describe chooses one of them, and it chose the candidate:
-          # the run built 0.1.6-rc.2 under the v0.1.6 tag and failed uploading assets that
-          # already existed. Silent in the worst case, since a green run would have published
-          # the wrong version.
+          # Without this, `git describe` picks a candidate tag sharing the commit and builds
+          # the wrong version under the right tag.
           GORELEASER_CURRENT_TAG: ${{ github.ref_name }}
-      # Build provenance for every artifact in checksums.txt: what built it, from which
-      # commit, in which workflow. Signed through Sigstore and written to the public
-      # transparency log. Verify with:
-      #   gh attestation verify gitdr_0.1.0_linux_amd64.tar.gz --repo gitdr-io/gitdr
+      # Verify with: gh attestation verify <tarball> --repo gitdr-io/gitdr
       - name: Attest build provenance
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-checksums: dist/checksums.txt
 
-      # The image needs its own subject. checksums.txt covers the tarballs only, so until
-      # now someone pulling the container could verify who signed it but not where it was
-      # built — a signature says "we made this", provenance says "here is the commit and
-      # the workflow run that made it". Both, or the claim is half a claim.
+      # checksums.txt covers the tarballs only; the image needs its own subject.
       - name: Read the published image digest
         id: image
         run: |
@@ -106,8 +109,7 @@ jobs:
           subject-digest: ${{ steps.image.outputs.digest }}
           push-to-registry: true
 
-  # Package the Helm chart and push it to GHCR as an OCI artifact, then cosign-sign it by
-  # digest (keyless, GitHub OIDC). Install: helm install oci://ghcr.io/gitdr-io/charts/gitdr
+  # Install: helm install oci://ghcr.io/gitdr-io/charts/gitdr
   chart:
     name: helm chart
     needs: [goreleaser]
@@ -117,12 +119,26 @@ jobs:
       packages: write # push the chart to GHCR
       id-token: write # cosign keyless
       attestations: write # store the chart's build provenance
-      artifact-metadata: write # record where the chart is hosted, see the goreleaser job
+      artifact-metadata: write
     steps:
       - name: Harden the runner
         uses: step-security/harden-runner@b09bb98e06d4d774595224525879c09bc6e98c40 # v2.20.1
         with:
-          egress-policy: audit
+          egress-policy: block
+          allowed-endpoints: >
+            *.actions.githubusercontent.com:443
+            *.blob.core.windows.net:443
+            api.github.com:443
+            github.com:443
+            objects.githubusercontent.com:443
+            raw.githubusercontent.com:443
+            release-assets.githubusercontent.com:443
+            fulcio.sigstore.dev:443
+            get.helm.sh:443
+            ghcr.io:443
+            pkg-containers.githubusercontent.com:443
+            rekor.sigstore.dev:443
+            tuf-repo-cdn.sigstore.dev:443
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -132,9 +148,7 @@ jobs:
       - name: Install cosign
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
         with:
-          # Pin: cosign >= 2.6 defaults to the new Sigstore bundle format, which breaks
-          # GoReleaser's --output-signature/--output-certificate sign-blob config. v2.5.3
-          # keeps the classic .sig/.pem outputs that any cosign version can verify.
+          # >= 2.6 emits Sigstore bundles, which GoReleaser's sign-blob config cannot consume.
           cosign-release: 'v2.5.3'
       - name: Log in to GHCR
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
@@ -168,14 +182,8 @@ jobs:
           subject-digest: ${{ steps.push.outputs.digest }}
           push-to-registry: true
 
-  # Read the release back.
-  #
-  # Everything above signs and attests; nothing above checks that it worked. That gap is how
-  # v0.1.5 shipped with a signed image carrying no provenance and nobody noticing until
-  # someone went looking by hand. It is the same failure this product exists to prevent, one
-  # layer up: a process that reports success is not evidence, the artifact is.
-  #
-  # This job fails the release if any published artifact is unsigned or unattested.
+  # Read the release back. Everything above signs and attests; this is what checks it
+  # worked. v0.1.5 shipped a signed image with no provenance because nothing did.
   verify:
     name: verify the release
     needs: [goreleaser, chart]
@@ -185,8 +193,7 @@ jobs:
       packages: read # read the image and chart from GHCR
       attestations: read # read the provenance store
     env:
-      # The identity that is allowed to have signed any of this. A signature from anything
-      # else is not a pass.
+      # The only identity allowed to have signed any of this.
       IDENTITY: https://github.com/gitdr-io/gitdr/.github/workflows/release.yml@refs/tags/${{ github.ref_name }}
       ISSUER: https://token.actions.githubusercontent.com
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -194,20 +201,27 @@ jobs:
       - name: Harden the runner
         uses: step-security/harden-runner@b09bb98e06d4d774595224525879c09bc6e98c40 # v2.20.1
         with:
-          egress-policy: audit
+          egress-policy: block
+          allowed-endpoints: >
+            *.actions.githubusercontent.com:443
+            *.blob.core.windows.net:443
+            api.github.com:443
+            github.com:443
+            objects.githubusercontent.com:443
+            raw.githubusercontent.com:443
+            release-assets.githubusercontent.com:443
+            fulcio.sigstore.dev:443
+            ghcr.io:443
+            pkg-containers.githubusercontent.com:443
+            rekor.sigstore.dev:443
+            search.sigstore.dev:443
+            tuf-repo-cdn.sigstore.dev:443
       - name: Install cosign
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
 
-      # The asset set itself, before anything is verified.
-      #
-      # tflint shipped 0.22.0 without checksums.txt.sig and broke every install script that
-      # verified before installing; the file was simply absent and nothing noticed. A missing
-      # signature is caught below by the verification failing, but an artifact that quietly
-      # stops being produced — an SBOM, an architecture — is not: there is nothing left to
-      # fail. So the expected set is asserted by name.
-      #
-      # Adding an artifact means adding it here. That is the point: the set consumers depend
-      # on should not be able to change by accident.
+      # A missing signature fails verification below. An artifact that silently stops being
+      # produced leaves nothing to fail, so the set is asserted by name. tflint shipped 0.22.0
+      # without checksums.txt.sig and broke every install script that verified first.
       - name: Every expected artifact is present
         env:
           TAG: ${{ github.ref_name }}
@@ -238,7 +252,6 @@ jobs:
             --certificate-identity "$IDENTITY" \
             --certificate-oidc-issuer "$ISSUER"
 
-          # Every line of the signed list, against the bytes actually published.
           sha256sum -c checksums.txt
 
           for f in *.tar.gz; do
@@ -246,10 +259,8 @@ jobs:
               --signer-workflow gitdr-io/gitdr/.github/workflows/release.yml
           done
 
-      # slsaprovenance1, not slsaprovenance: the bare shorthand means the SLSA v0.2 predicate,
-      # while actions/attest-build-provenance emits v1. The wrong one rejects a perfectly good
-      # attestation with "none of the attestations matched the predicate type", which is a
-      # false alarm from the very job whose purpose is to be trusted when it complains.
+      # slsaprovenance1, not slsaprovenance: the bare name means the v0.2 predicate and
+      # rejects the v1 one the attest action emits.
       - name: Image — signature and provenance
         env:
           VERSION: ${{ github.ref_name }}

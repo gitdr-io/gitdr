@@ -1,6 +1,4 @@
-# CI: build, vet, test, lint, and govulncheck on every push and pull request, so the repo
-# shows green checks + a live badge and satisfies OpenSSF Scorecard's CI-Tests check. Actions
-# are pinned to full commit SHAs (Scorecard: Pinned-Dependencies); Renovate keeps them current.
+# Build, vet, test, lint, govulncheck. The gate on every push and pull request.
 name: ci
 
 on:

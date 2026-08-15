@@ -1,6 +1,4 @@
-# OpenSSF Scorecard, supply-chain posture score, published to the Scorecard API (badge)
-# and the GitHub Security tab. Publishing requires a public repo, so results appear once
-# the mirror is public. Actions pinned to SHAs; Renovate updates them.
+# OpenSSF Scorecard, published to the Scorecard API and the Security tab.
 name: scorecard
 
 on:
