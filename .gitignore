@@ -7,5 +7,3 @@
 *.bundle
 *.env
 .DS_Store
-# browser-automation output, never part of the tree
-.playwright-mcp/
