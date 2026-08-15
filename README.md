@@ -1,3 +1,5 @@
+<img src="docs/logo.svg" alt="" width="72">
+
 # gitdr
 
 [![CI](https://github.com/gitdr-io/gitdr/actions/workflows/ci.yml/badge.svg)](https://github.com/gitdr-io/gitdr/actions/workflows/ci.yml)

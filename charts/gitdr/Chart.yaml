@@ -5,6 +5,7 @@ type: application
 version: 0.1.0
 appVersion: "0.1.0"
 home: https://gitdr.io
+icon: https://raw.githubusercontent.com/gitdr-io/gitdr/main/docs/logo.png
 sources:
   - https://github.com/gitdr-io/gitdr
 keywords:
