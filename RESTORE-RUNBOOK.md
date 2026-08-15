@@ -70,8 +70,28 @@ git fsck --full
 git for-each-ref            # all branches and tags present?
 ```
 
-LFS objects (if any) are in the run's `.lfs.tar`. Unpack and `git lfs` them back per the
-LFS docs for that repo.
+### Check the LFS files are files
+
+If the repository uses Git LFS, confirm the working tree holds real content and not pointers:
+
+```sh
+git lfs ls-files -n | while read -r f; do
+  head -c 41 "$f" | grep -q '^version https://git-lfs' && echo "STILL A POINTER: $f"
+done
+```
+
+Silence means every tracked file was materialised. A pointer file is about 130 bytes of text
+where your data should be.
+
+`gitdr restore` does this itself from v0.1.5 and fails the restore if anything is still a
+pointer. **Before v0.1.5 it did not.** A clone from a bundle carries no LFS filter
+configuration, and `git lfs checkout` exits 0 without doing anything when that configuration
+is missing — so a restore onto a fresh machine, which is the usual machine in a disaster,
+could report success over pointer files. If you restored with an earlier version, re-run the
+check above against that copy.
+
+The objects themselves were always backed up correctly; they are in the run's `.lfs.tar` and
+nothing was lost from the bucket.
 
 ## 5. Re-home to a new VCS
 
