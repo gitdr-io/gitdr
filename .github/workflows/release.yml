@@ -64,6 +64,14 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Build the tag that triggered this run, not whatever `git describe` picks.
+          #
+          # When two tags sit on the same commit — a release candidate and the release that
+          # promotes it unchanged — describe chooses one of them, and it chose the candidate:
+          # the run built 0.1.6-rc.2 under the v0.1.6 tag and failed uploading assets that
+          # already existed. Silent in the worst case, since a green run would have published
+          # the wrong version.
+          GORELEASER_CURRENT_TAG: ${{ github.ref_name }}
       # Build provenance for every artifact in checksums.txt: what built it, from which
       # commit, in which workflow. Signed through Sigstore and written to the public
       # transparency log. Verify with:
