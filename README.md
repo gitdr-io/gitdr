@@ -1,6 +1,4 @@
-<img src="docs/logo.svg" alt="" width="72">
-
-# gitdr
+<h1><img src="docs/logo.svg" alt="" width="52" align="top">&nbsp; gitdr</h1>
 
 [![CI](https://github.com/gitdr-io/gitdr/actions/workflows/ci.yml/badge.svg)](https://github.com/gitdr-io/gitdr/actions/workflows/ci.yml)
 [![CodeQL](https://github.com/gitdr-io/gitdr/actions/workflows/codeql.yml/badge.svg)](https://github.com/gitdr-io/gitdr/actions/workflows/codeql.yml)
