@@ -82,6 +82,11 @@ docker_manifests:
       - "ghcr.io/gitdr-io/gitdr:{{ .Version }}-amd64"
       - "ghcr.io/gitdr-io/gitdr:{{ .Version }}-arm64"
   - name_template: "ghcr.io/gitdr-io/gitdr:latest"
+    # auto = not created when the tag looks like a prerelease. Without it a v1.2.3-rc.1
+    # would move `latest` onto a release candidate, and everyone pulling the default tag
+    # would silently get it. The versioned manifest above still publishes, so a prerelease
+    # is installable by its own tag and verifiable like any other release.
+    skip_push: auto
     image_templates:
       - "ghcr.io/gitdr-io/gitdr:{{ .Version }}-amd64"
       - "ghcr.io/gitdr-io/gitdr:{{ .Version }}-arm64"
