@@ -73,6 +73,26 @@ jobs:
         with:
           subject-checksums: dist/checksums.txt
 
+      # The image needs its own subject. checksums.txt covers the tarballs only, so until
+      # now someone pulling the container could verify who signed it but not where it was
+      # built — a signature says "we made this", provenance says "here is the commit and
+      # the workflow run that made it". Both, or the claim is half a claim.
+      - name: Read the published image digest
+        id: image
+        run: |
+          digest=$(jq -r '[.[] | select(.type == "Docker Manifest")][0].extra.Digest' dist/artifacts.json)
+          case "$digest" in
+            sha256:*) ;;
+            *) echo "no image digest in dist/artifacts.json, refusing to attest nothing" >&2; exit 1 ;;
+          esac
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+      - name: Attest image provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ghcr.io/gitdr-io/gitdr
+          subject-digest: ${{ steps.image.outputs.digest }}
+          push-to-registry: true
+
   # Package the Helm chart and push it to GHCR as an OCI artifact, then cosign-sign it by
   # digest (keyless, GitHub OIDC). Install: helm install oci://ghcr.io/gitdr-io/charts/gitdr
   chart:
@@ -83,6 +103,7 @@ jobs:
       contents: read # checkout
       packages: write # push the chart to GHCR
       id-token: write # cosign keyless
+      attestations: write # store the chart's build provenance
     steps:
       - name: Harden the runner
         uses: step-security/harden-runner@b09bb98e06d4d774595224525879c09bc6e98c40 # v2.20.1
@@ -126,3 +147,83 @@ jobs:
         env:
           CHART_REF: ghcr.io/gitdr-io/charts/gitdr@${{ steps.push.outputs.digest }}
         run: cosign sign --yes "$CHART_REF"
+      - name: Attest chart provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ghcr.io/gitdr-io/charts/gitdr
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
+
+  # Read the release back.
+  #
+  # Everything above signs and attests; nothing above checks that it worked. That gap is how
+  # v0.1.5 shipped with a signed image carrying no provenance and nobody noticing until
+  # someone went looking by hand. It is the same failure this product exists to prevent, one
+  # layer up: a process that reports success is not evidence, the artifact is.
+  #
+  # This job fails the release if any published artifact is unsigned or unattested.
+  verify:
+    name: verify the release
+    needs: [goreleaser, chart]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read # download the release assets
+      packages: read # read the image and chart from GHCR
+      attestations: read # read the provenance store
+    env:
+      # The identity that is allowed to have signed any of this. A signature from anything
+      # else is not a pass.
+      IDENTITY: https://github.com/gitdr-io/gitdr/.github/workflows/release.yml@refs/tags/${{ github.ref_name }}
+      ISSUER: https://token.actions.githubusercontent.com
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Harden the runner
+        uses: step-security/harden-runner@b09bb98e06d4d774595224525879c09bc6e98c40 # v2.20.1
+        with:
+          egress-policy: audit
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      - name: Binaries — signature, checksums, provenance
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir dl
+          cd dl
+
+          cosign verify-blob checksums.txt \
+            --certificate checksums.txt.pem \
+            --signature checksums.txt.sig \
+            --certificate-identity "$IDENTITY" \
+            --certificate-oidc-issuer "$ISSUER"
+
+          # Every line of the signed list, against the bytes actually published.
+          sha256sum -c checksums.txt
+
+          for f in *.tar.gz; do
+            gh attestation verify "$f" --repo "$GITHUB_REPOSITORY" \
+              --signer-workflow gitdr-io/gitdr/.github/workflows/release.yml
+          done
+
+      - name: Image — signature and provenance
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          ref="ghcr.io/gitdr-io/gitdr:${VERSION#v}"
+          cosign verify "$ref" \
+            --certificate-identity "$IDENTITY" --certificate-oidc-issuer "$ISSUER" > /dev/null
+          cosign verify-attestation "$ref" --type slsaprovenance \
+            --certificate-identity "$IDENTITY" --certificate-oidc-issuer "$ISSUER" > /dev/null
+
+      - name: Chart — signature and provenance
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          ref="ghcr.io/gitdr-io/charts/gitdr:${VERSION#v}"
+          cosign verify "$ref" \
+            --certificate-identity "$IDENTITY" --certificate-oidc-issuer "$ISSUER" > /dev/null
+          cosign verify-attestation "$ref" --type slsaprovenance \
+            --certificate-identity "$IDENTITY" --certificate-oidc-issuer "$ISSUER" > /dev/null
