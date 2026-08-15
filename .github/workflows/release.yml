@@ -184,12 +184,38 @@ jobs:
       - name: Install cosign
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
 
-      - name: Binaries — signature, checksums, provenance
+      # The asset set itself, before anything is verified.
+      #
+      # tflint shipped 0.22.0 without checksums.txt.sig and broke every install script that
+      # verified before installing; the file was simply absent and nothing noticed. A missing
+      # signature is caught below by the verification failing, but an artifact that quietly
+      # stops being produced — an SBOM, an architecture — is not: there is nothing left to
+      # fail. So the expected set is asserted by name.
+      #
+      # Adding an artifact means adding it here. That is the point: the set consumers depend
+      # on should not be able to change by accident.
+      - name: Every expected artifact is present
         env:
           TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
           gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir dl
+          v="${TAG#v}"
+          missing=0
+          for f in \
+            checksums.txt checksums.txt.pem checksums.txt.sig \
+            "gitdr_${v}_linux_amd64.tar.gz" "gitdr_${v}_linux_amd64.tar.gz.sbom.json" \
+            "gitdr_${v}_linux_arm64.tar.gz" "gitdr_${v}_linux_arm64.tar.gz.sbom.json"
+          do
+            if [ ! -s "dl/$f" ]; then echo "missing from the release: $f" >&2; missing=1; fi
+          done
+          [ "$missing" = "0" ] || { echo "the published asset set changed; downstream verification would break" >&2; exit 1; }
+
+      - name: Binaries — signature, checksums, provenance
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
           cd dl
 
           cosign verify-blob checksums.txt \
