@@ -247,9 +247,23 @@ Wikis are a separate git repository and are out of scope for the metadata dump.
 
 | Command | Shape |
 |---|---|
-| `backup`  | the run-manifest above |
+| `backup`  | the run-manifest above, plus `manifestKey` |
 | `restore` | `{ "bundleKey", "sha256", "outDir", "verified" }` |
 | `verify`  | `{ "manifestKey", "signatureValid", "artifactsChecked", "artifactsOk", "failures": [...] }` |
 | `doctor`  | `{ "ok", "checks": [ { "name", "ok", "detail" } ] }` |
 
 Exit codes are fail-closed, non-zero on any failure.
+
+`backup`'s `manifestKey` is the object key the manifest was stored under, and it is the value
+`verify -manifest` expects. It is an addition to the *output*, not to the manifest: the
+manifest is signed, and a document that named its own location would need re-signing every
+time it was copied. The field sits alongside the manifest's own fields, which keep their
+place, so a reader written before this change is unaffected.
+
+Because of that split, **stdout is not the signed document**. The signature covers the
+canonical bytes in the destination, which is what `verify` fetches. Never check a signature
+against stdout.
+
+*Added after `gitdr.manifest/v2`; the manifest schema is unchanged. Before it existed there
+was no supported way to learn the key, and consumers were reading it out of the `manifest
+written` log line.*

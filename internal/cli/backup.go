@@ -94,9 +94,28 @@ func okRepoCount(m *pipeline.Manifest) int {
 	return n
 }
 
+// backupOutput is the JSON shape of a backup run: the manifest's own fields, plus the key
+// the manifest was stored under.
+//
+// The key is not part of the manifest and must not become part of it — the manifest is signed,
+// and an object cannot name its own location without changing every time it moves. But without
+// it there is no supported way to learn what to pass to `gitdr verify -manifest`, which left
+// consumers scraping it out of a log line.
+//
+// Embedded, so the manifest's fields stay at the top level in their existing order and
+// `manifestKey` is appended. Existing readers see exactly what they saw before.
+//
+// Note for anyone verifying: this is not the signed document. The signature covers the
+// canonical bytes stored in the destination, which is what `verify` fetches. Never check a
+// signature against stdout.
+type backupOutput struct {
+	*pipeline.Manifest
+	ManifestKey string `json:"manifestKey"`
+}
+
 func emitBackup(output string, res *pipeline.BackupResult) {
 	if output == "json" {
-		b, _ := json.MarshalIndent(res.Manifest, "", "  ")
+		b, _ := json.MarshalIndent(backupOutput{Manifest: res.Manifest, ManifestKey: res.ManifestKey}, "", "  ")
 		fmt.Println(string(b))
 		return
 	}
