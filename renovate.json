@@ -6,48 +6,83 @@
     ":semanticCommits",
     "helpers:pinGitHubActionDigests"
   ],
-  "labels": ["dependencies"],
-  "postUpdateOptions": ["gomodTidy"],
-  "prConcurrentLimit": 5,
+  "labels": [
+    "dependencies"
+  ],
+  "postUpdateOptions": [
+    "gomodTidy"
+  ],
+  "prConcurrentLimit": 3,
   "minimumReleaseAge": "7 days",
   "osvVulnerabilityAlerts": true,
   "dependencyDashboardOSVVulnerabilitySummary": "unresolved",
   "packageRules": [
     {
       "description": "Group Go module updates together.",
-      "matchManagers": ["gomod"],
+      "matchManagers": [
+        "gomod"
+      ],
       "groupName": "go modules"
     },
     {
       "description": "Indirect Go deps too. Renovate skips them by default, so an advisory in a transitive module sits there unnoticed even when it isn't reachable from our code.",
-      "matchManagers": ["gomod"],
-      "matchDepTypes": ["indirect"],
+      "matchManagers": [
+        "gomod"
+      ],
+      "matchDepTypes": [
+        "indirect"
+      ],
       "enabled": true
     },
     {
       "description": "But never a MAJOR bump of an indirect dep. A major changes the import path, which only the direct dependency that pulls the module can act on; forcing it here yields a merge request that cannot compile (go.mod needs updates -mod=readonly forbids). Example: go-github and golang-jwt are pinned by ghinstallation, so their v88->v89 / v4->v5 can only move when ghinstallation does. Minor and patch indirect bumps stay enabled above, so advisories are still caught.",
-      "matchManagers": ["gomod"],
-      "matchDepTypes": ["indirect"],
-      "matchUpdateTypes": ["major"],
+      "matchManagers": [
+        "gomod"
+      ],
+      "matchDepTypes": [
+        "indirect"
+      ],
+      "matchUpdateTypes": [
+        "major"
+      ],
       "enabled": false
     },
     {
       "description": "Group GitHub Actions digest bumps together.",
-      "matchManagers": ["github-actions"],
+      "matchManagers": [
+        "github-actions"
+      ],
       "groupName": "github actions"
     },
     {
       "description": "Keep the SLSA generator on a tag (it verifies its own ref; a digest pin breaks it).",
-      "matchManagers": ["github-actions"],
-      "matchDepNames": ["slsa-framework/slsa-github-generator"],
+      "matchManagers": [
+        "github-actions"
+      ],
+      "matchDepNames": [
+        "slsa-framework/slsa-github-generator"
+      ],
       "pinDigests": false
+    },
+    {
+      "description": "Group the container base images. Chainguard rebuilds :latest almost daily, and every rebuild is a new digest, so pinned bases are by far the loudest source of merge requests here. One request covering all of them is the same review with a quarter of the interruption.",
+      "matchDatasources": [
+        "docker"
+      ],
+      "groupName": "container images"
     }
   ],
   "vulnerabilityAlerts": {
     "enabled": true,
-    "labels": ["security"],
+    "labels": [
+      "security"
+    ],
     "minimumReleaseAge": null,
     "prCreation": "immediate",
     "schedule": []
-  }
+  },
+  "_comment_schedule": "Batch routine updates into one Monday morning pass instead of letting them arrive continuously. vulnerabilityAlerts above sets schedule: [] deliberately, which overrides this — a security fix is not made to wait for Monday.",
+  "schedule": [
+    "before 7am on monday"
+  ]
 }
