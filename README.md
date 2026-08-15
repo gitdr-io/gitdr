@@ -1,10 +1,15 @@
-<h1><img src="docs/logo.svg" alt="" width="52" align="top">&nbsp; gitdr</h1>
+<div align="center">
+<img src="docs/logo-mark.svg" width="140" alt="">
+
+# gitdr
 
 [![CI](https://github.com/gitdr-io/gitdr/actions/workflows/ci.yml/badge.svg)](https://github.com/gitdr-io/gitdr/actions/workflows/ci.yml)
 [![CodeQL](https://github.com/gitdr-io/gitdr/actions/workflows/codeql.yml/badge.svg)](https://github.com/gitdr-io/gitdr/actions/workflows/codeql.yml)
 [![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/gitdr-io/gitdr/badge)](https://scorecard.dev/viewer/?uri=github.com/gitdr-io/gitdr)
 [![SLSA Build L2](https://slsa.dev/images/gh-badge-level2.svg)](https://slsa.dev/spec/v1.0/levels)
 [![License](https://img.shields.io/github/license/gitdr-io/gitdr?color=blue)](./LICENSE)
+
+</div>
 
 **Back up your whole git org to storage nobody can delete.**
 
