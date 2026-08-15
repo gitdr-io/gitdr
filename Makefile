@@ -9,7 +9,7 @@ LDFLAGS := -s -w -X $(PKG)/internal/cli.Version=$(VERSION)
 # Tools run via pinned `go run` so they stay out of go.mod (keeps the dep graph minimal).
 GOLANGCI_VERSION  ?= v2.12.2
 GOVULN_VERSION    ?= v1.3.0
-ACTIONLINT_VERSION ?= v1.7.9
+ACTIONLINT_VERSION ?= v1.7.12
 
 .PHONY: build build-dist test test-integration lint vuln actionlint semgrep image fmt tidy ci clean
 

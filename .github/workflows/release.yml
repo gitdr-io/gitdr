@@ -19,6 +19,11 @@ jobs:
       packages: write      # push the image to GHCR
       id-token: write      # cosign keyless signing (Sigstore OIDC)
       attestations: write  # store the build provenance
+      # Lets the attest action also record where the artifact is hosted and whether it is
+      # still active — the "linked artifacts" view. Separate from the attestation itself,
+      # which works without it; push-to-registry without this permission is what produced
+      # the storage-record warnings on v0.1.6.
+      artifact-metadata: write
     steps:
       # Audit, not block, and deliberately: a release reaches Sigstore, GHCR, the Go proxy,
       # the Docker and Chainguard registries, and three tool downloads. One endpoint missing
@@ -112,6 +117,7 @@ jobs:
       packages: write # push the chart to GHCR
       id-token: write # cosign keyless
       attestations: write # store the chart's build provenance
+      artifact-metadata: write # record where the chart is hosted, see the goreleaser job
     steps:
       - name: Harden the runner
         uses: step-security/harden-runner@b09bb98e06d4d774595224525879c09bc6e98c40 # v2.20.1
