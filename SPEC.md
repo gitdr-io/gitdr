@@ -223,9 +223,20 @@ Every object is written create-only under object-lock retention.
 }
 ```
 
-- `status` (run-level and per-repo): `success`, `failed`, or `skipped` (skipped means
-  resume found this repo already backed up for the date).
+- `status` (run-level and per-repo): `success`, `failed`, or `skipped`.
 - `repos[].error` is present only when that repo's `status` is `failed`.
+- `repos[].reason` is present only when that repo's `status` is `skipped`, and says which of
+  two cases applies:
+  - `already backed up for this date` — the resume path found the artifacts already written.
+  - `repository has no commits` — nothing to bundle. A repository created and never pushed to
+    has no refs, and `git bundle create` refuses to write an empty bundle. Skipping it is what
+    keeps one unused project in an organisation from failing every backup of it for ever;
+    nothing is written because there is nothing to write, and nothing is lost.
+
+  Neither case fails the run. Added as a field rather than as new `status` values, so a
+  consumer switching on `status` is unaffected; the field is optional and absent on any repo
+  that was not skipped. The schema version is unchanged: `gitdr.manifest/v2` readers that
+  ignore unknown fields read these manifests correctly.
 - `artifacts[].kind`: `bundle`, `meta`, `sha256`, or `lfs`.
 - Timestamps are RFC 3339 (UTC). The manifest is signed (Ed25519) over its exact stored
   bytes. The signature is base64 in the `.sig` sidecar and verified with the public key.

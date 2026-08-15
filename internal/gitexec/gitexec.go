@@ -48,6 +48,25 @@ func (g *Git) CloneMirror(ctx context.Context, repoURL, dir string, opts Options
 	return g.run(ctx, "", cfg, "clone", "--mirror", "--quiet", "--", repoURL, dir)
 }
 
+// HasRefs reports whether repoDir contains at least one ref.
+//
+// A repository created and never pushed to has none, and `git bundle create` refuses to write
+// an empty bundle: "fatal: Refusing to create empty bundle." Without this check that refusal
+// reads as a failed repository, and one unused project in an organisation is enough to make
+// every backup of it fail for ever.
+//
+// Asked of the local mirror rather than the provider's API, because it is the state that
+// actually matters: a clone that produced no refs is what bundling has to cope with, whatever
+// the API said. `git clone --mirror` fails loudly on a partial fetch, so zero refs after a
+// successful clone means the remote genuinely has none.
+func (g *Git) HasRefs(ctx context.Context, repoDir string) (bool, error) {
+	out, err := g.output(ctx, repoDir, "for-each-ref", "--count=1", "--format=%(refname)")
+	if err != nil {
+		return false, err
+	}
+	return strings.TrimSpace(out) != "", nil
+}
+
 // BundleAll bundles every ref plus HEAD inside repoDir so `git clone <bundle>` checks
 // out the default branch on restore.
 func (g *Git) BundleAll(ctx context.Context, repoDir, bundlePath string) error {

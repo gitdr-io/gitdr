@@ -16,7 +16,13 @@ const ManifestSchema = "gitdr.manifest/v2"
 const (
 	StatusSuccess = "success"
 	StatusFailed  = "failed"
-	StatusSkipped = "skipped" // already backed up for the run date (resume)
+	StatusSkipped = "skipped" // nothing to write; see RepoEntry.Reason for which case
+
+	// The reasons a repository is skipped. Both mean "nothing was written and nothing was
+	// lost", which is why neither fails the run, but they are different facts and an operator
+	// reading a manifest is entitled to know which one applies.
+	ReasonResume = "already backed up for this date"
+	ReasonEmpty  = "repository has no commits"
 )
 
 // Manifest is the signed record of one backup run.
@@ -57,9 +63,13 @@ type DestInfo struct {
 
 // RepoEntry is the per-repository outcome.
 type RepoEntry struct {
-	Slug      string         `json:"slug"`
-	Status    string         `json:"status"` // success | failed
-	Error     string         `json:"error,omitempty"`
+	Slug   string `json:"slug"`
+	Status string `json:"status"` // success | failed | skipped
+	Error  string `json:"error,omitempty"`
+	// Why a repository was skipped, in plain words. Additive to the manifest schema rather
+	// than a new status value, because a consumer switching on `status` would break on an
+	// unknown one and there is more than one reason to skip.
+	Reason    string         `json:"reason,omitempty"`
 	Artifacts []ArtifactInfo `json:"artifacts,omitempty"`
 }
 

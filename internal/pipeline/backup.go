@@ -207,7 +207,7 @@ func (r *backupRun) fanOut(ctx context.Context, repos []source.Repo, authHeader 
 func (r *backupRun) backupOne(ctx context.Context, repo source.Repo, authHeader string, ret dest.Retention) RepoEntry {
 	if r.cfg.Backup.Resume && r.alreadyBackedUp(ctx, repo) {
 		r.log.Info("repo skipped (already backed up)", "repo", repo.Slug())
-		return RepoEntry{Slug: repo.Slug(), Status: StatusSkipped}
+		return RepoEntry{Slug: repo.Slug(), Status: StatusSkipped, Reason: ReasonResume}
 	}
 	entry := r.backupRepo(ctx, repo, authHeader, ret)
 	if entry.Status == StatusFailed {
@@ -260,6 +260,24 @@ func (r *backupRun) backupRepo(ctx context.Context, repo source.Repo, authHeader
 	}); err != nil {
 		return fail(err)
 	}
+	// A repository that was created and never pushed to has no refs, and `git bundle create`
+	// refuses to write an empty bundle. Treating that refusal as a failed repository would
+	// mean one unused project makes every backup of the organisation fail, for ever, while
+	// nothing has actually been lost: there are no commits to lose.
+	//
+	// Recorded in the manifest as skipped-with-a-reason rather than passed over silently. The
+	// repository was seen, and the run is auditable about what it did with it.
+	hasRefs, err := r.git.HasRefs(ctx, mirror)
+	if err != nil {
+		return fail(fmt.Errorf("check refs: %w", err))
+	}
+	if !hasRefs {
+		r.log.Info("repo skipped (no commits)", "repo", repo.Slug())
+		entry.Status = StatusSkipped
+		entry.Reason = ReasonEmpty
+		return entry
+	}
+
 	if err := r.git.BundleAll(ctx, mirror, bundlePath); err != nil {
 		return fail(err)
 	}
