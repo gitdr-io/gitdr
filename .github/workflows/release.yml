@@ -232,6 +232,10 @@ jobs:
               --signer-workflow gitdr-io/gitdr/.github/workflows/release.yml
           done
 
+      # slsaprovenance1, not slsaprovenance: the bare shorthand means the SLSA v0.2 predicate,
+      # while actions/attest-build-provenance emits v1. The wrong one rejects a perfectly good
+      # attestation with "none of the attestations matched the predicate type", which is a
+      # false alarm from the very job whose purpose is to be trusted when it complains.
       - name: Image — signature and provenance
         env:
           VERSION: ${{ github.ref_name }}
@@ -240,7 +244,7 @@ jobs:
           ref="ghcr.io/gitdr-io/gitdr:${VERSION#v}"
           cosign verify "$ref" \
             --certificate-identity "$IDENTITY" --certificate-oidc-issuer "$ISSUER" > /dev/null
-          cosign verify-attestation "$ref" --type slsaprovenance \
+          cosign verify-attestation "$ref" --type slsaprovenance1 \
             --certificate-identity "$IDENTITY" --certificate-oidc-issuer "$ISSUER" > /dev/null
 
       - name: Chart — signature and provenance
@@ -251,5 +255,5 @@ jobs:
           ref="ghcr.io/gitdr-io/charts/gitdr:${VERSION#v}"
           cosign verify "$ref" \
             --certificate-identity "$IDENTITY" --certificate-oidc-issuer "$ISSUER" > /dev/null
-          cosign verify-attestation "$ref" --type slsaprovenance \
+          cosign verify-attestation "$ref" --type slsaprovenance1 \
             --certificate-identity "$IDENTITY" --certificate-oidc-issuer "$ISSUER" > /dev/null
