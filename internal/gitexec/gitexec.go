@@ -7,10 +7,12 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/url"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 )
 
@@ -78,9 +80,79 @@ func (g *Git) LFSFetchAll(ctx context.Context, repoDir, repoURL string, opts Opt
 	return g.run(ctx, repoDir, cfg, "lfs", "fetch", "--all")
 }
 
+// LFSInstallLocal writes the lfs clean/smudge filters into repoDir's own config.
+//
+// A repository cloned from a bundle has no filter.lfs.* configuration, and without it
+// "git lfs checkout" exits 0 and does nothing — the working tree keeps 130-byte pointer
+// files. That makes a successful restore depend on whether the operator had already run
+// "git lfs install" on the machine, which in a disaster is exactly the machine that is new.
+//
+// --skip-repo, because a restored copy needs the filters, not the pre-push hook.
+func (g *Git) LFSInstallLocal(ctx context.Context, repoDir string) error {
+	return g.run(ctx, repoDir, nil, "lfs", "install", "--local", "--skip-repo")
+}
+
 // LFSCheckout materializes LFS files in the working tree from local objects (no network).
 func (g *Git) LFSCheckout(ctx context.Context, repoDir string) error {
 	return g.run(ctx, repoDir, nil, "lfs", "checkout")
+}
+
+// LFSPointersRemaining lists tracked paths that are still pointer files.
+//
+// Checked rather than assumed: "git lfs checkout" reports success whether or not it replaced
+// anything, so its exit code says a command ran, not that the bytes are there. This reads the
+// working tree back and is what lets restore fail instead of handing over pointers.
+func (g *Git) LFSPointersRemaining(ctx context.Context, repoDir string) ([]string, error) {
+	out, err := g.output(ctx, repoDir, "lfs", "ls-files", "--name-only")
+	if err != nil {
+		return nil, fmt.Errorf("list lfs files: %w", err)
+	}
+
+	var stillPointers []string
+	for _, name := range strings.Split(strings.TrimSpace(out), "\n") {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		// A pointer file is a few lines of text beginning with a fixed version line.
+		f, err := os.Open(filepath.Join(repoDir, name))
+		if err != nil {
+			// Not on disk at all is a different failure, and not one this check owns.
+			continue
+		}
+		head := make([]byte, len(lfsPointerMagic))
+		n, _ := io.ReadFull(f, head)
+		if cerr := f.Close(); cerr != nil {
+			return nil, fmt.Errorf("close %s: %w", name, cerr)
+		}
+		if n == len(lfsPointerMagic) && string(head) == lfsPointerMagic {
+			stillPointers = append(stillPointers, name)
+		}
+	}
+	return stillPointers, nil
+}
+
+// The first bytes of every git-lfs pointer file, per the v1 spec.
+const lfsPointerMagic = "version https://git-lfs.github.com/spec/v1"
+
+// output runs git and returns stdout. Same construction and environment as run.
+func (g *Git) output(ctx context.Context, workdir string, args ...string) (string, error) {
+	// audited: g.bin is the constant "git" and args are an argv array (no shell).
+	// nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command
+	cmd := exec.CommandContext(ctx, g.bin, args...)
+	if workdir != "" {
+		cmd.Dir = workdir
+	}
+	cmd.Env = append(baseEnv(), "GIT_TERMINAL_PROMPT=0")
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	g.logger.Debug("git", "args", args, "dir", workdir)
+	if err := cmd.Run(); err != nil {
+		return "", fmt.Errorf("git %s: %w: %s", args[0], err, strings.TrimSpace(stderr.String()))
+	}
+	return stdout.String(), nil
 }
 
 func (g *Git) run(ctx context.Context, workdir string, cfg []gitConfig, args ...string) error {

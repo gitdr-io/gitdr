@@ -115,11 +115,37 @@ func Restore(ctx context.Context, d RestoreDeps, req RestoreRequest) (*RestoreRe
 			return nil, fmt.Errorf("lfs extract: %w", err)
 		}
 		if gitexec.LFSAvailable() {
+			// The filters first. A clone from a bundle carries no filter.lfs.* config, and
+			// without it the checkout below exits 0 having done nothing — which made a
+			// successful restore depend on whether this machine had ever run
+			// "git lfs install". In a disaster it is a new machine, and it has not.
+			if err := d.Git.LFSInstallLocal(ctx, req.OutDir); err != nil {
+				return nil, fmt.Errorf("lfs install: %w", err)
+			}
 			if err := d.Git.LFSCheckout(ctx, req.OutDir); err != nil {
 				return nil, fmt.Errorf("lfs checkout: %w", err)
 			}
+
+			// Then read the working tree back rather than trusting the exit code, for the
+			// same reason the rest of this tool re-reads what it writes. Handing someone a
+			// 130-byte pointer where their file should be, and calling it a restore, is the
+			// failure this product exists to prevent.
+			remaining, err := d.Git.LFSPointersRemaining(ctx, req.OutDir)
+			if err != nil {
+				return nil, fmt.Errorf("lfs verify: %w", err)
+			}
+			if len(remaining) > 0 {
+				return nil, fmt.Errorf(
+					"lfs restore incomplete: %d file(s) are still pointers, first is %q",
+					len(remaining), remaining[0])
+			}
 		} else {
-			log.Warn("restored LFS objects, but git-lfs is not installed; working tree keeps pointer files", "out", req.OutDir)
+			// Fail closed. The objects were restored but the working tree still holds
+			// pointers, so this is a partial restore, and a warning an operator may not read
+			// is not enough to let it be reported as success.
+			return nil, fmt.Errorf(
+				"repository uses git-lfs and git-lfs is not installed: LFS objects were restored to %s but the working tree still holds pointer files",
+				req.OutDir)
 		}
 	}
 
