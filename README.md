@@ -15,7 +15,7 @@
 
 Everyone lives in git. Almost nobody backs it up. gitdr copies your entire GitHub or GitLab org into object storage you control, and it checks the bucket is write-once before it writes a thing. Deleted repo, popped account, ransomware, and your history is still sitting somewhere they can't reach.
 
-> Pre-1.0, so interfaces can still shift. The core (backup, restore, verify) is solid and runs against real S3, GCS, Azure, Backblaze B2, and Cloudflare R2. Star it to follow along.
+> Pre-1.0, so interfaces can still shift. The core (backup, restore, verify) is solid and runs against real S3, GCS, Backblaze B2, and Cloudflare R2; Azure is tested against the emulator. Star it to follow along.
 
 ## Why
 
