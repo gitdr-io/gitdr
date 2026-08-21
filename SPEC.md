@@ -143,7 +143,19 @@ only for S3-compatible providers. Scope every credential create/put-only.
 ## 7. Restore
 
 `gitdr restore` fetches a bundle, verifies its checksum, `git clone`s it, and rehydrates
-LFS. Git data restores faithfully. The metadata JSON is for audit and manual reference
+LFS. Git data restores faithfully.
+
+Two checks run, and they are not the same check:
+
+- **SHA-256 against the `.sha256` sidecar**, which the signed manifest covers. This is the
+  integrity guarantee: any changed byte fails here.
+- **`git bundle verify`**, which reads the bundle's header — format, prerequisites, refs — and
+  stops. It does not read the packfile body, so it is a structural check, not an integrity one.
+  Git also refuses to run it outside a repository, so gitdr runs it from a scratch one.
+
+The order matters: the checksum runs first, so a corrupt copy is refused before git is asked
+anything. Removing or weakening the checksum would leave only a check that does not look at
+the data. The metadata JSON is for audit and manual reference
 only. The GitHub and GitLab APIs can't recreate original issue/PR numbers, authors,
 timestamps, or cross-references. That's true of every backup tool, and it's documented for
 users so nobody is surprised.
