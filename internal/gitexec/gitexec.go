@@ -74,8 +74,30 @@ func (g *Git) BundleAll(ctx context.Context, repoDir, bundlePath string) error {
 }
 
 // BundleVerify runs `git bundle verify bundlePath`.
+//
+// From inside a scratch repository, because git refuses otherwise: "need a repository to
+// verify a bundle". Verification checks the bundle's prerequisites against a repository's
+// objects, so git wants one even when — as here — the bundle is self-contained and there is
+// nothing to check against. An empty one answers the question honestly: a bundle that records
+// a complete history verifies against it, and a truncated or corrupt one does not.
+//
+// Without this, restore failed on every bundle it was given.
 func (g *Git) BundleVerify(ctx context.Context, bundlePath string) error {
-	return g.run(ctx, "", nil, "bundle", "verify", bundlePath)
+	scratch, err := os.MkdirTemp("", "gitdr-verify-")
+	if err != nil {
+		return fmt.Errorf("scratch repo: %w", err)
+	}
+	defer func() { _ = os.RemoveAll(scratch) }()
+
+	if err := g.run(ctx, "", nil, "init", "--quiet", "--bare", scratch); err != nil {
+		return fmt.Errorf("scratch repo: %w", err)
+	}
+	// Absolute, because the command runs with the scratch repo as its working directory.
+	abs, err := filepath.Abs(bundlePath)
+	if err != nil {
+		return fmt.Errorf("bundle path: %w", err)
+	}
+	return g.run(ctx, scratch, nil, "bundle", "verify", abs)
 }
 
 // CloneFromBundle restores a repo by cloning from a bundle file.

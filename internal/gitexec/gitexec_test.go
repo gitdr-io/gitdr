@@ -152,3 +152,111 @@ func splitLines(s string) []string {
 	}
 	return out
 }
+
+func TestBundleVerify(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is not installed")
+	}
+	ctx := context.Background()
+	g := New(nil)
+
+	// A real bundle of a real repository.
+	work := t.TempDir()
+	git(t, work, "init", "--quiet", work)
+	if err := os.WriteFile(filepath.Join(work, "a.txt"), []byte("hello"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	git(t, work, "add", "a.txt")
+	git(t, work, "commit", "--quiet", "-m", "first")
+
+	bundle := filepath.Join(t.TempDir(), "t.bundle")
+	if err := g.BundleAll(ctx, work, bundle); err != nil {
+		t.Fatalf("bundle: %v", err)
+	}
+
+	t.Run("verifies a good bundle from outside any repository", func(t *testing.T) {
+		// The case that was broken: git refuses with "need a repository to verify a bundle"
+		// unless it is run inside one, and restore runs nowhere near a repository — it is in
+		// the business of creating one. Every restore failed on this, which for a backup tool
+		// is the worst possible thing to have untested.
+		if err := g.BundleVerify(ctx, bundle); err != nil {
+			t.Fatalf("BundleVerify on a good bundle: %v", err)
+		}
+	})
+
+	t.Run("verifies from a working directory that is not a repository", func(t *testing.T) {
+		// Belt and braces: the caller's cwd must not matter either.
+		dir := t.TempDir()
+		old, err := os.Getwd()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chdir(dir); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chdir(old) })
+
+		if err := g.BundleVerify(ctx, bundle); err != nil {
+			t.Fatalf("BundleVerify from a non-repository cwd: %v", err)
+		}
+	})
+
+	t.Run("refuses a structurally damaged bundle", func(t *testing.T) {
+		// What `git bundle verify` actually checks is the header: the format signature, the
+		// prerequisites and the refs. Damage there is caught.
+		bad := filepath.Join(t.TempDir(), "bad.bundle")
+		data, err := os.ReadFile(bundle)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i := 0; i < 32 && i < len(data); i++ {
+			data[i] ^= 0xff
+		}
+		if err := os.WriteFile(bad, data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := g.BundleVerify(ctx, bad); err == nil {
+			t.Error("accepted a bundle with a damaged header")
+		}
+	})
+
+	t.Run("does not notice damage inside the packfile", func(t *testing.T) {
+		// Written down because it is surprising and load-bearing. `git bundle verify` reads the
+		// header and stops; flipping bytes in the middle of the pack passes. So this call is a
+		// structural check, not an integrity check, and the name promises more than it delivers.
+		//
+		// Integrity is the SHA-256 the restore path compares against the sidecar before it gets
+		// here, and that sidecar is covered by the manifest signature. If that check is ever
+		// removed or made conditional, this test is the reason not to.
+		bad := filepath.Join(t.TempDir(), "middle.bundle")
+		data, err := os.ReadFile(bundle)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i := len(data) / 2; i < len(data)/2+64 && i < len(data); i++ {
+			data[i] ^= 0xff
+		}
+		if err := os.WriteFile(bad, data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := g.BundleVerify(ctx, bad); err != nil {
+			t.Skip("this git does check the pack body; the checksum still owns integrity")
+		}
+	})
+
+	t.Run("refuses a file that is not a bundle", func(t *testing.T) {
+		notBundle := filepath.Join(t.TempDir(), "nope.bundle")
+		if err := os.WriteFile(notBundle, []byte("this is not a bundle"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := g.BundleVerify(ctx, notBundle); err == nil {
+			t.Error("accepted a file that is not a bundle")
+		}
+	})
+
+	t.Run("refuses a bundle that does not exist", func(t *testing.T) {
+		if err := g.BundleVerify(ctx, filepath.Join(t.TempDir(), "missing.bundle")); err == nil {
+			t.Error("accepted a missing bundle")
+		}
+	})
+}
