@@ -81,8 +81,10 @@
     "prCreation": "immediate",
     "schedule": []
   },
-  "_comment_schedule": "Batch routine updates into one Monday morning pass instead of letting them arrive continuously. vulnerabilityAlerts above sets schedule: [] deliberately, which overrides this — a security fix is not made to wait for Monday.",
   "schedule": [
     "before 7am on monday"
+  ],
+  "description": [
+    "Batch routine updates into one Monday morning pass instead of letting them arrive continuously. vulnerabilityAlerts above sets schedule: [] deliberately, which overrides this \u2014 a security fix is not made to wait for Monday."
   ]
 }
