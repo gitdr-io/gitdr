@@ -123,6 +123,17 @@ func fixedClock() func() time.Time {
 }
 
 func TestBackupVerifyRestore(t *testing.T) {
+	// Run from a directory that is not a git repository.
+	//
+	// This is the reason a broken restore shipped in every release. `git bundle verify` refuses
+	// to run outside a repository, and gitdr called it with no working directory — which means
+	// the process's own. Go tests run in the package directory, which is inside this repository,
+	// so the check quietly succeeded here and failed everywhere gitdr actually runs: a container
+	// whose working directory is /.
+	//
+	// A test that passes because of where it happens to be standing is not testing the thing.
+	t.Chdir(t.TempDir())
+
 	ctx := context.Background()
 	repoDir := initFixtureRepo(t)
 	src := &fixtureSource{repos: []source.Repo{{
@@ -341,6 +352,17 @@ func TestFanOutAndResume(t *testing.T) {
 }
 
 func TestEncryptedBackupRestore(t *testing.T) {
+	// Run from a directory that is not a git repository.
+	//
+	// This is the reason a broken restore shipped in every release. `git bundle verify` refuses
+	// to run outside a repository, and gitdr called it with no working directory — which means
+	// the process's own. Go tests run in the package directory, which is inside this repository,
+	// so the check quietly succeeded here and failed everywhere gitdr actually runs: a container
+	// whose working directory is /.
+	//
+	// A test that passes because of where it happens to be standing is not testing the thing.
+	t.Chdir(t.TempDir())
+
 	ctx := context.Background()
 	repoDir := initFixtureRepo(t)
 	src := &fixtureSource{repos: []source.Repo{{
