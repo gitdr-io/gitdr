@@ -22,6 +22,22 @@ linters:
           msg: "storage is create-only; object deletion is forbidden (invariant #3)"
         - pattern: 'DeleteBucket\('
           msg: "storage is create-only; bucket deletion is forbidden (invariant #3)"
+        # Every backend, not only S3. The list used to name the two AWS calls, which meant
+        # the invariant held automatically on one destination and by reviewer attention on the
+        # other two — and attention is exactly what this linter exists to replace.
+        - pattern: 'DeleteBlob\w*\('
+          msg: "storage is create-only; Azure blob deletion is forbidden (invariant #3)"
+        - pattern: 'DeleteContainer\('
+          msg: "storage is create-only; Azure container deletion is forbidden (invariant #3)"
+        - pattern: 'AbortMultipartUpload\('
+          msg: "no multipart path exists; adding one is a deliberate review, not a side effect (invariant #3)"
+        # Deletion is not the only way to lose a backup.
+        - pattern: 'PutBucketLifecycleConfiguration\('
+          msg: "a lifecycle rule deletes on a timer; retention belongs to the bucket owner (invariant #3)"
+        - pattern: 'PutObjectRetention\('
+          msg: "retention is written once at PutObject; changing it later can shorten a GOVERNANCE lock (invariant #3)"
+        - pattern: 'PutObjectLegalHold\('
+          msg: "gitdr never sets or clears a legal hold; that is the bucket owner's decision (invariant #3)"
   exclusions:
     generated: lax
     rules:
