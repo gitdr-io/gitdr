@@ -36,6 +36,8 @@ jobs:
             storage.googleapis.com:443
             sum.golang.org:443
             vuln.go.dev:443
+            mcr.microsoft.com:443
+            *.data.mcr.microsoft.com:443
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -51,7 +53,23 @@ jobs:
         run: go vet ./...
       - name: build
         run: go build -mod=readonly ./...
+      # The Azure destination tests fail rather than skip when CI is set, so the emulator
+      # has to be running here. Same image digest the tests were proven against. The image's
+      # default command lacks --skipApiVersionCheck, and the SDK speaks a newer API version
+      # than Azurite knows, so without the flag every request is a 400. The readiness loop
+      # accepts any HTTP response; a 400 from an unauthenticated probe still means "up".
+      - name: Start Azurite
+        run: |
+          docker run -d --name azurite -p 10000:10000 \
+            mcr.microsoft.com/azure-storage/azurite@sha256:76b8127d608fab8287a14a4bfeb9a5502cdcffb4bf1e86f09f324ebb0e70edba \
+            azurite-blob --blobHost 0.0.0.0 --skipApiVersionCheck
+          for _ in $(seq 1 30); do
+            curl -s -o /dev/null http://127.0.0.1:10000/devstoreaccount1 && break
+            sleep 1
+          done
       - name: test
+        env:
+          AZURITE_BLOB_ENDPOINT: http://127.0.0.1:10000
         run: go test -mod=readonly ./...
       - name: lint
         run: make lint
