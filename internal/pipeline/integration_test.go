@@ -7,9 +7,11 @@
 package pipeline_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
@@ -23,6 +25,7 @@ import (
 
 	"gitdr.io/gitdr/internal/config"
 	"gitdr.io/gitdr/internal/crypto"
+	"gitdr.io/gitdr/internal/dest"
 	s3backend "gitdr.io/gitdr/internal/dest/s3"
 	"gitdr.io/gitdr/internal/gitexec"
 	"gitdr.io/gitdr/internal/pipeline"
@@ -30,16 +33,7 @@ import (
 )
 
 func TestMinIOFullLoop(t *testing.T) {
-	endpoint := os.Getenv("GITDR_TEST_S3_ENDPOINT")
-	if endpoint == "" {
-		// In CI this must run, not skip. A skipped Go test prints nothing and the package
-		// still reports ok, so a missing MinIO would look exactly like a passing full loop
-		// -- and this is the loop the whole product is.
-		if os.Getenv("CI") != "" {
-			t.Fatal("GITDR_TEST_S3_ENDPOINT is not set; in CI the full backup/verify/restore loop must run, not skip")
-		}
-		t.Skip("set GITDR_TEST_S3_ENDPOINT (and AWS_* creds) to run the MinIO integration test")
-	}
+	endpoint := s3Endpoint(t)
 	bucket := envOr("GITDR_TEST_S3_BUCKET", "gitdr-itest")
 	region := envOr("AWS_REGION", "us-east-1")
 	ctx := context.Background()
@@ -160,4 +154,66 @@ func envOr(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// s3Endpoint locates the object-lock S3 to test against, or skips.
+//
+// In CI it fails instead of skipping. A skipped Go test prints nothing and the package
+// still reports ok, so a missing MinIO would look exactly like a passing full loop -- and
+// this is the loop the whole product is.
+func s3Endpoint(t *testing.T) string {
+	t.Helper()
+	endpoint := os.Getenv("GITDR_TEST_S3_ENDPOINT")
+	if endpoint == "" {
+		if os.Getenv("CI") != "" {
+			t.Fatal("GITDR_TEST_S3_ENDPOINT is not set; in CI the full backup/verify/restore loop must run, not skip")
+		}
+		t.Skip("set GITDR_TEST_S3_ENDPOINT (and AWS_* creds) to run the MinIO integration test")
+	}
+	return endpoint
+}
+
+// TestS3CreateOnly proves the S3 destination refuses to overwrite.
+//
+// This is invariant three -- backups are append-only by construction -- on the backend most
+// people actually use: AWS, and every S3-compatible store behind it. Nothing proved it. The
+// custom endpoint here selects the portable HeadObject path, which is the one Backblaze B2,
+// Cloudflare R2 and Wasabi take; real AWS uses If-None-Match instead.
+func TestS3CreateOnly(t *testing.T) {
+	endpoint := s3Endpoint(t)
+	bucket := envOr("GITDR_TEST_S3_BUCKET", "gitdr-itest")
+	region := envOr("AWS_REGION", "us-east-1")
+	ctx := context.Background()
+
+	provisionLockedBucket(ctx, t, endpoint, region, bucket)
+	dst, err := s3backend.New(ctx, s3backend.Options{
+		Bucket: bucket, Region: region, Endpoint: endpoint, UsePathStyle: true,
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Unique per run: the destination has no delete path, so a fixed key would pass once
+	// and fail on its own leftovers ever after.
+	key := fmt.Sprintf("github.com/octo/immutable/%d.bundle", time.Now().UnixNano())
+	first := []byte("the original bundle")
+	if _, err := dst.PutImmutable(ctx, key, bytes.NewReader(first), int64(len(first)), dest.Retention{}); err != nil {
+		t.Fatalf("first put: %v", err)
+	}
+
+	second := []byte("an attacker's replacement")
+	if _, err := dst.PutImmutable(ctx, key, bytes.NewReader(second), int64(len(second)), dest.Retention{}); err == nil {
+		t.Fatal("second put to the same key succeeded; the destination is not create-only")
+	}
+
+	// Refusing is only half of it. What is stored must still be the original.
+	rc, err := dst.Get(ctx, key)
+	if err != nil {
+		t.Fatalf("get after refused overwrite: %v", err)
+	}
+	got, _ := io.ReadAll(rc)
+	_ = rc.Close()
+	if !bytes.Equal(got, first) {
+		t.Fatalf("stored bytes changed after a refused overwrite: got %q want %q", got, first)
+	}
 }
