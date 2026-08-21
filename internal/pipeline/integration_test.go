@@ -1,7 +1,8 @@
 //go:build integration
 
 // Full backup -> verify -> restore loop against a real Object-Lock S3 (MinIO in CI).
-// Skipped unless GITDR_TEST_S3_ENDPOINT is set. The test provisions the locked bucket
+// Needs the `integration` build tag and GITDR_TEST_S3_ENDPOINT; run it with
+// `make test-integration`. The test provisions the locked bucket
 // directly via the SDK, the tool itself never creates or deletes buckets.
 package pipeline_test
 
@@ -31,11 +32,24 @@ import (
 func TestMinIOFullLoop(t *testing.T) {
 	endpoint := os.Getenv("GITDR_TEST_S3_ENDPOINT")
 	if endpoint == "" {
+		// In CI this must run, not skip. A skipped Go test prints nothing and the package
+		// still reports ok, so a missing MinIO would look exactly like a passing full loop
+		// -- and this is the loop the whole product is.
+		if os.Getenv("CI") != "" {
+			t.Fatal("GITDR_TEST_S3_ENDPOINT is not set; in CI the full backup/verify/restore loop must run, not skip")
+		}
 		t.Skip("set GITDR_TEST_S3_ENDPOINT (and AWS_* creds) to run the MinIO integration test")
 	}
 	bucket := envOr("GITDR_TEST_S3_BUCKET", "gitdr-itest")
 	region := envOr("AWS_REGION", "us-east-1")
 	ctx := context.Background()
+
+	// Run from somewhere that is not a git repository. Go tests run in the package
+	// directory, which is inside this repository, so anything the restore path shells out
+	// to inherits a valid repo it will not have in production -- the container runs at /.
+	// That is exactly how a broken `git bundle verify` passed its tests and shipped in
+	// every release.
+	t.Chdir(t.TempDir())
 
 	provisionLockedBucket(ctx, t, endpoint, region, bucket)
 

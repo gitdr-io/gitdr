@@ -14,10 +14,17 @@ import (
 	"gitdr.io/gitdr/internal/source"
 )
 
-// Exercises the LFS path end to end. Requires git-lfs, so it skips locally and runs
-// in CI (where git-lfs is installed).
+// Exercises the LFS path end to end.
+//
+// Requires git-lfs. It skips when the binary is absent, but not in CI: the container gitdr
+// ships includes git-lfs, so this is a supported feature, and for its whole life this test
+// skipped silently in CI because the Go image has no git-lfs. The package still reported
+// ok, which is indistinguishable from the feature working.
 func TestLFSBackupRestore(t *testing.T) {
 	if !gitexec.LFSAvailable() {
+		if os.Getenv("CI") != "" {
+			t.Fatal("git-lfs is not installed; in CI the LFS path must be exercised, not skipped")
+		}
 		t.Skip("git-lfs not installed")
 	}
 	ctx := context.Background()
