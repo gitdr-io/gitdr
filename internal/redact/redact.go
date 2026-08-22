@@ -4,7 +4,12 @@
 // the secret. Call Reveal only at the exact point the secret is used.
 package redact
 
-import "log/slog"
+import (
+	"fmt"
+	"io"
+	"log/slog"
+	"strconv"
+)
 
 // Placeholder is what a redacted secret renders as in any output.
 const Placeholder = "[REDACTED]"
@@ -14,6 +19,22 @@ type Secret string
 
 func (s Secret) String() string   { return Placeholder }
 func (s Secret) GoString() string { return Placeholder }
+
+// Format implements fmt.Formatter so every verb renders the placeholder. Without it, a
+// mismatched verb such as %d takes fmt's bad-verb path, which deliberately suppresses
+// String (to avoid recursing while erroring) and prints the raw underlying value — so
+// one wrong verb in an error wrap printed the secret. Found by FuzzSecretNeverLeaks.
+//
+// The residual gap: %p applied to a Secret value (not a *Secret) is special-cased by
+// fmt before any interface lookup, still reaches the bad-verb path, and no method can
+// intercept it. vet is silent too, because a Formatter is assumed to handle any verb.
+func (s Secret) Format(f fmt.State, verb rune) {
+	if verb == 'q' {
+		_, _ = io.WriteString(f, strconv.Quote(Placeholder))
+		return
+	}
+	_, _ = io.WriteString(f, Placeholder)
+}
 
 // LogValue implements slog.LogValuer so structured logs never capture the secret.
 func (s Secret) LogValue() slog.Value { return slog.StringValue(Placeholder) }

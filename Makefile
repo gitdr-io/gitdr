@@ -11,7 +11,7 @@ GOLANGCI_VERSION  ?= v2.12.2
 GOVULN_VERSION    ?= v1.3.0
 ACTIONLINT_VERSION ?= v1.7.12
 
-.PHONY: build build-dist test test-integration test-ci lint vuln actionlint semgrep image fmt tidy ci clean
+.PHONY: build build-dist test test-integration test-ci fuzz lint vuln actionlint semgrep image fmt tidy ci clean
 
 build:
 	CGO_ENABLED=0 $(GO) build -trimpath -ldflags '$(LDFLAGS)' -o bin/$(BINARY) $(CMD)
@@ -45,6 +45,24 @@ test-ci:
 	  grep -- '--- SKIP' $$log; rm -f $$log; exit 1; \
 	fi; \
 	rm -f $$log
+
+# Timed fuzzing of every Fuzz target. The seed corpora already run as ordinary tests
+# in `make test`, and that is the CI gate; this is the longer exploratory run, one
+# target at a time because `go test -fuzz` accepts a single target per invocation.
+#
+# The minimization budget defaults to 60s PER INPUT, so on a short window every worker
+# sits in minimization and the run reports ~0 execs/sec while doing nothing useful.
+# Bound it well below FUZZTIME.
+FUZZTIME         ?= 30s
+FUZZMINIMIZETIME ?= 2s
+FUZZFLAGS := -run '^$$' -fuzztime $(FUZZTIME) -fuzzminimizetime $(FUZZMINIMIZETIME)
+fuzz:
+	$(GO) test $(FUZZFLAGS) -fuzz '^FuzzVerifyManifest$$' ./internal/pipeline
+	$(GO) test $(FUZZFLAGS) -fuzz '^FuzzExtractTar$$' ./internal/pipeline
+	$(GO) test $(FUZZFLAGS) -fuzz '^FuzzDecrypt$$' ./internal/crypto
+	$(GO) test $(FUZZFLAGS) -fuzz '^FuzzParseKeys$$' ./internal/crypto
+	$(GO) test $(FUZZFLAGS) -fuzz '^FuzzSecretNeverLeaks$$' ./internal/redact
+	$(GO) test $(FUZZFLAGS) -fuzz '^FuzzConfigLoad$$' ./internal/config
 
 lint:
 	$(GO) run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_VERSION) run
