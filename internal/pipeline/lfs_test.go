@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"gitdr.io/gitdr/internal/crypto"
@@ -61,10 +62,14 @@ func TestLFSBackupRestore(t *testing.T) {
 	}
 
 	out := filepath.Join(t.TempDir(), "restored")
-	if _, err := pipeline.Restore(ctx, pipeline.RestoreDeps{Dest: md, Git: gitexec.New(nil)}, pipeline.RestoreRequest{
+	rres, err := pipeline.Restore(ctx, pipeline.RestoreDeps{Dest: md, Git: gitexec.New(nil), PublicKey: pub}, pipeline.RestoreRequest{
 		Host: "github.com", Owner: "octo", Name: "lfsrepo", Date: "2026-06-13", OutDir: out,
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatalf("restore: %v", err)
+	}
+	if !strings.Contains(rres.Verification, "bundle and lfs tar verified") {
+		t.Fatalf("Verification = %q, want bundle and lfs tar verified", rres.Verification)
 	}
 	got, err := os.ReadFile(filepath.Join(out, "big.bin"))
 	if err != nil {

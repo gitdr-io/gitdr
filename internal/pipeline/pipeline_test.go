@@ -184,9 +184,9 @@ func TestBackupVerifyRestore(t *testing.T) {
 		t.Fatalf("artifacts ok %d/%d, want 3/3", vres.ArtifactsOK, vres.ArtifactsChecked)
 	}
 
-	// restore
+	// restore, with the public key so it verifies against the signed manifest
 	outDir := filepath.Join(t.TempDir(), "restored")
-	rres, err := pipeline.Restore(ctx, pipeline.RestoreDeps{Dest: md, Git: gitexec.New(nil)}, pipeline.RestoreRequest{
+	rres, err := pipeline.Restore(ctx, pipeline.RestoreDeps{Dest: md, Git: gitexec.New(nil), PublicKey: pub}, pipeline.RestoreRequest{
 		Host: "github.com", Owner: "octo", Name: "hello", Date: "2026-06-13", OutDir: outDir,
 	})
 	if err != nil {
@@ -194,6 +194,9 @@ func TestBackupVerifyRestore(t *testing.T) {
 	}
 	if !rres.Verified {
 		t.Fatal("restore not verified")
+	}
+	if !strings.Contains(rres.Verification, "signed manifest") {
+		t.Fatalf("Verification = %q, want the signed manifest used", rres.Verification)
 	}
 	if _, err := os.Stat(filepath.Join(outDir, "README.md")); err != nil {
 		t.Fatalf("restored repo missing README.md: %v", err)
@@ -398,7 +401,7 @@ func TestEncryptedBackupRestore(t *testing.T) {
 	}
 
 	out := filepath.Join(t.TempDir(), "restored")
-	if _, err := pipeline.Restore(ctx, pipeline.RestoreDeps{Dest: md, Git: gitexec.New(nil), EncryptionKey: encKey}, pipeline.RestoreRequest{
+	if _, err := pipeline.Restore(ctx, pipeline.RestoreDeps{Dest: md, Git: gitexec.New(nil), EncryptionKey: encKey, PublicKey: pub}, pipeline.RestoreRequest{
 		Host: "github.com", Owner: "octo", Name: "hello", Date: "2026-06-13", OutDir: out,
 	}); err != nil {
 		t.Fatalf("restore: %v", err)
@@ -416,7 +419,7 @@ func TestEncryptedBackupRestore(t *testing.T) {
 	if _, err := rand.Read(wrong); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := pipeline.Restore(ctx, pipeline.RestoreDeps{Dest: md, Git: gitexec.New(nil), EncryptionKey: wrong}, pipeline.RestoreRequest{
+	if _, err := pipeline.Restore(ctx, pipeline.RestoreDeps{Dest: md, Git: gitexec.New(nil), EncryptionKey: wrong, PublicKey: pub}, pipeline.RestoreRequest{
 		Host: "github.com", Owner: "octo", Name: "hello", Date: "2026-06-13", OutDir: filepath.Join(t.TempDir(), "wrong"),
 	}); err == nil {
 		t.Fatal("restore with the wrong key should fail")
@@ -424,7 +427,7 @@ func TestEncryptedBackupRestore(t *testing.T) {
 
 	// no key at all on encrypted data must fail early with a clear message, not a
 	// confusing checksum mismatch against unreadable ciphertext.
-	_, err = pipeline.Restore(ctx, pipeline.RestoreDeps{Dest: md, Git: gitexec.New(nil)}, pipeline.RestoreRequest{
+	_, err = pipeline.Restore(ctx, pipeline.RestoreDeps{Dest: md, Git: gitexec.New(nil), PublicKey: pub}, pipeline.RestoreRequest{
 		Host: "github.com", Owner: "octo", Name: "hello", Date: "2026-06-13", OutDir: filepath.Join(t.TempDir(), "nokey"),
 	})
 	if err == nil {

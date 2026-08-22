@@ -140,6 +140,16 @@ func extractTarFile(srcFile, destDir string) error {
 	}
 }
 
+// maxTarEntryDepth bounds how many path components a tar entry may have. Every
+// operation on an os.Root re-resolves its whole path, so extraction cost grows
+// superlinearly with depth: a 6 KiB archive naming one 1600-deep entry took about
+// sixteen seconds, and a 1 MB PAX name would hold a restore for hours. The archive only
+// ever carries git-lfs object storage, whose deepest real path is
+// objects/<2 hex>/<2 hex>/<oid>, four components, with tmp and incomplete siblings no
+// deeper. 32 is eight times that, room for git-lfs to grow, and still far below
+// anything that crawls.
+const maxTarEntryDepth = 32
+
 // tarEntryPath turns a tar entry name into a path relative to the destination, rejecting
 // the shapes writeTarFile never produces. An absolute name would otherwise be re-rooted
 // under the destination and restore a file the backup never held.
@@ -150,6 +160,14 @@ func tarEntryPath(raw string) (string, error) {
 	}
 	if name == ".." || strings.HasPrefix(name, ".."+string(os.PathSeparator)) {
 		return "", fmt.Errorf("tar entry escapes destination: %q", raw)
+	}
+	if depth := strings.Count(name, string(os.PathSeparator)) + 1; depth > maxTarEntryDepth {
+		// Refused, not truncated or skipped: an entry this deep is not a git-lfs store.
+		disp := raw
+		if len(disp) > 100 {
+			disp = disp[:100] + "..."
+		}
+		return "", fmt.Errorf("tar entry is %d path components deep, more than the %d a gitdr archive can hold: %q", depth, maxTarEntryDepth, disp)
 	}
 	return name, nil
 }

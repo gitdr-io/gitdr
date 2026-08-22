@@ -14,6 +14,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -87,7 +88,7 @@ func TestMinIOFullLoop(t *testing.T) {
 	}
 
 	out := filepath.Join(t.TempDir(), "restored")
-	rres, err := pipeline.Restore(ctx, pipeline.RestoreDeps{Dest: dst, Git: gitexec.New(nil)}, pipeline.RestoreRequest{
+	rres, err := pipeline.Restore(ctx, pipeline.RestoreDeps{Dest: dst, Git: gitexec.New(nil), PublicKey: pub}, pipeline.RestoreRequest{
 		Host: repo.Host, Owner: repo.Owner, Name: repo.Name,
 		Date: time.Now().UTC().Format("2006-01-02"), OutDir: out,
 	})
@@ -96,6 +97,9 @@ func TestMinIOFullLoop(t *testing.T) {
 	}
 	if !rres.Verified {
 		t.Fatal("restore not verified")
+	}
+	if !strings.Contains(rres.Verification, "signed manifest") {
+		t.Fatalf("Verification = %q, want the signed manifest used", rres.Verification)
 	}
 	if _, err := os.Stat(filepath.Join(out, "README.md")); err != nil {
 		t.Fatalf("restored repo missing README.md: %v", err)

@@ -2,12 +2,14 @@ package cli
 
 import (
 	"context"
+	"crypto/ed25519"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
 	"strings"
 
+	"gitdr.io/gitdr/internal/crypto"
 	"gitdr.io/gitdr/internal/gitexec"
 	"gitdr.io/gitdr/internal/pipeline"
 )
@@ -50,7 +52,24 @@ func runRestore(ctx context.Context, args []string) int {
 		log.Error("encryption key", "err", err)
 		return 1
 	}
-	res, err := pipeline.Restore(ctx, pipeline.RestoreDeps{Dest: dst, Git: gitexec.New(log), EncryptionKey: encKey, Logger: log}, pipeline.RestoreRequest{
+	// The public key is optional here, unlike verify: a config without one must keep
+	// restoring. When a path is configured it is resolved exactly the way verify
+	// resolves it, and any problem with it is a failure, not a quiet fall back to an
+	// unverified restore.
+	var pub ed25519.PublicKey
+	if strings.TrimSpace(cfg.Manifest.PublicKeyPath) != "" {
+		pubPEM, err := cfg.ResolveManifestPublicKey()
+		if err != nil {
+			log.Error("public key", "err", err)
+			return 1
+		}
+		pub, err = crypto.ParsePublicKey(pubPEM)
+		if err != nil {
+			log.Error("public key", "err", err)
+			return 1
+		}
+	}
+	res, err := pipeline.Restore(ctx, pipeline.RestoreDeps{Dest: dst, Git: gitexec.New(log), EncryptionKey: encKey, PublicKey: pub, Logger: log}, pipeline.RestoreRequest{
 		Host: *host, Owner: owner, Name: name, Date: *date, OutDir: *out,
 	})
 	if err != nil {
@@ -61,7 +80,8 @@ func runRestore(ctx context.Context, args []string) int {
 		b, _ := json.MarshalIndent(res, "", "  ")
 		fmt.Println(string(b))
 	} else {
-		fmt.Printf("restored %s -> %s (verified, sha256 %s)\n", res.BundleKey, res.OutDir, res.SHA256[:12])
+		fmt.Printf("restored %s -> %s (sha256 %s)\n", res.BundleKey, res.OutDir, res.SHA256[:12])
+		fmt.Println(res.Verification)
 	}
 	return 0
 }

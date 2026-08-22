@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // writeHostileTar builds a tar carrying exactly the entries given, bypassing writeTarFile,
@@ -190,5 +191,78 @@ func TestWriteTarFileSkipsSymlinks(t *testing.T) {
 		if hdr.Typeflag != tar.TypeReg && hdr.Typeflag != tar.TypeDir {
 			t.Fatalf("archive carries a %q entry (%s), want only files and dirs", hdr.Typeflag, hdr.Name)
 		}
+	}
+}
+
+// Depth is bounded because every os.Root operation re-resolves its whole path, so a
+// hostile entry deep enough turns extraction from slow into stuck (issue #51: 1600
+// components cost ~16s; a 1 MB PAX name would cost hours). git-lfs object storage is
+// four components deep, so nothing real gets near the bound.
+func TestExtractTarFileBoundsEntryDepth(t *testing.T) {
+	reg := func(name string) []tar.Header {
+		return []tar.Header{{Name: name, Typeflag: tar.TypeReg, Size: 2, Mode: 0o644, Format: tar.FormatPAX}}
+	}
+	tests := []struct {
+		name    string
+		entries []tar.Header
+		wantErr bool
+	}{
+		{
+			name:    "at the bound",
+			entries: reg(strings.Repeat("d/", maxTarEntryDepth-1) + "leaf"),
+		},
+		{
+			name:    "one past the bound",
+			entries: reg(strings.Repeat("d/", maxTarEntryDepth) + "leaf"),
+			wantErr: true,
+		},
+		{
+			name: "directory one past the bound",
+			entries: []tar.Header{{
+				Name: strings.Repeat("d/", maxTarEntryDepth) + "deep/", Typeflag: tar.TypeDir, Mode: 0o755, Format: tar.FormatPAX,
+			}},
+			wantErr: true,
+		},
+		{
+			name:    "the depth that crawled",
+			entries: reg(strings.Repeat("d/", 1600) + "leaf"),
+			wantErr: true,
+		},
+		{
+			name:    "real git-lfs shape",
+			entries: reg("objects/aa/bb/aabbccddeeff"),
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			src := filepath.Join(dir, "in.tar")
+			dest := filepath.Join(dir, "out")
+			writeHostileTar(t, src, tc.entries)
+
+			start := time.Now()
+			err := extractTarFile(src, dest)
+			if elapsed := time.Since(start); elapsed > 5*time.Second {
+				t.Errorf("extraction took %s; the depth bound exists so this stays fast", elapsed)
+			}
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("extractTarFile accepted a too-deep entry, want an error")
+				}
+				if !strings.Contains(err.Error(), "deep") {
+					t.Fatalf("error should say the entry is too deep, got: %v", err)
+				}
+				// Refused means refused: nothing of the entry may have been written.
+				entries, readErr := os.ReadDir(dest)
+				if readErr == nil && len(entries) != 0 {
+					t.Fatalf("a refused entry left %d path(s) in the destination", len(entries))
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("extractTarFile refused an in-bounds entry: %v", err)
+			}
+		})
 	}
 }
