@@ -15,7 +15,7 @@
 #     (tracked separately). This Dockerfile is the portable, buildable form.
 
 # ---- build: fully static gitdr binary ----
-FROM cgr.dev/chainguard/go:latest@sha256:df8461e6e02c47841f2ebb72510d363ca29d7f84df50916b7829eaacae39dfcf AS build
+FROM cgr.dev/chainguard/go:latest@sha256:d54b1367a7096e816d3629e74f6bcb0dc3f789936e677041fafbee9ab37350fe AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
@@ -28,7 +28,7 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
     -o /out/gitdr ./cmd/gitdr
 
 # ---- runtime: wolfi + git + git-lfs, non-root ----
-FROM cgr.dev/chainguard/wolfi-base:latest@sha256:0a8fd427de5882aed77471b0a432c3675eda6b6a0ae952b5d640b46da628cdbe
+FROM cgr.dev/chainguard/wolfi-base:latest@sha256:a31344ab2cb8618db84f535eec56f76f6178b142cb92cb2e48676cc2dcebea72
 RUN apk add --no-cache git git-lfs ca-certificates-bundle && \
     git lfs install --system
 COPY --from=build /out/gitdr /usr/bin/gitdr
