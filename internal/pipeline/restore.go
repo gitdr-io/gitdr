@@ -55,6 +55,12 @@ type RestoreResult struct {
 	// the --output json shape is a versioned public contract (SPEC §11), and widening
 	// it is its own change, made on purpose, not as a side effect of a read-side fix.
 	Verification string `json:"-"`
+	// Refs is the proof that the restore reproduced the history the bundle declares:
+	// how many refs the bundle's own header carries and how many of them the restored
+	// repository has at the same object. Out of the JSON for the same reason as
+	// Verification — the shape is a versioned contract, and putting this on it is a
+	// separate, deliberate change.
+	Refs RefComparison `json:"-"`
 }
 
 // Restore fetches a bundle, verifies its checksum against the stored sidecar (and,
@@ -134,6 +140,20 @@ func Restore(ctx context.Context, d RestoreDeps, req RestoreRequest) (*RestoreRe
 	}
 	if err := d.Git.CloneFromBundle(ctx, bundlePath, req.OutDir); err != nil {
 		return nil, fmt.Errorf("clone from bundle: %w", err)
+	}
+
+	// The restore proof, run before anything else looks at the working tree: every ref the
+	// bundle declares must be present in what was just cloned, at the same object. Git is
+	// content-addressed, so that is exact equality of the history, not a sample of it. If
+	// the history is wrong nothing after this matters, so it fails here.
+	refs, err := CompareRestoredRefs(ctx, d.Git, bundlePath, req.OutDir)
+	if err != nil {
+		return nil, fmt.Errorf("compare refs: %w", err)
+	}
+	if !refs.OK() {
+		return nil, fmt.Errorf(
+			"restored repository does not match the history %s declares: %d of %d refs present at the same commit, %d differ, first is %s",
+			bundleKey, refs.Matched, refs.Declared, len(refs.Mismatches), refs.Mismatches[0])
 	}
 
 	// LFS: if a tar artifact exists for this date, restore the objects and check out.
@@ -216,24 +236,32 @@ func Restore(ctx context.Context, d RestoreDeps, req RestoreRequest) (*RestoreRe
 		}
 	}
 
-	res := &RestoreResult{BundleKey: bundleKey, SHA256: gotSHA, OutDir: req.OutDir, Verified: true}
+	res := &RestoreResult{BundleKey: bundleKey, SHA256: gotSHA, OutDir: req.OutDir, Verified: true, Refs: refs}
 	// Never claim more verification than happened. The restore that could not check
 	// against the signed manifest says so, in the result and in the log.
+	var integrity string
 	switch {
 	case checks != nil && lfsStored:
-		res.Verification = "bundle and lfs tar verified against the signed manifest"
+		integrity = "bundle and lfs tar verified against the signed manifest"
 	case checks != nil:
-		res.Verification = "bundle verified against the signed manifest"
+		integrity = "bundle verified against the signed manifest"
 	case lfsStored:
-		res.Verification = "bundle checked against its unsigned sha256 sidecar, lfs tar not checked; no public key configured, so the signed manifest was not used"
+		integrity = "bundle checked against its unsigned sha256 sidecar, lfs tar not checked; no public key configured, so the signed manifest was not used"
 	default:
-		res.Verification = "bundle checked against its unsigned sha256 sidecar; no public key configured, so the signed manifest was not used"
+		integrity = "bundle checked against its unsigned sha256 sidecar; no public key configured, so the signed manifest was not used"
 	}
+	// Two different claims, kept apart on purpose. The first is about the bytes: whether
+	// the stored bundle is the one the signed manifest records. The second is about the
+	// history: whether the repository on disk carries every ref that bundle declares. The
+	// ref comparison runs either way, so with no key it is still a real proof — of the
+	// restore against an unauthenticated bundle, which is what its wording says.
+	res.Verification = integrity + "; " + refs.Summary(checks != nil)
 	if checks == nil {
 		log.Warn("restore was not verified against the signed manifest; set manifest.publicKeyPath to verify restores",
 			"checked", res.Verification)
 	}
-	log.Info("restored", "bundle", bundleKey, "out", req.OutDir, "verification", res.Verification)
+	log.Info("restored", "bundle", bundleKey, "out", req.OutDir,
+		"refsDeclared", refs.Declared, "refsMatched", refs.Matched, "verification", res.Verification)
 	return res, nil
 }
 

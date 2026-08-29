@@ -81,6 +81,11 @@ func runRestore(ctx context.Context, args []string) int {
 		fmt.Println(string(b))
 	} else {
 		fmt.Printf("restored %s -> %s (sha256 %s)\n", res.BundleKey, res.OutDir, res.SHA256[:12])
+		// The counts on their own line, because this is the line that goes into an audit
+		// file. SOC 2 A1.3.2, CIS 11.5, ISO 27001 A.8.13 and NIS2 (EU) 2024/2690 4.2.3 all
+		// want a tested restore with a documented result, and "8 of 8 refs" is that result.
+		fmt.Printf("refs: %d of %d declared by the bundle present at the same commit\n",
+			res.Refs.Matched, res.Refs.Declared)
 		fmt.Println(res.Verification)
 	}
 	return 0

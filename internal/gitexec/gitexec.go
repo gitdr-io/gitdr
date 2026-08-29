@@ -73,36 +73,207 @@ func (g *Git) BundleAll(ctx context.Context, repoDir, bundlePath string) error {
 	return g.run(ctx, repoDir, nil, "bundle", "create", bundlePath, "--all", "HEAD")
 }
 
-// BundleVerify runs `git bundle verify bundlePath`.
+// scratchBundleRepo creates an empty repository to read a bundle from, and returns it with
+// an absolute path to the bundle and a cleanup function.
 //
-// From inside a scratch repository, because git refuses otherwise: "need a repository to
-// verify a bundle". Verification checks the bundle's prerequisites against a repository's
-// objects, so git wants one even when — as here — the bundle is self-contained and there is
-// nothing to check against. An empty one answers the question honestly: a bundle that records
-// a complete history verifies against it, and a truncated or corrupt one does not.
+// `git bundle verify` refuses to run outside a repository — "need a repository to verify a
+// bundle" — because it checks the bundle's prerequisites against an object store, and wants
+// one even when, as here, the bundle is self-contained and there is nothing to check
+// against. Calling it with no working directory, and so with the process's own, is the bug
+// that broke every restore gitdr shipped before v0.1.11: the tests ran inside this
+// repository and passed, the container runs at / and failed.
 //
-// Without this, restore failed on every bundle it was given.
-func (g *Git) BundleVerify(ctx context.Context, bundlePath string) error {
-	scratch, err := os.MkdirTemp("", "gitdr-verify-")
+// `git bundle list-heads` does not need a repository. It reads the header and never touches
+// the object store; checked against git 2.32, 2.36, 2.45, 2.54 and 2.55, and against
+// builtin/bundle.c, where the have_repository guard is on verify alone. It is routed through
+// here anyway so that reading a bundle has one rule rather than two. The cost is a temporary
+// directory and a `git init --bare`; the alternative is a restore path whose correctness
+// depends on which subcommand happens to require setup_git_directory, re-established by hand
+// on every git upgrade.
+//
+// The bundle path is made absolute because these commands run with the scratch repository as
+// their working directory, where a relative path would resolve somewhere else entirely.
+func (g *Git) scratchBundleRepo(ctx context.Context, bundlePath string) (dir, abs string, cleanup func(), err error) {
+	scratch, err := os.MkdirTemp("", "gitdr-bundle-")
 	if err != nil {
-		return fmt.Errorf("scratch repo: %w", err)
+		return "", "", nil, fmt.Errorf("scratch repo: %w", err)
 	}
-	defer func() { _ = os.RemoveAll(scratch) }()
-
+	cleanup = func() { _ = os.RemoveAll(scratch) }
 	if err := g.run(ctx, "", nil, "init", "--quiet", "--bare", scratch); err != nil {
-		return fmt.Errorf("scratch repo: %w", err)
+		cleanup()
+		return "", "", nil, fmt.Errorf("scratch repo: %w", err)
 	}
-	// Absolute, because the command runs with the scratch repo as its working directory.
-	abs, err := filepath.Abs(bundlePath)
+	abs, err = filepath.Abs(bundlePath)
 	if err != nil {
-		return fmt.Errorf("bundle path: %w", err)
+		cleanup()
+		return "", "", nil, fmt.Errorf("bundle path: %w", err)
 	}
+	return scratch, abs, cleanup, nil
+}
+
+// BundleVerify runs `git bundle verify bundlePath` from a scratch repository.
+//
+// It reads the bundle's header — format, prerequisites, refs — and stops, so it is a
+// structural check and not an integrity one. Integrity is the SHA-256 the restore path
+// compares against the sidecar and the signed manifest before git is asked anything.
+func (g *Git) BundleVerify(ctx context.Context, bundlePath string) error {
+	scratch, abs, cleanup, err := g.scratchBundleRepo(ctx, bundlePath)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
 	return g.run(ctx, scratch, nil, "bundle", "verify", abs)
 }
 
+// BundleRef is one entry from a bundle's header: a name the bundle declares and the object
+// it points at.
+type BundleRef struct {
+	// Name is a full ref name such as "refs/heads/main" or "refs/tags/v1", or the literal
+	// "HEAD". A bundle written with `bundle create --all HEAD` carries a HEAD entry, which
+	// is not a ref any repository stores under refs/; callers normalise it.
+	Name string
+	// OID is the object the bundle declares for Name, exactly as recorded. For an annotated
+	// tag this is the tag object, not the commit it peels to.
+	OID string
+}
+
+// BundleHeads returns the ref-to-object map the bundle itself declares.
+//
+// This is the other half of the restore proof. The signed manifest fixes the bundle's bytes;
+// this says which refs those bytes claim to carry. Because git is content-addressed, a
+// commit id transitively covers its tree, its blobs and its whole ancestry, so comparing
+// these against the refs a restored repository actually has is not a sample of the history,
+// it is exact equality of it.
+func (g *Git) BundleHeads(ctx context.Context, bundlePath string) ([]BundleRef, error) {
+	scratch, abs, cleanup, err := g.scratchBundleRepo(ctx, bundlePath)
+	if err != nil {
+		return nil, err
+	}
+	defer cleanup()
+
+	out, err := g.output(ctx, scratch, "bundle", "list-heads", abs)
+	if err != nil {
+		return nil, fmt.Errorf("list bundle heads: %w", err)
+	}
+	return parseBundleHeads(out)
+}
+
+// parseBundleHeads reads `git bundle list-heads` output: one "<oid> <name>" per line.
+//
+// A line it cannot read is an error rather than a line to skip. Skipping would drop a ref
+// from the declared set, and a ref that is never declared is a ref the comparison can never
+// find missing — silently narrowing the proof to whatever happened to parse.
+func parseBundleHeads(out string) ([]BundleRef, error) {
+	var refs []BundleRef
+	for _, line := range strings.Split(out, "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		oid, name, err := parseOIDName(line)
+		if err != nil {
+			return nil, fmt.Errorf("unreadable bundle header line: %w", err)
+		}
+		refs = append(refs, BundleRef{Name: name, OID: oid})
+	}
+	return refs, nil
+}
+
+// parseOIDName splits one "<oid> <name>" line, as both `bundle list-heads` and the
+// for-each-ref format below produce.
+//
+// Exactly two fields, because a ref name can hold neither whitespace nor a control character
+// — git check-ref-format forbids both — so a third field means the line is not the line it
+// was taken for. Splitting on the first space alone would turn "aa11 refs/heads/main junk"
+// into a ref named "refs/heads/main junk", inventing a ref that no repository can have and
+// then reporting it missing.
+//
+// Control characters are refused for a second reason: these names are printed to a terminal
+// and put into error messages, and with no public key configured the bundle they came from
+// is unauthenticated. An escape sequence in a ref name is a way to write on top of the line
+// that says how many refs matched.
+func parseOIDName(line string) (oid, name string, err error) {
+	fields := strings.Fields(line)
+	if len(fields) != 2 {
+		return "", "", fmt.Errorf("want %q, got %d fields in %q", "<oid> <ref>", len(fields), line)
+	}
+	oid, name = fields[0], fields[1]
+	if !isHex(oid) {
+		return "", "", fmt.Errorf("object id %q is not hexadecimal", oid)
+	}
+	for _, r := range name {
+		if r < 0x20 || r == 0x7f {
+			return "", "", fmt.Errorf("ref name %q contains a control character", name)
+		}
+	}
+	return oid, name, nil
+}
+
+// isHex reports whether s is a plausible object id: non-empty and hex throughout. Length is
+// not pinned, so sha256-object-format repositories are read the same way.
+func isHex(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		switch {
+		case r >= '0' && r <= '9', r >= 'a' && r <= 'f', r >= 'A' && r <= 'F':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// ListRefs returns every ref in repoDir mapped to the object it points at.
+//
+// %(objectname) is the ref's own target and not the peeled one. A bundle header records an
+// annotated tag as its tag object, so the two compare directly; peeling here
+// (%(*objectname)) would compare a tag against the commit under it and accept a repository
+// whose tag object had been replaced with a different one over the same commit.
+func (g *Git) ListRefs(ctx context.Context, repoDir string) (map[string]string, error) {
+	out, err := g.output(ctx, repoDir, "for-each-ref", "--format=%(objectname) %(refname)")
+	if err != nil {
+		return nil, fmt.Errorf("list refs: %w", err)
+	}
+	refs := make(map[string]string)
+	for _, line := range strings.Split(out, "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		oid, name, err := parseOIDName(line)
+		if err != nil {
+			return nil, fmt.Errorf("unreadable ref line: %w", err)
+		}
+		refs[name] = oid
+	}
+	return refs, nil
+}
+
+// HeadOID resolves repoDir's HEAD to the object it points at. It fails on an unborn HEAD,
+// which for a repository cloned from a non-empty bundle cannot happen.
+func (g *Git) HeadOID(ctx context.Context, repoDir string) (string, error) {
+	out, err := g.output(ctx, repoDir, "rev-parse", "--verify", "HEAD")
+	if err != nil {
+		return "", fmt.Errorf("resolve HEAD: %w", err)
+	}
+	oid := strings.TrimSpace(out)
+	if !isHex(oid) {
+		return "", fmt.Errorf("unreadable HEAD %q", oid)
+	}
+	return oid, nil
+}
+
 // CloneFromBundle restores a repo by cloning from a bundle file.
+//
+// --origin is pinned rather than left to default. `clone.defaultRemoteName` in an operator's
+// ~/.gitconfig renames the remote, and with it the whole refs/remotes/<name>/* namespace that
+// a clone files every branch under. That would make the shape of a restore depend on the
+// machine it ran on, and the ref comparison — which looks for a declared branch under
+// refs/heads/X or refs/remotes/origin/X — report a perfectly good restore as missing every
+// branch but one. Same reasoning as the local LFS filters: in a disaster the machine is new,
+// and a restore must not depend on how it happens to be configured.
 func (g *Git) CloneFromBundle(ctx context.Context, bundlePath, dir string) error {
-	return g.run(ctx, "", nil, "clone", "--quiet", "--", bundlePath, dir)
+	return g.run(ctx, "", nil, "clone", "--quiet", "--origin", "origin", "--", bundlePath, dir)
 }
 
 // LFSAvailable reports whether the git-lfs binary is installed.

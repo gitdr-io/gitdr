@@ -1,6 +1,7 @@
 package pipeline_test
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"encoding/json"
@@ -135,6 +136,34 @@ func dropKeys(substr string) func(*testing.T, *restoreFixture) {
 	}
 }
 
+// replaceWithEmptyBundle swaps the stored bundle for one whose header declares no refs and
+// rewrites the sha256 sidecar to match, which is the same rewrite-both attack as
+// rewriteBundleAndSidecar and just as available to anyone who can write a non-WORM bucket.
+//
+// It is the nastiest shape this restore path can be handed, because every check that came
+// before it says yes. The sidecar matches, `git bundle verify` calls it "okay" and reports
+// "a complete history" of zero refs, and `git clone` exits 0 and produces an empty
+// repository. Without the declared-nothing guard, gitdr hands the operator an empty
+// directory and calls the restore verified.
+func replaceWithEmptyBundle(t *testing.T, f *restoreFixture) {
+	t.Helper()
+	for k, v := range f.md.objs {
+		if !strings.HasSuffix(k, ".bundle") {
+			continue
+		}
+		i := bytes.Index(v, []byte("\n\n")) // end of the bundle header
+		if i < 0 {
+			t.Fatal("no header terminator in the stored bundle")
+		}
+		empty := append([]byte("# v2 git bundle\n\n"), v[i+2:]...)
+		f.md.objs[k] = empty
+		shaKey := strings.TrimSuffix(k, ".bundle") + ".sha256"
+		f.md.objs[shaKey] = []byte(fmt.Sprintf("%s  %s\n", crypto.SHA256Bytes(empty), f.name+".bundle"))
+		return
+	}
+	t.Fatal("no bundle stored")
+}
+
 // plantLfsTar stores an LFS tar the manifest never recorded.
 func plantLfsTar(t *testing.T, f *restoreFixture) {
 	t.Helper()
@@ -217,6 +246,14 @@ func TestRestoreManifestVerification(t *testing.T) {
 			mutate:  dropKeys(".lfs.tar"),
 			wantErr: "does not have it",
 		},
+		{
+			// No key, which is the default, so the signed manifest is not there to catch
+			// this and the ref comparison is the only thing standing between the operator
+			// and an empty directory reported as a verified restore.
+			name:    "a bundle declaring no refs is refused rather than restored empty",
+			mutate:  replaceWithEmptyBundle,
+			wantErr: "declares no refs",
+		},
 	}
 
 	for _, tc := range tests {
@@ -256,6 +293,18 @@ func TestRestoreManifestVerification(t *testing.T) {
 			}
 			if !strings.Contains(res.Verification, tc.wantSay) {
 				t.Fatalf("Verification = %q, want it to contain %q", res.Verification, tc.wantSay)
+			}
+			// Every successful restore carries the ref proof, whatever else it checked.
+			// A restore that reported nothing here would be one where the comparison
+			// silently did not run.
+			if res.Refs.Declared == 0 {
+				t.Fatal("restore reported no declared refs; the comparison did not run")
+			}
+			if res.Refs.Matched != res.Refs.Declared {
+				t.Fatalf("refs matched %d of %d: %v", res.Refs.Matched, res.Refs.Declared, res.Refs.Mismatches)
+			}
+			if !strings.Contains(res.Verification, "present in the restored repository") {
+				t.Fatalf("Verification = %q, want it to state the ref comparison", res.Verification)
 			}
 		})
 	}
@@ -319,5 +368,69 @@ func TestRestorePicksTheManifestThatRecordsTheBundle(t *testing.T) {
 	}
 	if !strings.Contains(res.Verification, "signed manifest") {
 		t.Fatalf("Verification = %q, want the signed manifest used", res.Verification)
+	}
+}
+
+// The two claims a restore makes are different claims, and the wording has to keep them
+// apart. The ref comparison runs with or without a key, so a restore with no key really has
+// proved that the repository matches the bundle -- but the bundle is then an unauthenticated
+// document, and a sentence that stopped at "all refs present" would read exactly like a
+// restore that had checked the signature.
+func TestRestoreSaysWhatTheRefProofRestsOn(t *testing.T) {
+	t.Chdir(t.TempDir())
+	ctx := context.Background()
+
+	tests := []struct {
+		name        string
+		key         bool
+		wantContain []string
+		wantAbsent  []string
+	}{
+		{
+			name: "with a public key the bundle is the signed one",
+			key:  true,
+			wantContain: []string{
+				"bundle verified against the signed manifest",
+				"refs the signed bundle declares are present in the restored repository",
+			},
+			wantAbsent: []string{"the bundle itself was not verified"},
+		},
+		{
+			name: "without a public key the refs are compared against an unverified bundle",
+			key:  false,
+			wantContain: []string{
+				"unsigned sha256 sidecar",
+				"refs the bundle declares are present in the restored repository",
+				"the bundle itself was not verified against a signed manifest",
+			},
+			wantAbsent: []string{"the signed bundle"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			f := backupForRestore(t, false)
+			deps := pipeline.RestoreDeps{Dest: f.md, Git: gitexec.New(nil)}
+			if tc.key {
+				deps.PublicKey = f.pub
+			}
+			res, err := pipeline.Restore(ctx, deps, pipeline.RestoreRequest{
+				Host: "github.com", Owner: "octo", Name: f.name, Date: "2026-06-13",
+				OutDir: filepath.Join(t.TempDir(), "restored"),
+			})
+			if err != nil {
+				t.Fatalf("restore: %v", err)
+			}
+			for _, want := range tc.wantContain {
+				if !strings.Contains(res.Verification, want) {
+					t.Errorf("Verification %q does not contain %q", res.Verification, want)
+				}
+			}
+			for _, no := range tc.wantAbsent {
+				if strings.Contains(res.Verification, no) {
+					t.Errorf("Verification %q must not contain %q", res.Verification, no)
+				}
+			}
+		})
 	}
 }

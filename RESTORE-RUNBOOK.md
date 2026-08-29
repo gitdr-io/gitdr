@@ -58,10 +58,35 @@ gitdr restore --config config.yaml \
   --out ./restore/api
 ```
 
-gitdr downloads the bundle, re-checks its checksum, runs `git bundle verify`, and clones
-it into `--out`. If encryption was used, set `GITDR_ENCRYPTION_KEY` first.
+gitdr downloads the bundle, re-checks its checksum, runs `git bundle verify`, clones it into
+`--out`, and then compares the refs of what it just cloned against the ref-to-commit map the
+bundle itself declares. If encryption was used, set `GITDR_ENCRYPTION_KEY` first.
+
+That last check is the one to keep. It prints a line like:
+
+```
+refs: 8 of 8 declared by the bundle present at the same commit
+```
+
+Because git is content-addressed, a matching commit id covers that commit's tree, its files
+and its entire ancestry. So this line is not a spot check, it is the statement that the
+restored history is the backed-up history. A ref that is missing or points somewhere else
+fails the command with a non-zero exit and names the first one that differs, so a restore that
+did not reproduce the repository cannot be mistaken for one that did.
+
+If the counts differ, gitdr says which refs it could not account for. Refs outside
+`refs/heads/*` and tags — `refs/notes/*`, `refs/merge-requests/*`, `refs/keep-around/*` — are
+reported separately and are not a failure: `git clone` does not create them, so their objects
+are restored with nothing pointing at them. To get them back, fetch them from the bundle by
+name.
+
+Keep the output. SOC 2 A1.3.2, CIS v8.1 11.5, ISO 27001 A.8.13, CSA CCM BCR-08 and NIS2
+implementing regulation (EU) 2024/2690 Annex 4.2.3 and 4.2.6 all want a tested restore with a
+documented result, and this is that result without a screenshot.
 
 ## 4. Sanity-check the restored repo
+
+gitdr has already compared every ref against the bundle. This is the independent look.
 
 ```sh
 cd ./restore/api

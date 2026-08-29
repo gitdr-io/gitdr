@@ -145,17 +145,49 @@ only for S3-compatible providers. Scope every credential create/put-only.
 `gitdr restore` fetches a bundle, verifies its checksum, `git clone`s it, and rehydrates
 LFS. Git data restores faithfully.
 
-Two checks run, and they are not the same check:
+Three checks run, and they are not the same check:
 
 - **SHA-256 against the `.sha256` sidecar**, which the signed manifest covers. This is the
   integrity guarantee: any changed byte fails here.
 - **`git bundle verify`**, which reads the bundle's header — format, prerequisites, refs — and
   stops. It does not read the packfile body, so it is a structural check, not an integrity one.
   Git also refuses to run it outside a repository, so gitdr runs it from a scratch one.
+- **The ref comparison**, which is the one that proves a restore rather than asserting it.
+  `git bundle list-heads` prints the ref-to-commit map the bundle itself declares, and gitdr
+  checks every entry against the refs the restored repository actually has. Git is
+  content-addressed, so a commit id transitively covers its tree, its blobs and its whole
+  ancestry: equality of the ids is equality of the history, not a sample of it. A declared ref
+  that is missing, or present at another object, fails the restore and names the first one
+  that differs. It runs with or without a public key; without one the wording says the bundle
+  it compared against was not itself verified against a signed manifest.
 
 The order matters: the checksum runs first, so a corrupt copy is refused before git is asked
 anything. Removing or weakening the checksum would leave only a check that does not look at
-the data. The metadata JSON is for audit and manual reference
+the data. The ref comparison runs immediately after the clone, before LFS, because if the
+history is wrong nothing after it matters.
+
+Normalisation, since it is where the bugs live. A clone from a bundle files every branch
+under `refs/remotes/origin/*` and materialises only the checked-out one under `refs/heads/*`
+(none at all when the source's HEAD was detached), so a declared `refs/heads/X` is satisfied
+by either name. Tags compare directly and without peeling, an annotated tag being recorded in
+the bundle header as its tag object and read back as the same. The header's `HEAD` entry is
+not a ref any repository stores, so it is compared against what the restored repository's HEAD
+resolves to. Refs the restore has and the bundle does not are expected, not a failure: `git
+clone` manufactures the whole `refs/remotes/origin/*` namespace itself, and only the
+bundle-to-restore direction can catch lost history.
+
+`git clone`'s default refspec creates nothing outside `refs/heads/*` and tags, so a bundle's
+`refs/notes/*`, `refs/merge-requests/*`, `refs/pull/*` and `refs/keep-around/*` entries arrive
+as objects with no ref pointing at them. Those are counted separately and named rather than
+counted as matched — the score has to show the gap — but they are not a failure, because the
+cause is the refspec and not the backup, and a check that fires on every healthy GitLab
+restore is a check that gets switched off.
+
+None of this changed the manifest schema or `--output json`. The counts travel in the human
+output and on `RestoreResult.Refs`, which is `json:"-"`; putting them on the wire is a
+separate, deliberate change.
+
+The metadata JSON is for audit and manual reference
 only. The GitHub and GitLab APIs can't recreate original issue/PR numbers, authors,
 timestamps, or cross-references. That's true of every backup tool, and it's documented for
 users so nobody is surprised.

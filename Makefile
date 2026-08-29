@@ -63,6 +63,7 @@ fuzz:
 	$(GO) test $(FUZZFLAGS) -fuzz '^FuzzParseKeys$$' ./internal/crypto
 	$(GO) test $(FUZZFLAGS) -fuzz '^FuzzSecretNeverLeaks$$' ./internal/redact
 	$(GO) test $(FUZZFLAGS) -fuzz '^FuzzConfigLoad$$' ./internal/config
+	$(GO) test $(FUZZFLAGS) -fuzz '^FuzzParseBundleHeads$$' ./internal/gitexec
 
 lint:
 	$(GO) run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_VERSION) run
