@@ -19,7 +19,9 @@ Everyone lives in git. Almost nobody backs it up. gitdr copies your entire GitHu
 
 ## Why
 
-Your repos are the control plane now. Infra, deploys, runbooks, all of it lives in git. But your host runs on shared responsibility. They keep the lights on. If your data goes because someone deleted it, took over an account, or dropped ransomware, that part is on you.
+Your repos are the control plane now. Infra, deploys, runbooks, all of it lives in git. Your host keeps the lights on, and says in its own documentation where that stops.
+
+GitHub: ["After you delete an organization, GitHub cannot restore your content."](https://docs.github.com/en/organizations/managing-organization-settings/deleting-an-organization-account) GitLab: ["While data security is ensured for GitLab.com, you can't use these methods to export or back up your data from GitLab.com."](https://docs.gitlab.com/administration/backup_restore/) Neither sells a first-party backup product. If your data goes because someone deleted it, took over an account, or dropped ransomware, that part is on you.
 
 gitdr writes backups to a bucket you own and checks it's WORM (write-once-read-many) before writing, so you never get a false sense of safety. WORM is strongly recommended. Turning it on is your call, and `--require-worm` makes gitdr refuse anything softer if you want the hard guarantee.
 
