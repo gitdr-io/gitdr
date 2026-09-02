@@ -362,3 +362,52 @@ func rewriteManifest(t *testing.T, md *memDest, signer ed25519.PrivateKey, edit 
 	md.objs[key] = canon
 	md.objs[key+".sig"] = []byte(base64.StdEncoding.EncodeToString(crypto.Sign(signer, canon)))
 }
+
+// The artifact key is parsed from the end, because an owner can be more than one segment.
+//
+// GitLab groups nest. A real key from a real run reads
+// `gitlab.com/pitici/gitdr/gitdr/2026-09-02/gitdr.bundle`, and counting from the front made the
+// owner "pitici", the name "gitdr", and sent the restore looking under a path that does not
+// exist. Every drill of a GitLab project in a subgroup failed, with an error about the date.
+//
+// The fixtures all use a single-segment owner, which is every GitHub repository and only some
+// GitLab ones, so nothing here could have caught it. A real backup did.
+func TestLocateHandlesANestedGroupPath(t *testing.T) {
+	cases := []struct {
+		name                    string
+		key                     string
+		host, owner, repo, date string
+	}{
+		{
+			name: "github, one segment",
+			key:  "github.com/octo/hello/2026-06-13/hello.bundle",
+			host: "github.com", owner: "octo", repo: "hello", date: "2026-06-13",
+		},
+		{
+			name: "gitlab subgroup",
+			key:  "gitlab.com/pitici/gitdr/gitdr/2026-09-02/gitdr.bundle",
+			host: "gitlab.com", owner: "pitici/gitdr", repo: "gitdr", date: "2026-09-02",
+		},
+		{
+			name: "gitlab, three levels deep",
+			key:  "gitlab.example.com/a/b/c/proj/2026-01-01/proj.bundle",
+			host: "gitlab.example.com", owner: "a/b/c", repo: "proj", date: "2026-01-01",
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			h, o, n, d, err := pipeline.LocateForTest(
+				&pipeline.Manifest{},
+				pipeline.RepoEntry{Artifacts: []pipeline.ArtifactInfo{{Key: c.key}}},
+			)
+			if err != nil {
+				t.Fatalf("locate: %v", err)
+			}
+			if h != c.host || o != c.owner || n != c.repo || d != c.date {
+				t.Errorf("got %s / %s / %s / %s, want %s / %s / %s / %s",
+					h, o, n, d, c.host, c.owner, c.repo, c.date)
+			}
+		})
+	}
+}

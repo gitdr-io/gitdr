@@ -284,19 +284,37 @@ func drillOne(ctx context.Context, d DrillDeps, req DrillRequest, m *Manifest, e
 }
 
 // locate works out which dated artifact belongs to this entry.
+//
+// Parsed from the end of the key, not the start. An artifact lives at
+//
+//	{host}/{owner}/{name}/{YYYY-MM-DD}/{name}.bundle
+//
+// and `owner` can be more than one segment: GitLab groups nest, so a real key from a real run
+// reads `gitlab.com/pitici/gitdr/gitdr/2026-09-02/gitdr.bundle`. Counting from the front gave
+// owner "pitici" and name "gitdr", and the restore then looked under
+// `gitlab.com/pitici/manifests/` — a path that does not exist. Every drill of a GitLab project
+// in a subgroup failed with a message about the wrong date.
+//
+// Found by running a backup and a drill against a real project. No unit test would have: the
+// fixtures all use a single-segment owner, which is every GitHub repository and only some
+// GitLab ones.
 func locate(m *Manifest, entry RepoEntry) (host, owner, name, date string, err error) {
+	for _, a := range entry.Artifacts {
+		parts := strings.Split(a.Key, "/")
+		// host + owner(1+) + name + date + file
+		if len(parts) < 5 {
+			continue
+		}
+		return parts[0],
+			strings.Join(parts[1:len(parts)-3], "/"),
+			parts[len(parts)-3],
+			parts[len(parts)-2],
+			nil
+	}
+
 	owner, name, found := strings.Cut(entry.Slug, "/")
 	if !found {
 		return "", "", "", "", fmt.Errorf("unreadable slug %q", entry.Slug)
-	}
-	// The date the artifacts were written under, taken from a key rather than recomputed from
-	// a timestamp: a run that crosses midnight writes under the date its keys say, and
-	// deriving it here would look for the wrong day once a night.
-	for _, a := range entry.Artifacts {
-		parts := strings.Split(a.Key, "/")
-		if len(parts) >= 4 {
-			return parts[0], parts[1], parts[2], parts[len(parts)-2], nil
-		}
 	}
 	return m.Source.Host, owner, name, "", fmt.Errorf("no artifact key to locate %q by", entry.Slug)
 }
@@ -388,4 +406,11 @@ func uploadDrill(ctx context.Context, d DrillDeps, report *DrillReport, req Dril
 	sig := base64.StdEncoding.EncodeToString(crypto.Sign(d.SigningKey, canon))
 	_, err = d.Dest.PutImmutable(ctx, key+".sig", strings.NewReader(sig), int64(len(sig)), dest.Retention{})
 	return err
+}
+
+// LocateForTest exposes locate to the package's external tests. The parsing it does was wrong
+// in a way only a real repository path revealed, so it is worth testing directly rather than
+// only through a drill.
+func LocateForTest(m *Manifest, e RepoEntry) (string, string, string, string, error) {
+	return locate(m, e)
 }
