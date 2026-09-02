@@ -32,9 +32,49 @@ type Retention struct {
 
 // WormStatus reports a destination's immutability configuration as observed by the
 // preflight gate.
+// WormVerdict is what gitdr was able to determine about a destination's immutability.
+//
+// Three answers and not two, because the store can refuse the question. Before this existed
+// there were two booleans, so a store that could not answer was recorded as one that had
+// answered no — a definite negative claim gitdr had not earned. Google's S3 surface is the
+// case that made it visible: it implements the lock call but reports Object Retention Lock,
+// so a bucket protected by a locked Bucket Lock policy answers exactly like an open one.
+//
+// The distinction is not about a provider. It is about what the protocol said: a store that
+// answers has earned its negative, and a store that refuses has told us nothing.
+type WormVerdict string
+
+const (
+	// VerdictUnknown is the zero value, on purpose. A backend that returns a WormStatus
+	// without setting a verdict claims nothing, fails closed under --require-worm, and is
+	// sent no retention. The other choice — zero meaning confirmed-absent — makes a
+	// forgetful backend state exactly the unearned negative this type exists to prevent.
+	VerdictUnknown WormVerdict = ""
+	// VerdictImmutable: the store answered, and what it described is enforced.
+	VerdictImmutable WormVerdict = "immutable"
+	// VerdictNotImmutable: the store answered, and said it locks nothing. Earned, and worth
+	// saying loudly — it is one of the most useful warnings this tool prints.
+	VerdictNotImmutable WormVerdict = "not-immutable"
+)
+
+// Wire is the value written to the manifest. Never empty: an omitted field on a v4 manifest
+// would tell a reader "an engine too old to say", which is a different answer from "the engine
+// said it cannot tell" and a lie about the producer.
+func (v WormVerdict) Wire() string {
+	if v == VerdictUnknown {
+		return "unknown"
+	}
+	return string(v)
+}
+
+// Immutable reports whether the destination was confirmed immutable. It is the only condition
+// under which retention headers are sent and the only one --require-worm accepts.
+func (v WormVerdict) Immutable() bool { return v == VerdictImmutable }
+
 type WormStatus struct {
-	Enabled bool   // object lock / immutability is enabled on the bucket/container
-	Locked  bool   // immutability is enforced (a retention mode/policy is in effect)
+	// Verdict replaces the Enabled/Locked pair. Two booleans that had to agree could express
+	// a state neither of them meant, and nothing outside a test ever read Enabled.
+	Verdict WormVerdict
 	Mode    string // observed default mode, if any (e.g. "COMPLIANCE")
 	Details string // human-readable detail for logs and `gitdr doctor`
 }
