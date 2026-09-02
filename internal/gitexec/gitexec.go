@@ -249,6 +249,48 @@ func (g *Git) ListRefs(ctx context.Context, repoDir string) (map[string]string, 
 	return refs, nil
 }
 
+// LsRemote asks the remote what refs it has, without cloning anything.
+//
+// This is the cheap half of not rewriting a repository that has not changed. One network
+// round trip, no objects transferred, no working tree, and the answer is the same shape
+// ListRefs returns for a local repository.
+//
+// `--symref` is deliberately absent: the symbolic target of HEAD is a property of the
+// remote's configuration and not of its history, so a repository whose default branch was
+// renamed with no commits since has not changed in any sense that matters to a backup, and
+// including it would force a full rewrite of every repository in an organisation the day
+// somebody renames master to main.
+//
+// The peeled `^{}` lines are dropped for the reason ListRefs does not peel: an annotated tag
+// compares as its tag object, so a tag object swapped over the same commit is a change.
+func (g *Git) LsRemote(ctx context.Context, repoURL string, opts Options) (map[string]string, error) {
+	var cfg []gitConfig
+	if opts.AuthHeader != "" {
+		cfg = append(cfg, gitConfig{key: extraHeaderKey(repoURL), value: opts.AuthHeader})
+	}
+	out, err := g.outputCfg(ctx, "", cfg, "ls-remote", "--", repoURL)
+	if err != nil {
+		return nil, fmt.Errorf("ls-remote: %w", err)
+	}
+
+	refs := make(map[string]string)
+	for _, line := range strings.Split(out, "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		// ls-remote is "<oid>\t<name>", where for-each-ref is "<oid> <name>".
+		oid, name, found := strings.Cut(strings.TrimSpace(line), "\t")
+		if !found {
+			return nil, fmt.Errorf("unreadable ls-remote line: %q", line)
+		}
+		if strings.HasSuffix(name, "^{}") {
+			continue
+		}
+		refs[name] = oid
+	}
+	return refs, nil
+}
+
 // HeadOID resolves repoDir's HEAD to the object it points at. It fails on an unborn HEAD,
 // which for a repository cloned from a non-empty bundle cannot happen.
 func (g *Git) HeadOID(ctx context.Context, repoDir string) (string, error) {
@@ -349,13 +391,30 @@ const lfsPointerMagic = "version https://git-lfs.github.com/spec/v1"
 
 // output runs git and returns stdout. Same construction and environment as run.
 func (g *Git) output(ctx context.Context, workdir string, args ...string) (string, error) {
+	return g.outputCfg(ctx, workdir, nil, args...)
+}
+
+// outputCfg is output with the credential plumbing run has. The auth header travels in
+// GIT_CONFIG_VALUE_n and never on the command line, where `ps` would show it to every other
+// process on the machine.
+func (g *Git) outputCfg(ctx context.Context, workdir string, cfg []gitConfig, args ...string) (string, error) {
 	// audited: g.bin is the constant "git" and args are an argv array (no shell).
 	// nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command
 	cmd := exec.CommandContext(ctx, g.bin, args...)
 	if workdir != "" {
 		cmd.Dir = workdir
 	}
-	cmd.Env = append(baseEnv(), "GIT_TERMINAL_PROMPT=0")
+	env := append(baseEnv(), "GIT_TERMINAL_PROMPT=0")
+	if len(cfg) > 0 {
+		env = append(env, fmt.Sprintf("GIT_CONFIG_COUNT=%d", len(cfg)))
+		for i, c := range cfg {
+			env = append(env,
+				fmt.Sprintf("GIT_CONFIG_KEY_%d=%s", i, c.key),
+				fmt.Sprintf("GIT_CONFIG_VALUE_%d=%s", i, c.value),
+			)
+		}
+	}
+	cmd.Env = env
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout

@@ -10,7 +10,11 @@ import (
 // ManifestSchema is the versioned identifier of the run-manifest contract. The
 // manifest schema and the --output json shape are a STABLE PUBLIC CONTRACT: changing
 // them requires a version bump and a note in SPEC.md.
-const ManifestSchema = "gitdr.manifest/v2"
+//
+// v3 adds RepoEntry.Refs, the ref-to-commit map the source advertised when the copy was
+// made. It is what lets the next run tell whether a repository has changed without cloning
+// it, and it is additive: every v2 field is unchanged and a v2 manifest still verifies.
+const ManifestSchema = "gitdr.manifest/v3"
 
 // Status values used in the manifest.
 const (
@@ -71,6 +75,41 @@ type RepoEntry struct {
 	// unknown one and there is more than one reason to skip.
 	Reason    string         `json:"reason,omitempty"`
 	Artifacts []ArtifactInfo `json:"artifacts,omitempty"`
+	// What the source advertised when this copy was made, from `git ls-remote`.
+	//
+	// It is recorded so the next run can ask the same question and compare, and skip a
+	// repository whose refs have not moved instead of writing a byte-identical copy of its
+	// entire history. Before this, every run rewrote everything, and on WORM storage the
+	// customer could not delete any of it.
+	//
+	// A slice and not a map: Canonical() relies on struct field order for stable bytes, and
+	// Go map iteration order is random, so a map here would produce a different signature
+	// for the same run. Sorted by name for the same reason.
+	//
+	// Recorded only on a successful copy. A run that failed halfway has refs that describe a
+	// repository nothing was written for, and trusting them would skip the retry.
+	Refs []RefEntry `json:"refs,omitempty"`
+	// When the artifacts this entry relies on were actually written.
+	//
+	// For a copy that was made this run it is this run's finish time. For a repository that
+	// was skipped as unchanged it is carried forward from the run that made the copy, which
+	// is the whole point: without it, each skip would reset the age of the copy and the
+	// refresh bound in unchanged.go would never fire, so a repository that never changes
+	// would be skipped past its object lock's expiry and end up with nothing.
+	//
+	// Found by running the backup three times in a row and watching the third copy in full.
+	//
+	// A pointer, because `omitempty` does nothing on a `time.Time`: a struct is never empty to
+	// encoding/json, so a value field emitted `"copiedAt":"0001-01-01T00:00:00Z"` into every
+	// manifest including ones re-read from v2 — which changed their canonical bytes and made
+	// every already-signed manifest fail verification. Caught by the v2 round-trip test.
+	CopiedAt *time.Time `json:"copiedAt,omitempty"`
+}
+
+// RefEntry is one ref and the object it pointed at, as the source advertised it.
+type RefEntry struct {
+	Name   string `json:"name"`
+	Commit string `json:"commit"`
 }
 
 // ArtifactInfo is one stored object with its integrity data.

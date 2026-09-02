@@ -218,7 +218,7 @@ Packaging files ship in-repo so downstream maintainers have little to do.
 AGPL-3.0. gitdr is free and open-source and stays that way. If the AGPL doesn't fit your
 org, a commercial license is available from the maintainer.
 
-## 11. Output contract (v2)
+## 11. Output contract (v3)
 
 The run-manifest schema and the `--output json` shapes are a stable, versioned public
 contract that downstream tooling consumes. Changes need a new schema version and a note
@@ -228,6 +228,36 @@ v2 records the immutability observed at write time, since gitdr now writes to no
 destinations too (§4). `destination.wormImmutable` and `wormDetails` capture it. The
 manifest is signed, so this is a tamper-evident answer to "was this backup on WORM
 storage?". `verify` doesn't check the schema string, so older manifests still verify.
+
+**v3 adds `repos[].refs` and `repos[].copiedAt`, and it is additive: every v2 field is
+unchanged, both new fields are `omitempty`, and a v2 manifest still canonicalises to the bytes
+it was signed over.** `internal/pipeline/manifest_test.go` pins that round trip, because
+breaking it would make every artifact anyone has already stored unverifiable the day they
+upgrade — which nobody would notice until they needed a restore.
+
+`refs` is the ref-to-commit map the source advertised when the copy was made, from
+`git ls-remote`. It exists so the next run can ask the same question and skip a repository
+whose refs have not moved, rather than writing a byte-identical copy of its entire history.
+Before this, `git bundle create --all` ran every night on every repository and the only thing
+stopping a second write was a check on the date, so an organisation's whole history was
+rewritten daily. On WORM storage the customer cannot delete any of it: object lock in
+compliance mode holds against everyone, including the root of the account that owns the
+bucket. Measured on three real organisations, roughly seventy per cent of one does not change
+on a given day.
+
+`copiedAt` is when the artifacts an entry relies on were actually written, and it is carried
+forward through every skip. Without it each skip would restart the age of the copy, the
+refresh below would never fire, and a repository that never changes would be skipped past its
+object lock's expiry and end up with no copy at all.
+
+**A copy is rewritten before it can expire, however unchanged the repository is.** Object lock
+protects an object until its retain-until date and not one second longer, so skipping is only
+correct while the copy being relied on still exists. gitdr refreshes after a third of the
+retention period, capped at thirty days. See `internal/pipeline/unchanged.go`.
+
+Skipping is reported as `status: "skipped"` with a `reason`, the same shape already used for a
+repository with no commits — additive, and a consumer switching on `status` sees a value it
+already knows.
 
 ### Object layout (per run)
 

@@ -72,6 +72,10 @@ type backupRun struct {
 	now         func() time.Time
 	requireWORM bool
 	wormStatus  dest.WormStatus // captured by wormCheck, recorded in the manifest
+	// What the last successful run recorded, by repository slug. Read once per run; empty
+	// when there was no previous run or its manifest could not be read, in which case every
+	// repository is copied in full. See previous.go.
+	previous map[string]previousCopy
 }
 
 func (r *backupRun) run(ctx context.Context) (*BackupResult, error) {
@@ -100,6 +104,11 @@ func (r *backupRun) run(ctx context.Context) (*BackupResult, error) {
 	if r.cfg.Backup.LFS && !gitexec.LFSAvailable() {
 		r.log.Warn("git-lfs not installed; LFS objects will not be backed up")
 	}
+
+	// One List and one Get for the whole run, before any repository is touched. What it
+	// returns decides which repositories can be left alone; see unchanged.go for the rules,
+	// including the one that refreshes a copy before its object lock expires.
+	r.previous = r.loadPrevious(ctx, repos[0])
 
 	entries := r.fanOut(ctx, repos, authHeader, ret)
 	allOK := true
@@ -209,7 +218,48 @@ func (r *backupRun) backupOne(ctx context.Context, repo source.Repo, authHeader 
 		r.log.Info("repo skipped (already backed up)", "repo", repo.Slug())
 		return RepoEntry{Slug: repo.Slug(), Status: StatusSkipped, Reason: ReasonResume}
 	}
+
+	// Ask the source what it has, and skip a repository whose refs have not moved since the
+	// copy that is still being retained. One network round trip against a clone of the whole
+	// history, and on a typical organisation seven repositories in ten do not move on a given
+	// day.
+	//
+	// The refs are carried into backupRepo rather than fetched twice: what gets recorded in
+	// the manifest must be the state that was compared, or a repository that changed between
+	// the two calls would record refs for a copy that does not contain them.
+	current := r.currentRefs(ctx, repo, authHeader)
+	if prev, ok := r.previous[repo.Slug()]; ok {
+		d := decideUnchanged(prev.refs, current, prev.copiedAt, r.now(), r.retentionWindow())
+		if d.skip {
+			copiedAt := prev.copiedAt
+			r.log.Info("repo skipped (unchanged)", "repo", repo.Slug(), "reason", d.reason)
+			return RepoEntry{
+				Slug:   repo.Slug(),
+				Status: StatusSkipped,
+				Reason: d.reason,
+				// Carried forward so the *next* run can compare against this one. Without
+				// this a skipped repository loses its ref map and is copied in full the day
+				// after, which would make the whole thing an every-other-day saving.
+				Refs: refsToEntries(prev.refs),
+				// And the age of the copy travels with it. Recording this run's time here
+				// would restart the clock on every skip, so the refresh bound would never
+				// fire and an unchanging repository would be skipped past its lock's expiry.
+				CopiedAt: &copiedAt,
+			}
+		}
+		if d.reason != "" {
+			r.log.Info("repo unchanged but the copy is ageing; copying again", "repo", repo.Slug(), "reason", d.reason)
+		}
+	}
+
 	entry := r.backupRepo(ctx, repo, authHeader, ret)
+	// Recorded only on a copy that succeeded. A failed run's refs describe a repository
+	// nothing was written for, and trusting them next time would skip the retry.
+	if entry.Status == StatusSuccess && len(current) > 0 {
+		entry.Refs = refsToEntries(current)
+		copiedAt := r.now().UTC()
+		entry.CopiedAt = &copiedAt
+	}
 	if entry.Status == StatusFailed {
 		r.log.Error("repo backup failed", "repo", repo.Slug(), "err", entry.Error)
 	} else {
@@ -224,6 +274,15 @@ func (r *backupRun) alreadyBackedUp(ctx context.Context, repo source.Repo) bool 
 	key := path.Join(repo.Host, repo.Owner, repo.Name, date, repo.Name+".bundle")
 	objs, err := r.dst.List(ctx, key)
 	return err == nil && len(objs) > 0
+}
+
+// retentionWindow is how long a copy is kept, as a duration.
+//
+// The skip decision needs it to know when a copy is close enough to expiring that it must be
+// rewritten even though nothing changed. Object lock protects an object until its retain-until
+// and not one second longer.
+func (r *backupRun) retentionWindow() time.Duration {
+	return time.Duration(r.cfg.Destination.Retention.Days) * 24 * time.Hour
 }
 
 func (r *backupRun) retention() dest.Retention {
