@@ -546,3 +546,18 @@ func TestCompareRestoredRefsRealGit(t *testing.T) {
 		}
 	})
 }
+
+// Comparing against nothing is a check that cannot fail, and this is where it would happen.
+func TestCompareSourceRefsRefusesAnEmptySet(t *testing.T) {
+	_, err := CompareSourceRefs(context.Background(), gitexec.New(nil), nil, t.TempDir())
+	if err == nil {
+		t.Fatal("comparing against no source refs returned a passing comparison")
+	}
+	if !strings.Contains(err.Error(), "nothing to compare") {
+		t.Errorf("error = %q, want it to say there was nothing to compare", err)
+	}
+
+	if _, err := CompareSourceRefs(context.Background(), gitexec.New(nil), map[string]string{}, t.TempDir()); err == nil {
+		t.Error("an empty map was treated as a comparison that passed")
+	}
+}

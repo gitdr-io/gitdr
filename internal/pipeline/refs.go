@@ -240,3 +240,42 @@ func candidates(name string) []string {
 func clonable(name string) bool {
 	return strings.HasPrefix(name, headsPfx) || strings.HasPrefix(name, tagsPfx)
 }
+
+// CompareSourceRefs answers the second question a drill asks: does the restored repository
+// carry the refs the *source* advertised when the copy was made?
+//
+// `CompareRestoredRefs` proves the restored repository reproduces what the bundle declares.
+// That is a closed loop — the artifact is consistent with itself — and a bundle written from a
+// half-fetched mirror would pass it perfectly while missing branches the source had. Nothing
+// could check the other half until the manifest started recording the source's own ref map.
+//
+// The same normalisation as the bundle comparison, and for the same reasons: `git clone` writes
+// a branch as refs/remotes/origin/<name>, and refs a clone's refspec does not create are
+// counted apart rather than folded into the matched total.
+//
+// One direction only. A restored repository holding a ref the source did not advertise is not
+// missing history — `ls-remote` and a mirror clone can legitimately differ on hidden refs — but
+// a source ref that is not there is exactly the loss a backup exists to prevent.
+func CompareSourceRefs(ctx context.Context, g *gitexec.Git, sourceRefs map[string]string, repoDir string) (RefComparison, error) {
+	if len(sourceRefs) == 0 {
+		// The same refusal CompareRestoredRefs makes on an empty bundle header. Comparing
+		// against nothing scores 0 of 0 and passes, which is a check that cannot fail, and a
+		// drill exists to produce evidence rather than the appearance of it.
+		return RefComparison{}, fmt.Errorf("no source refs recorded, so there is nothing to compare the restored repository against")
+	}
+
+	declared := make([]gitexec.BundleRef, 0, len(sourceRefs))
+	for name, oid := range sourceRefs {
+		declared = append(declared, gitexec.BundleRef{Name: name, OID: oid})
+	}
+
+	restored, err := g.ListRefs(ctx, repoDir)
+	if err != nil {
+		return RefComparison{}, err
+	}
+	head, err := g.HeadOID(ctx, repoDir)
+	if err != nil {
+		head = ""
+	}
+	return compareRefs(declared, restored, head), nil
+}

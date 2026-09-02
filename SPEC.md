@@ -265,6 +265,56 @@ follows it**. A consumer matches the prefix. Making it dynamic without saying so
 every consumer falling through to "skipped for some reason" on what is now the most common
 outcome of a run.
 
+### The drill report (`gitdr.drill/v1`)
+
+`verify` reads the artifacts back and rechecks their checksums against the signed manifest.
+That answers *is the copy intact*, which is SOC 2 A1.2. **It does not answer *does it
+restore*, which is A1.3**, and this product does not blur the two.
+
+`gitdr drill` restores. It writes each repository from the manifest into a temporary
+directory, compares what came back, throws it away, and stores a signed report beside the
+manifest it drilled — through the same create-only path as everything else, so the evidence is
+as immutable as the thing it proves.
+
+Three ref maps, and the drill checks both joins:
+
+| | |
+|---|---|
+| **R** | what the source advertised when the copy was made — the manifest's v3 `refs` |
+| **B** | what the bundle's own header declares — `git bundle list-heads` |
+| **C** | what a fresh clone of that bundle contains — `git for-each-ref` |
+
+`B == C` says the artifact restores to the history it claims to carry. `R == B` says it claims
+to carry the history the source actually had — which nothing could check before v3 recorded R,
+and which is the half an auditor is really asking about. **A bundle written from a half-fetched
+mirror passes the first check perfectly and fails the second.**
+
+Git is content addressed, so a commit hash covers its tree, its blobs and its whole ancestry.
+Comparing ref maps is therefore not a sample of the data, it is a proof that the histories are
+equal. A vendor holding backups in a proprietary blob store has nothing to compare against and
+cannot let a customer reproduce the check without publishing the format and the reader.
+
+What it does not prove, stated because the report is read by people who will act on it:
+
+- **Not that the content is what somebody remembers.** Equal hashes mean equal content, but a
+  source that was already wrong when the copy was made is faithfully wrong in the copy.
+- **Not that unreferenced objects survive.** A clone's refspec creates no ref for a bundle's
+  `refs/merge-requests/*` or `refs/notes/*`, so those are counted apart and named, never folded
+  into the matched total.
+- **Not the whole estate, unless it says so.** `-sample` caps how many are restored, and the
+  report records `eligible` and `drilled` separately so a ten-repository sample cannot be read
+  as a thousand-repository guarantee.
+- **`sourceMatch` is null, not false, for a pre-v3 copy.** "Not recorded" and "did not match"
+  are different answers.
+
+A manifest whose signature does not verify is **refused**, not drilled: evidence about an
+artifact set nobody can attribute to gitdr is worse than no evidence.
+
+```
+{host}/{org}/drills/{ts}.drill.json      # the report
+{host}/{org}/drills/{ts}.drill.json.sig  # ed25519 over the report, base64
+```
+
 ### Object layout (per run)
 
 ```

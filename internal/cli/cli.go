@@ -30,6 +30,7 @@ Commands:
   backup    Back up repositories to immutable storage
   restore   Restore a repository from a backup bundle
   verify    Verify a run-manifest signature and artifact checksums
+  drill     Restore the backups and prove they carry the history they claim
   doctor    Check config, credentials, connectivity, and the WORM lock
 
 Run "gitdr <command> -h" for command-specific flags.`
@@ -47,6 +48,8 @@ func Run(ctx context.Context, args []string) int {
 		return runRestore(ctx, args[1:])
 	case "verify":
 		return runVerify(ctx, args[1:])
+	case "drill":
+		return runDrill(ctx, args[1:])
 	case "doctor":
 		return runDoctor(ctx, args[1:])
 	case "version", "--version", "-version":

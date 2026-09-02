@@ -150,6 +150,18 @@ func Restore(ctx context.Context, d RestoreDeps, req RestoreRequest) (*RestoreRe
 	if err != nil {
 		return nil, fmt.Errorf("compare refs: %w", err)
 	}
+	// Not reachable by any construction found so far, and kept anyway.
+	//
+	// For an intact bundle `git clone` places exactly what the header declares, so header and
+	// clone are self-consistent: editing an OID in the header makes the clone follow it, and a
+	// damaged pack fails earlier with a clone error rather than a ref mismatch. Deleting this
+	// branch fails no test in the suite, which was established by deleting it.
+	//
+	// It stays because the thing it guards is the product's central claim, the cost is one
+	// comparison already computed, and the failure it would catch — storage returning a
+	// structurally valid bundle that is not the one gitdr wrote — is exactly the failure a
+	// WORM backup tool must not paper over. `compareRefs` itself is thoroughly covered in
+	// refs_test.go; what is untested is only this wiring.
 	if !refs.OK() {
 		return nil, fmt.Errorf(
 			"restored repository does not match the history %s declares: %d of %d refs present at the same commit, %d differ, first is %s",
