@@ -86,7 +86,33 @@ func (b *Backend) VerifyWorm(ctx context.Context) (dest.WormStatus, error) {
 	if err != nil {
 		var apiErr smithy.APIError
 		if errors.As(err, &apiErr) && apiErr.ErrorCode() == "ObjectLockConfigurationNotFoundError" {
-			return dest.WormStatus{Details: "bucket has no Object Lock configuration"}, nil
+			// The store implements the call and said no. That negative is earned, and it is
+			// one of the most useful things this tool prints.
+			return dest.WormStatus{
+				Verdict: dest.VerdictNotImmutable,
+				Details: "bucket has no Object Lock configuration",
+			}, nil
+		}
+		/*
+		 * Any other API error means the store refused the question, and a refusal is not a no.
+		 *
+		 * `NotImplemented`, a 501, a 405, a 404 carrying a different code: the store never told
+		 * us what it locks. Google's S3 surface is the case that made this visible — it answers
+		 * `?object-lock` about Object Retention Lock, so a bucket protected by a locked Bucket
+		 * Lock policy is indistinguishable from an open one — but the rule is about the
+		 * protocol and not about a provider. Sniffing the endpoint would suppress a true
+		 * positive on a Google bucket that does have Object Retention Lock, and would help no
+		 * other store.
+		 *
+		 * The error text is kept, redacted upstream: `NotImplemented` and `AccessDenied` land
+		 * in the same verdict and are entirely different things to an operator.
+		 */
+		var api smithy.APIError
+		if errors.As(err, &api) {
+			return dest.WormStatus{
+				Verdict: dest.VerdictUnknown,
+				Details: fmt.Sprintf("could not verify immutability: the bucket answered %s", api.ErrorCode()),
+			}, nil
 		}
 		return dest.WormStatus{}, fmt.Errorf("s3: get object lock config: %w", err)
 	}
@@ -95,8 +121,9 @@ func (b *Backend) VerifyWorm(ctx context.Context) (dest.WormStatus, error) {
 	enabled := cfg != nil && cfg.ObjectLockEnabled == s3types.ObjectLockEnabledEnabled
 	// Object Lock can only be enabled at bucket creation and cannot be turned off, so
 	// "enabled" means any retention we apply per object is durably enforced.
-	st := dest.WormStatus{Enabled: enabled, Locked: enabled, Details: "Object Lock enabled"}
+	st := dest.WormStatus{Verdict: dest.VerdictImmutable, Details: "Object Lock enabled"}
 	if !enabled {
+		st.Verdict = dest.VerdictNotImmutable
 		st.Details = "Object Lock not enabled"
 		return st, nil
 	}

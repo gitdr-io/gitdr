@@ -66,11 +66,21 @@ func (b *Backend) VerifyWorm(ctx context.Context) (dest.WormStatus, error) {
 	}
 	rp := attrs.RetentionPolicy
 	if rp == nil {
-		return dest.WormStatus{Details: "no bucket retention policy"}, nil
+		// The native API answered and said there is no policy. An earned negative.
+		return dest.WormStatus{
+			Verdict: dest.VerdictNotImmutable,
+			Details: "no bucket retention policy",
+		}, nil
+	}
+	// An unlocked retention policy is also an earned negative, and the distinction matters:
+	// the bucket has a retention period and the project owner can shorten or remove it, so
+	// nothing here is enforced against the person most likely to be compromised.
+	verdict := dest.VerdictNotImmutable
+	if rp.IsLocked {
+		verdict = dest.VerdictImmutable
 	}
 	return dest.WormStatus{
-		Enabled: true,
-		Locked:  rp.IsLocked,
+		Verdict: verdict,
 		Mode:    "RETENTION",
 		Details: fmt.Sprintf("bucket retention %s, locked=%v", rp.RetentionPeriod, rp.IsLocked),
 	}, nil

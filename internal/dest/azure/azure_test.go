@@ -187,7 +187,7 @@ func TestAzuriteVerifyWormReportsNone(t *testing.T) {
 	if err != nil {
 		t.Fatalf("verify worm: %v", err)
 	}
-	if st.Enabled {
+	if st.Verdict.Immutable() {
 		t.Error("VerifyWorm reported immutability on a plain container")
 	}
 }

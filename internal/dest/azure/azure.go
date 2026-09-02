@@ -78,7 +78,11 @@ func (b *Backend) VerifyWorm(ctx context.Context) (dest.WormStatus, error) {
 		return dest.WormStatus{}, fmt.Errorf("azure: container properties: %w", err)
 	}
 	enabled := props.IsImmutableStorageWithVersioningEnabled != nil && *props.IsImmutableStorageWithVersioningEnabled
-	st := dest.WormStatus{Enabled: enabled, Locked: enabled, Mode: "IMMUTABILITY", Details: "version-level immutability"}
+	verdict := dest.VerdictImmutable
+	if !enabled {
+		verdict = dest.VerdictNotImmutable
+	}
+	st := dest.WormStatus{Verdict: verdict, Mode: "IMMUTABILITY", Details: "version-level immutability"}
 	if !enabled {
 		st.Details = "no version-level immutability on container"
 	}

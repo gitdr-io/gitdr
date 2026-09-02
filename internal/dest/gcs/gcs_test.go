@@ -59,7 +59,7 @@ func TestGCSBackend(t *testing.T) {
 	if err != nil {
 		t.Fatalf("verifyworm: %v", err)
 	}
-	if st.Locked {
+	if st.Verdict.Immutable() {
 		t.Error("emulator should not report a locked retention policy")
 	}
 }
