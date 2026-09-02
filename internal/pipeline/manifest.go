@@ -27,6 +27,15 @@ const (
 	// reading a manifest is entitled to know which one applies.
 	ReasonResume = "already backed up for this date"
 	ReasonEmpty  = "repository has no commits"
+	// ReasonUnchanged is a PREFIX, not a whole string: the date of the copy being relied on
+	// follows it, because an operator looking at a skipped repository wants to know which copy
+	// they still have.
+	//
+	// The prefix is the stable half and it is part of the contract. A consumer matches on it
+	// and renders the rest; the two reasons above are matched whole, and a dynamic string
+	// where those are constant would have left every consumer falling through to "skipped for
+	// some reason" on what is now the most common outcome of a run.
+	ReasonUnchanged = "unchanged since"
 )
 
 // Manifest is the signed record of one backup run.

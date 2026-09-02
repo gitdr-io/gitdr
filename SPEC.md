@@ -259,6 +259,12 @@ Skipping is reported as `status: "skipped"` with a `reason`, the same shape alre
 repository with no commits — additive, and a consumer switching on `status` sees a value it
 already knows.
 
+The two existing reasons are whole strings a consumer compares exactly. The new one carries the
+date of the copy being relied on, so **`"unchanged since"` is a stable prefix and the date
+follows it**. A consumer matches the prefix. Making it dynamic without saying so would have left
+every consumer falling through to "skipped for some reason" on what is now the most common
+outcome of a run.
+
 ### Object layout (per run)
 
 ```

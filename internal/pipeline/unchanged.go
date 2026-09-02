@@ -94,7 +94,7 @@ func decideUnchanged(previous, current map[string]string, copiedAt, now time.Tim
 
 	return unchangedDecision{
 		skip:   true,
-		reason: fmt.Sprintf("unchanged since the copy made %s", copiedAt.UTC().Format("2006-01-02")),
+		reason: fmt.Sprintf("%s %s", ReasonUnchanged, copiedAt.UTC().Format("2006-01-02")),
 	}
 }
 

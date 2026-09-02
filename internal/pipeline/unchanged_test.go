@@ -148,7 +148,7 @@ func TestTheReasonSaysWhichCaseItWas(t *testing.T) {
 	if !skipped.skip {
 		t.Fatal("expected a skip")
 	}
-	if want := "unchanged since the copy made 2026-08-31"; skipped.reason != want {
+	if want := "unchanged since 2026-08-31"; skipped.reason != want {
 		t.Errorf("reason = %q, want %q", skipped.reason, want)
 	}
 
@@ -321,4 +321,24 @@ func (s *stubDest) Get(_ context.Context, key string) (io.ReadCloser, error) {
 		return nil, errors.New("no such key")
 	}
 	return io.NopCloser(bytes.NewReader(b)), nil
+}
+
+// The prefix is the contract, and a consumer matches on it.
+//
+// The other two reasons are whole constants a consumer compares exactly. This one carries a
+// date, so it is a prefix — and if the prefix ever drifts, every consumer silently falls
+// through to "skipped for some reason" on what is now the most common outcome of a run.
+func TestTheUnchangedReasonKeepsItsPrefix(t *testing.T) {
+	same := refs("refs/heads/main", "aaa")
+	got := decideUnchanged(same, same, now.Add(-day), now, year)
+	if !got.skip {
+		t.Fatal("expected a skip")
+	}
+	if !strings.HasPrefix(got.reason, ReasonUnchanged) {
+		t.Errorf("reason %q does not start with the contracted prefix %q", got.reason, ReasonUnchanged)
+	}
+	// And the date is there, because an operator wants to know which copy they still have.
+	if !strings.Contains(got.reason, "2026-09-01") {
+		t.Errorf("reason %q does not name the copy it is relying on", got.reason)
+	}
 }
