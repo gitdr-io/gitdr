@@ -133,9 +133,12 @@ func TestACopyIsRefreshedBeforeItsLockExpires(t *testing.T) {
 			if got.skip != c.wantSkip {
 				t.Errorf("skip = %v, want %v (%s)", got.skip, c.wantSkip, got.reason)
 			}
-			if !got.skip && got.reason == "" && c.wantSkip == false {
-				// A refusal on age says why. A refusal because something changed does not
-				// need to: the manifest already records what it wrote.
+			// A refusal on age says why, and every case in this table hands identical refs,
+			// so a refusal here can only be about age. The rule was written as an empty
+			// branch guarded by a condition that asserted nothing: it named the rule and
+			// checked none of it, which is how a table of nine cases proves eight things.
+			if !got.skip && !strings.Contains(got.reason, "days old") {
+				t.Errorf("refused on age without saying so: reason = %q", got.reason)
 			}
 		})
 	}
