@@ -14,7 +14,7 @@ import (
 // v3 adds RepoEntry.Refs, the ref-to-commit map the source advertised when the copy was
 // made. It is what lets the next run tell whether a repository has changed without cloning
 // it, and it is additive: every v2 field is unchanged and a v2 manifest still verifies.
-const ManifestSchema = "gitdr.manifest/v3"
+const ManifestSchema = "gitdr.manifest/v4"
 
 // Status values used in the manifest.
 const (
@@ -69,9 +69,24 @@ type SourceInfo struct {
 type DestInfo struct {
 	Type          string `json:"type"`
 	Bucket        string `json:"bucket"`
-	WormMode      string `json:"wormMode,omitempty"`    // configured retention mode
-	WormImmutable bool   `json:"wormImmutable"`         // WORM check confirmed immutable
-	WormDetails   string `json:"wormDetails,omitempty"` // observed immutability detail
+	WormMode      string `json:"wormMode,omitempty"` // configured retention mode
+	WormImmutable bool   `json:"wormImmutable"`      // WORM check confirmed immutable
+	/*
+	 * What gitdr was able to determine: "immutable", "not-immutable" or "unknown".
+	 *
+	 * `wormImmutable` is not a liar and keeps its exact v3 meaning — false covers both of the
+	 * other two verdicts. The defect was that the engine observed three distinguishable things
+	 * and shipped two bits plus a sentence, so the only way a consumer could recover the third
+	 * was to match on prose. Added rather than repurposed, because a nullable boolean would
+	 * change the meaning of a field every pinned consumer already reads, in the direction where
+	 * absent reads as falsy.
+	 *
+	 * `omitempty` on a string is required, not stylistic. Without it, re-reading a v2 or v3
+	 * manifest and marshalling it again adds a key, which changes the canonical bytes and
+	 * breaks every signature already written. The round-trip test is the tripwire.
+	 */
+	WormVerdict string `json:"wormVerdict,omitempty"`
+	WormDetails string `json:"wormDetails,omitempty"` // observed immutability detail
 }
 
 // RepoEntry is the per-repository outcome.

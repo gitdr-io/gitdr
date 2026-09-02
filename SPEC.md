@@ -328,15 +328,15 @@ artifact set nobody can attribute to gitdr is worse than no evidence.
 
 Every object is written create-only under object-lock retention.
 
-### Run-manifest (`gitdr.manifest/v3`)
+### Run-manifest (`gitdr.manifest/v4`)
 
 ```json
 {
-  "schema": "gitdr.manifest/v3",
+  "schema": "gitdr.manifest/v4",
   "runId": "20260613T120000Z-a1b2c3d4e5f6",
   "tool": { "name": "gitdr", "version": "v0.1.0 (abc123def456)" },
   "source": { "type": "github", "host": "github.com" },
-  "destination": { "type": "s3", "bucket": "my-worm-bucket", "wormMode": "COMPLIANCE", "wormImmutable": true, "wormDetails": "Object Lock enabled; default retention COMPLIANCE" },
+  "destination": { "type": "s3", "bucket": "my-worm-bucket", "wormMode": "COMPLIANCE", "wormImmutable": true, "wormVerdict": "immutable", "wormDetails": "Object Lock enabled; default retention COMPLIANCE" },
   "startedAt": "2026-06-13T12:00:00Z",
   "finishedAt": "2026-06-13T12:03:00Z",
   "status": "success",
@@ -389,6 +389,39 @@ Both are `omitempty`, so a v2 manifest re-read and re-signed produces identical 
 version moved anyway, because a consumer that needs `refs` has to be able to ask whether this
 manifest can have them: absent is not the same as none, and a drill that treated a v2 manifest
 as "the source advertised nothing" would report a pass it had not earned.
+
+**v4 adds `destination.wormVerdict`**, one of exactly three values:
+
+| value | what it means |
+|---|---|
+| `immutable` | the store answered, and what it described is enforced |
+| `not-immutable` | the store answered, and said it locks nothing. An **earned** negative |
+| `unknown` | the store refused the question. A statement about gitdr's visibility, not about the bucket |
+
+Before it, the engine observed three distinguishable things and shipped two bits plus a
+sentence, so a store that could not answer was recorded as one that had answered no. That is a
+definite negative claim gitdr had not earned, and the only way a consumer could recover the
+third state was to match on prose. Google's S3 surface is the case that made it visible: it
+implements the lock call but reports Object Retention Lock, so a bucket protected by a locked
+Bucket Lock policy answers exactly like an open one. The rule is about the protocol rather than
+the provider — a store that answers has earned its negative, a store that refuses has told us
+nothing — so `NotImplemented`, a 501, a 405 and `AccessDenied` all land in `unknown`.
+
+`wormImmutable` keeps its exact v3 meaning: confirmed immutable, where `false` covers both of
+the other two verdicts. It was added to rather than repurposed, because a nullable boolean would
+change the meaning of a field every pinned consumer already reads, in the direction where absent
+reads as falsy.
+
+`--require-worm` passes only on `immutable`. This is not a new rule: invariant 4 already fires
+the gate when immutability "cannot be confirmed", and `unknown` is the definition of that. On
+the non-strict path the two negatives warn differently, because they send an operator to two
+different places — `not-immutable` is local and says turn object lock on, `unknown` says ask the
+provider. Both stay at WARN; `unknown` is not the quieter problem.
+
+The field is `omitempty` and is never written empty, so a v2 or v3 manifest re-read and
+re-signed still produces identical bytes. **Absent must not be read as `unknown`**: absent means
+the engine was too old to say, which is a different answer from the engine saying it cannot
+tell, and only the version number separates them.
 - Timestamps are RFC 3339 (UTC). The manifest is signed (Ed25519) over its exact stored
   bytes. The signature is base64 in the `.sig` sidecar and verified with the public key.
 
