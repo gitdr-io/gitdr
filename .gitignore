@@ -1,6 +1,11 @@
 /bin/
 /dist/
 /coverage.out
+# Screenshots land here when a tool runs with this as its working directory. Root only, so
+# docs/logo.png and anything deliberate under docs/ stays tracked. This repo is mirrored
+# publicly, and a stray screenshot is a thing you cannot take back out of the history.
+/*.png
+
 # never commit keys or bundles
 *.pem
 *.key
