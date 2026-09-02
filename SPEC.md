@@ -328,11 +328,11 @@ artifact set nobody can attribute to gitdr is worse than no evidence.
 
 Every object is written create-only under object-lock retention.
 
-### Run-manifest (`gitdr.manifest/v2`)
+### Run-manifest (`gitdr.manifest/v3`)
 
 ```json
 {
-  "schema": "gitdr.manifest/v2",
+  "schema": "gitdr.manifest/v3",
   "runId": "20260613T120000Z-a1b2c3d4e5f6",
   "tool": { "name": "gitdr", "version": "v0.1.0 (abc123def456)" },
   "source": { "type": "github", "host": "github.com" },
@@ -366,9 +366,29 @@ Every object is written create-only under object-lock retention.
 
   Neither case fails the run. Added as a field rather than as new `status` values, so a
   consumer switching on `status` is unaffected; the field is optional and absent on any repo
-  that was not skipped. The schema version is unchanged: `gitdr.manifest/v2` readers that
-  ignore unknown fields read these manifests correctly.
+  that was not skipped.
+
+  `reason` is a **prefix**, not a whole string: the unchanged path emits
+  `unchanged since <RFC 3339>`, so a consumer matching this field matches on the prefix.
 - `artifacts[].kind`: `bundle`, `meta`, `sha256`, or `lfs`.
+
+**What v3 added, and why the version moved.** Two optional fields on a repo entry:
+
+- `refs` — the ref map the source advertised at copy time, sorted by name, each entry
+  `{ "name", "commit" }`. Recorded only on a successful copy: a run that failed halfway has
+  refs describing a repository nothing was written for, and trusting them would skip the retry.
+  This is what lets `gitdr drill` check the second join — that the bundle declares the history
+  the source actually had — rather than only that a bundle restores to its own header.
+- `copiedAt` — when the artifacts this entry relies on were written. For a copy made this run
+  it is this run's finish time; for a repository skipped as unchanged it is **carried forward**
+  from the run that made the copy. Without it each skip would reset the age of the copy, the
+  refresh bound would never fire, and a repository that never changes would be skipped past its
+  object lock's expiry and end up with nothing.
+
+Both are `omitempty`, so a v2 manifest re-read and re-signed produces identical bytes. The
+version moved anyway, because a consumer that needs `refs` has to be able to ask whether this
+manifest can have them: absent is not the same as none, and a drill that treated a v2 manifest
+as "the source advertised nothing" would report a pass it had not earned.
 - Timestamps are RFC 3339 (UTC). The manifest is signed (Ed25519) over its exact stored
   bytes. The signature is base64 in the `.sig` sidecar and verified with the public key.
 
