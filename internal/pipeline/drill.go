@@ -200,7 +200,7 @@ func Drill(ctx context.Context, d DrillDeps, req DrillRequest) (*DrillReport, er
 	report.FinishedAt = now().UTC()
 	report.Status = statusString(allOK)
 
-	if err := uploadDrill(ctx, d, report, req); err != nil {
+	if err := uploadDrill(ctx, d, report, req, log); err != nil {
 		// The drill ran and its result is in hand; failing to store it is a separate problem
 		// and the caller is told both.
 		return report, fmt.Errorf("store drill report: %w", err)
@@ -389,7 +389,7 @@ func readSig(ctx context.Context, dst dest.Destination, key string) ([]byte, err
 //
 // Written through the same create-only path as everything else, so a drill report cannot be
 // replaced by a later one that says something more comfortable.
-func uploadDrill(ctx context.Context, d DrillDeps, report *DrillReport, req DrillRequest) error {
+func uploadDrill(ctx context.Context, d DrillDeps, report *DrillReport, req DrillRequest, log *slog.Logger) error {
 	if d.Dest == nil || d.SigningKey == nil {
 		return nil
 	}
@@ -404,8 +404,23 @@ func uploadDrill(ctx context.Context, d DrillDeps, report *DrillReport, req Dril
 		return err
 	}
 	sig := base64.StdEncoding.EncodeToString(crypto.Sign(d.SigningKey, canon))
-	_, err = d.Dest.PutImmutable(ctx, key+".sig", strings.NewReader(sig), int64(len(sig)), dest.Retention{})
-	return err
+	if _, err := d.Dest.PutImmutable(ctx, key+".sig", strings.NewReader(sig), int64(len(sig)), dest.Retention{}); err != nil {
+		return err
+	}
+
+	// Say where it went.
+	//
+	// The report is the evidence and nothing else names its location: the key is derived here
+	// and was never printed, so an operator had no supported way to fetch the document they
+	// had just produced, and a reader of the report would have had to re-derive the path from
+	// the manifest key — a second copy of a rule, which drifts.
+	//
+	// A log line rather than a field on the report: the signature covers the report's exact
+	// bytes, so a report naming its own key would have to be signed after the key was chosen,
+	// and `gitdr.drill/v1` consumers would need a version bump for something no consumer of
+	// the JSON needs.
+	log.Info("drill report written", "key", key, "signature", key+".sig")
+	return nil
 }
 
 // LocateForTest exposes locate to the package's external tests. The parsing it does was wrong

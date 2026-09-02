@@ -1,10 +1,12 @@
 package pipeline_test
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
+	"log/slog"
 	"strings"
 	"testing"
 	"time"
@@ -51,12 +53,22 @@ func TestADrillProvesTheBackupRestores(t *testing.T) {
 		t.Fatalf("backup: %v", err)
 	}
 
+	// Captured, because the report's own key is logged and nothing else names it: an operator
+	// had no supported way to fetch the document they had just produced.
+	var logged bytes.Buffer
+
 	report, err := pipeline.Drill(ctx, pipeline.DrillDeps{
 		Dest: md, Git: gitexec.New(nil), PublicKey: pub, SigningKey: signer,
 		ToolVersion: "test", Now: func() time.Time { return clock().Add(time.Hour) },
+		Logger: slog.New(slog.NewTextHandler(&logged, nil)),
 	}, pipeline.DrillRequest{Host: "github.com", Owner: "octo", WorkDir: t.TempDir()})
 	if err != nil {
 		t.Fatalf("drill: %v", err)
+	}
+
+	if out := logged.String(); !strings.Contains(out, "drill report written") ||
+		!strings.Contains(out, ".drill.json") || !strings.Contains(out, ".drill.json.sig") {
+		t.Errorf("the report's key and its signature were not logged:\n%s", out)
 	}
 
 	if report.Status != pipeline.StatusSuccess {
