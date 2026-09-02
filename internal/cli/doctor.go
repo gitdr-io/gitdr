@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 
+	"gitdr.io/gitdr/internal/dest"
 	"gitdr.io/gitdr/internal/source"
 )
 
@@ -80,10 +81,14 @@ func runDoctor(ctx context.Context, args []string) int {
 		switch {
 		case err != nil:
 			add("worm", !cfg.WORM.Require, "could not verify immutability: "+err.Error())
-		case st.Locked:
+		case st.Verdict.Immutable():
 			add("worm", true, "immutable, "+st.Details)
 		case cfg.WORM.Require:
 			add("worm", false, "NOT immutable ("+st.Details+"); worm.require is set, backup would fail")
+		// Unknown is not a quieter version of absent, so it does not borrow its words. What a
+		// reader needs here is that gitdr could not see the answer and where to go instead.
+		case st.Verdict == dest.VerdictUnknown:
+			add("worm", true, "could not read immutability ("+st.Details+"); check with the provider, backup warns and proceeds")
 		default:
 			add("worm", true, "NOT immutable ("+st.Details+"), WORM recommended; backup warns and proceeds")
 		}

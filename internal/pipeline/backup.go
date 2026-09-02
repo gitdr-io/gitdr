@@ -98,7 +98,7 @@ func (r *backupRun) run(ctx context.Context) (*BackupResult, error) {
 	// adoption path (a non-WORM bucket that we warned about and proceeded past), send no
 	// retention so S3 does not reject the write for a bucket without Object Lock enabled.
 	ret := r.retention()
-	if !r.wormStatus.Locked {
+	if !r.wormStatus.Verdict.Immutable() {
 		ret = dest.Retention{}
 	}
 	if r.cfg.Backup.LFS && !gitexec.LFSAvailable() {
@@ -125,7 +125,9 @@ func (r *backupRun) run(ctx context.Context) (*BackupResult, error) {
 		Source: SourceInfo{Type: r.cfg.Source.Type, Host: repos[0].Host},
 		Destination: DestInfo{
 			Type: r.cfg.Destination.Type, Bucket: r.cfg.Destination.S3.Bucket, WormMode: string(ret.Mode),
-			WormImmutable: r.wormStatus.Locked, WormDetails: r.wormStatus.Details,
+			WormImmutable: r.wormStatus.Verdict.Immutable(),
+			WormVerdict:   r.wormStatus.Verdict.Wire(),
+			WormDetails:   r.wormStatus.Details,
 		},
 		StartedAt:  started,
 		FinishedAt: r.now().UTC(),
@@ -152,7 +154,10 @@ func (r *backupRun) run(ctx context.Context) (*BackupResult, error) {
 func (r *backupRun) wormCheck(ctx context.Context) error {
 	st, err := r.dst.VerifyWorm(ctx)
 	if err != nil {
-		r.wormStatus = dest.WormStatus{Details: "could not verify immutability"}
+		// The wording is load-bearing. The platform matches "could not verify" to render a
+		// manifest written by an engine too old to carry a verdict, and there will be such
+		// manifests for years, because customers pin the image.
+		r.wormStatus = dest.WormStatus{Verdict: dest.VerdictUnknown, Details: "could not verify immutability"}
 		if r.requireWORM {
 			return fmt.Errorf("worm preflight: %w", err)
 		}
@@ -160,12 +165,30 @@ func (r *backupRun) wormCheck(ctx context.Context) error {
 		return nil
 	}
 	r.wormStatus = st
-	if st.Locked {
+	if st.Verdict.Immutable() {
 		r.log.Info("destination is WORM-immutable", "mode", st.Mode, "details", st.Details)
 		return nil
 	}
+	// --require-worm passes only on a confirmed lock. Invariant 4 already says the gate fires
+	// when immutability "cannot be confirmed", and unknown is the definition of that.
 	if r.requireWORM {
 		return fmt.Errorf("destination is not WORM-immutable (%s): refusing because worm.require is set", st.Details)
+	}
+	/*
+	 * Two warnings, because they are two different facts and they send an operator to two
+	 * different places.
+	 *
+	 * `not-immutable` is a claim about the bucket, and what to do is local: turn object lock
+	 * on. `unknown` is a claim about gitdr's own visibility, and what to do is elsewhere: ask
+	 * the provider, because gitdr cannot see it from here. Both stay at WARN. Unknown is not
+	 * the quieter problem — for an operator it is arguably worse, since nothing they read
+	 * here tells them which way it went.
+	 */
+	if st.Verdict == dest.VerdictUnknown {
+		r.log.Warn("could not read this destination's immutability, so backups here may or may not be protected. "+
+			"Check the retention settings with the provider; silence here is not evidence against them. Proceeding anyway.",
+			"details", st.Details)
+		return nil
 	}
 	r.log.Warn("destination is NOT WORM-immutable, backups here can be deleted or overwritten. "+
 		"Strongly recommended: enable object-lock/retention on the bucket. Proceeding anyway.", "details", st.Details)

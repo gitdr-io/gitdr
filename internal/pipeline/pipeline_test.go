@@ -33,7 +33,11 @@ type memDest struct {
 func newMemDest(locked bool) *memDest { return &memDest{objs: map[string][]byte{}, locked: locked} }
 
 func (m *memDest) VerifyWorm(context.Context) (dest.WormStatus, error) {
-	return dest.WormStatus{Enabled: m.locked, Locked: m.locked, Mode: "COMPLIANCE", Details: "in-memory"}, nil
+	verdict := dest.VerdictNotImmutable
+	if m.locked {
+		verdict = dest.VerdictImmutable
+	}
+	return dest.WormStatus{Verdict: verdict, Mode: "COMPLIANCE", Details: "in-memory"}, nil
 }
 
 func (m *memDest) PutImmutable(_ context.Context, key string, r io.Reader, _ int64, ret dest.Retention) (dest.PutResult, error) {
