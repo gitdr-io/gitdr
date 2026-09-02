@@ -102,10 +102,25 @@ backup. The run prints the manifest key.
 gitdr verify --config config.yaml --manifest <manifest-key-from-step-7>
 ```
 
-`signature valid: true, artifacts N/N ok` means the run is signed and intact. To prove a
-real restore, follow [`../RESTORE-RUNBOOK.md`](../RESTORE-RUNBOOK.md).
+`signature valid: true, artifacts N/N ok` means the run is signed and intact.
 
-## 9. Schedule it
+## 9. Prove it restores
+
+`verify` re-reads the artifacts and rechecks their checksums, which says the copy is intact.
+It does not say the copy comes back. `drill` restores it and compares what came back:
+
+```sh
+gitdr drill --config config.yaml --manifest <manifest-key-from-step-7> --output json
+```
+
+Every repository is compared against the bundle's own header and against the ref map the
+manifest signed. Refs a clone creates nothing for, `refs/merge-requests/*` and the like, are
+counted apart and named rather than folded into the total. Non-zero exit if anything fails to
+restore or comes back at a different commit.
+
+For a restore you drive by hand, follow [`../RESTORE-RUNBOOK.md`](../RESTORE-RUNBOOK.md).
+
+## 10. Schedule it
 
 - Kubernetes. The Helm chart in [`../charts/gitdr`](../charts/gitdr) (CronJob).
 - VM. The systemd timer or cron sample in [`../deploy`](../deploy).

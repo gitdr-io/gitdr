@@ -31,6 +31,7 @@ gitdr writes backups to a bucket you own and checks it's WORM (write-once-read-m
 - Writes dated, immutable objects plus a signed manifest.
 - Checks WORM before writing and warns loudly when the bucket isn't immutable, or stops cold with `--require-worm`.
 - Restores and verifies with `gitdr restore` and `gitdr verify`.
+- Proves the backups still restore with `gitdr drill`: it restores them, compares every ref against both the bundle's header and the ref map the source advertised, and writes a signed report.
 
 > Metadata is for reference, not replay. Git history and LFS come back exactly. The issue and PR JSON can't be pushed back into a host with the original numbers, authors, and timestamps. No git backup tool can do that, so it isn't really a gitdr limit.
 
