@@ -52,8 +52,8 @@ type RefComparison struct {
 
 // RefMismatch is one ref the restored repository does not account for.
 type RefMismatch struct {
-	Ref  string // the ref as the bundle declares it
-	Want string // the object the bundle declares
+	Ref  string // the ref as the declaring side names it
+	Want string // the object the declaring side records
 	Got  string // what the restore has; empty when the ref is absent altogether
 }
 
@@ -61,12 +61,26 @@ type RefMismatch struct {
 // clone can carry, each at the declared object.
 func (c RefComparison) OK() bool { return len(c.Mismatches) == 0 }
 
-func (m RefMismatch) String() string {
+// Describe names which side declared the object, because two different comparisons produce
+// these and only one of them is against the bundle.
+//
+// `CompareSourceRefs` fills the declared side from the manifest's record of what the source
+// advertised, so a mismatch from it printed as "bundle declares X" said the bundle declares a
+// ref whose absence from the bundle is the entire finding. That went into a signed report an
+// auditor reads, stating the result backwards.
+//
+// `declaredBy` is the whole clause, not a noun, because the two sides do different things: a
+// bundle declares, a source advertised.
+func (m RefMismatch) Describe(declaredBy string) string {
 	if m.Got == "" {
-		return fmt.Sprintf("%s (bundle declares %s, the restored repository has no such ref)", m.Ref, m.Want)
+		return fmt.Sprintf("%s (%s %s, the restored repository has no such ref)", m.Ref, declaredBy, m.Want)
 	}
-	return fmt.Sprintf("%s (bundle declares %s, the restored repository has %s)", m.Ref, m.Want, m.Got)
+	return fmt.Sprintf("%s (%s %s, the restored repository has %s)", m.Ref, declaredBy, m.Want, m.Got)
 }
+
+// String is the bundle comparison, which is what every caller that does not say otherwise
+// means, and what `restore` prints.
+func (m RefMismatch) String() string { return m.Describe("bundle declares") }
 
 // Summary describes the comparison in the words a restore prints.
 //

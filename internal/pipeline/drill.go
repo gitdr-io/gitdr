@@ -276,7 +276,7 @@ func drillOne(ctx context.Context, d DrillDeps, req DrillRequest, m *Manifest, e
 				out.Error = err.Error()
 			}
 			for _, mm := range src.Mismatches {
-				out.Mismatches = append(out.Mismatches, "source: "+mm.String())
+				out.Mismatches = append(out.Mismatches, "source: "+mm.Describe("the source advertised"))
 			}
 		}
 	}

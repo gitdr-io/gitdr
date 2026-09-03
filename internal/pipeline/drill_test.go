@@ -298,6 +298,18 @@ func TestADrillCatchesABundleMissingHistoryTheSourceHad(t *testing.T) {
 		t.Errorf("mismatches do not name the missing branch: %v", r.Mismatches)
 	}
 
+	// And it does not claim the bundle declares the ref whose absence from the bundle is the
+	// finding. `CompareSourceRefs` fills the declared side from the manifest's record of the
+	// source, and this string goes into a signed report an auditor reads.
+	for _, mm := range r.Mismatches {
+		if strings.HasPrefix(mm, "source: ") && strings.Contains(mm, "bundle declares") {
+			t.Errorf("a source mismatch says the bundle declares the ref it is missing: %q", mm)
+		}
+		if strings.HasPrefix(mm, "source: ") && !strings.Contains(mm, "the source advertised") {
+			t.Errorf("a source mismatch does not say which side declared the object: %q", mm)
+		}
+	}
+
 	// And it is prefixed, because the prefix is the only thing that says which comparison
 	// failed. SPEC.md names it as part of gitdr.drill/v1 and the control plane splits on it:
 	// counting the array without reading it told an auditor that refs "came back at a different
