@@ -117,3 +117,42 @@ type Destination interface {
 	// closes the returned reader.
 	Get(ctx context.Context, key string) (io.ReadCloser, error)
 }
+
+// RetentionObservation is what a store said about one object's retention, after it was written.
+//
+// Three answers and not two, for the same reason WormVerdict has three: a store that refuses the
+// question has told us nothing, and recording that as "no retention" is a definite negative gitdr
+// has not earned. On S3 the refusal is the common case rather than the exotic one - the lock
+// headers on a HEAD, and `?retention` itself, both need `s3:GetObjectRetention`, and this
+// product's own advice is to scope destination credentials create/put-only.
+type RetentionObservation string
+
+const (
+	// RetentionPresent means the store returned a retention for the object gitdr wrote.
+	RetentionPresent RetentionObservation = "present"
+	// RetentionAbsent means the store implements the question and said this object holds
+	// nothing. An earned negative: the write was accepted and the retention was not applied.
+	RetentionAbsent RetentionObservation = "absent"
+	// RetentionNotChecked means nobody asked, or the store would not answer. The safe zero
+	// value, and never a downgrade.
+	RetentionNotChecked RetentionObservation = "not-checked"
+)
+
+// RetentionObserver is an optional interface for Destinations that can be asked what retention
+// actually landed on an object they wrote.
+//
+// Optional, so Destination stays at four methods and a backend that cannot answer declines
+// honestly rather than inventing one. The pipeline asserts for it and records
+// RetentionNotChecked when it is absent.
+//
+// This exists because `artifacts[].retainUntil` was not the same fact on every backend. GCS
+// records what the write returned; S3 records what gitdr asked for, because PutObject returns no
+// object-lock headers at all. Both went into a signed manifest, so on S3 the document named a
+// retain-until date that nothing had confirmed - and if a store accepted the write and ignored
+// the lock headers, that date was signed and wrong.
+type RetentionObserver interface {
+	// ObserveRetention asks the store what retention is on key. It is read-only, and it must
+	// distinguish "the store said none" from "the store would not say": an error the caller
+	// cannot classify is RetentionNotChecked, never RetentionAbsent.
+	ObserveRetention(ctx context.Context, key string) (RetentionObservation, time.Time, error)
+}

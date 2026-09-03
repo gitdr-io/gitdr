@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
@@ -245,4 +246,43 @@ func isLoopback(endpoint string) bool {
 		return true
 	}
 	return false
+}
+
+// ObserveRetention asks S3 what retention is actually on an object gitdr wrote.
+//
+// `GetObjectRetention` rather than `HeadObject`, and the difference decides whether this check is
+// usable at all. HeadObject returns `x-amz-object-lock-mode` **only if the caller holds
+// `s3:GetObjectRetention`** - without it the response is a 200 with the headers silently omitted,
+// byte-identical to an object that carries no retention. SPEC tells every operator to scope
+// destination credentials create/put-only, so a HEAD-based check would report "the destination
+// accepted a write it did not retain" about correctly configured, genuinely protected buckets
+// belonging to the operators who followed that advice. That is the unearned negative WormVerdict
+// exists to prevent, and it would teach people to ignore the one warning that matters.
+//
+// `?retention` fails distinguishably instead:
+//
+//	NoSuchObjectLockConfiguration  the store implements the question and this object holds
+//	                               nothing. An earned negative.
+//	AccessDenied / NotImplemented  a refusal, and a refusal is not a no.
+//	anything else                  unclassified, and unclassified is not a no either.
+func (b *Backend) ObserveRetention(ctx context.Context, key string) (dest.RetentionObservation, time.Time, error) {
+	out, err := b.client.GetObjectRetention(ctx, &awss3.GetObjectRetentionInput{
+		Bucket: aws.String(b.bucket),
+		Key:    aws.String(key),
+	})
+	if err != nil {
+		var api smithy.APIError
+		if errors.As(err, &api) && api.ErrorCode() == "NoSuchObjectLockConfiguration" {
+			return dest.RetentionAbsent, time.Time{}, nil
+		}
+		// Every other failure is the store declining to answer. Returned with the error so a
+		// caller can log why, and with the observation that makes no claim.
+		return dest.RetentionNotChecked, time.Time{}, err
+	}
+	if out.Retention == nil || out.Retention.RetainUntilDate == nil {
+		// A 200 with nothing in it is the store answering "none", which is the same earned
+		// negative as the error code above.
+		return dest.RetentionAbsent, time.Time{}, nil
+	}
+	return dest.RetentionPresent, out.Retention.RetainUntilDate.UTC(), nil
 }

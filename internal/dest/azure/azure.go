@@ -10,6 +10,7 @@ import (
 	"io"
 	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
@@ -131,4 +132,25 @@ func (b *Backend) Get(ctx context.Context, key string) (io.ReadCloser, error) {
 		return nil, fmt.Errorf("azure: get %q: %w", key, err)
 	}
 	return resp.Body, nil
+}
+
+// ObserveRetention asks Blob Storage what immutability is actually on an object gitdr wrote.
+//
+// Azure's model is container-level rather than per-object: `PutImmutable` sends no retention and
+// records none, so unlike S3 there is no per-object date in the manifest to be wrong. What can
+// still be wrong is the same shape one level up - `VerifyWorm` reads
+// `IsImmutableStorageWithVersioningEnabled` off the container, and a container that reports the
+// policy while blobs come back without one is the identical unearned claim.
+//
+// `x-ms-immutability-policy-until-date`, absent, is that gap. A failed read says nothing.
+func (b *Backend) ObserveRetention(ctx context.Context, key string) (dest.RetentionObservation, time.Time, error) {
+	bc := b.client.ServiceClient().NewContainerClient(b.container).NewBlobClient(key)
+	props, err := bc.GetProperties(ctx, nil)
+	if err != nil {
+		return dest.RetentionNotChecked, time.Time{}, fmt.Errorf("azure: blob properties %q: %w", key, err)
+	}
+	if props.ImmutabilityPolicyExpiresOn == nil || props.ImmutabilityPolicyExpiresOn.IsZero() {
+		return dest.RetentionAbsent, time.Time{}, nil
+	}
+	return dest.RetentionPresent, props.ImmutabilityPolicyExpiresOn.UTC(), nil
 }

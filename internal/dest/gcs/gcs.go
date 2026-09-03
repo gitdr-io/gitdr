@@ -10,6 +10,7 @@ import (
 	"io"
 	"log/slog"
 	"strings"
+	"time"
 
 	"cloud.google.com/go/storage"
 	"google.golang.org/api/iterator"
@@ -126,4 +127,24 @@ func (b *Backend) Get(ctx context.Context, key string) (io.ReadCloser, error) {
 		return nil, fmt.Errorf("gcs: get %q: %w", key, err)
 	}
 	return rc, nil
+}
+
+// ObserveRetention asks Cloud Storage what retention is on an object gitdr wrote.
+//
+// The native backend is the one case where the write itself already answers this - PutImmutable
+// records `RetentionExpirationTime` off the returned attributes - so this re-reads the object
+// rather than trusting a value carried from the write, which is the whole point of the check.
+//
+// `RetentionExpirationTime` is the bucket retention policy's expiry for this object. A zero value
+// from a successful read is the store answering "nothing holds this object", which is an earned
+// negative. A failed read says nothing and must not be read as one.
+func (b *Backend) ObserveRetention(ctx context.Context, key string) (dest.RetentionObservation, time.Time, error) {
+	attrs, err := b.bucket.Object(key).Attrs(ctx)
+	if err != nil {
+		return dest.RetentionNotChecked, time.Time{}, fmt.Errorf("gcs: attrs %q: %w", key, err)
+	}
+	if attrs.RetentionExpirationTime.IsZero() {
+		return dest.RetentionAbsent, time.Time{}, nil
+	}
+	return dest.RetentionPresent, attrs.RetentionExpirationTime.UTC(), nil
 }
