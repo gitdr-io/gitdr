@@ -298,6 +298,17 @@ func TestADrillCatchesABundleMissingHistoryTheSourceHad(t *testing.T) {
 		t.Errorf("mismatches do not name the missing branch: %v", r.Mismatches)
 	}
 
+	// And it is prefixed, because the prefix is the only thing that says which comparison
+	// failed. SPEC.md names it as part of gitdr.drill/v1 and the control plane splits on it:
+	// counting the array without reading it told an auditor that refs "came back at a different
+	// commit" about a drill where every ref came back exactly as the bundle declared. Dropping
+	// the prefix would reintroduce that silently, in a different repository, months later.
+	for _, mm := range r.Mismatches {
+		if strings.Contains(mm, "refs/heads/release") && !strings.HasPrefix(mm, "source: ") {
+			t.Errorf("a source mismatch is not prefixed \"source: \": %q", mm)
+		}
+	}
+
 	// Every declared ref is accounted for exactly once: it came back at the same commit, a
 	// clone created nothing for it, or it came back at a different one.
 	//
