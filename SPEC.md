@@ -297,8 +297,14 @@ reading the prefix mixes the two, and the two are not the same finding - the fir
 came back is wrong, the second says something was never copied. Only the unprefixed entries
 belong to the ref accounting, where `restoredRefs + unreferenced + mismatches == bundleRefs`.
 
-Documented here because it was already true and nowhere written down. Nothing about the output
-changes.
+A prefixed entry names the source as the side that recorded the object: *the source advertised
+X, the restored repository has no such ref*. It said *bundle declares X* until v0.1.15, which
+was backwards - the bundle not declaring that ref is the whole finding - and it said it inside a
+signed report. The field, the prefix and the accounting are unchanged; only that clause is
+corrected, and a consumer reading the ref name (the first token, since git forbids whitespace in
+one) sees no difference.
+
+The prefix itself was already true and nowhere written down.
 
 Git is content addressed, so a commit hash covers its tree, its blobs and its whole ancestry.
 Comparing ref maps is therefore not a sample of the data, it is a proof that the histories are
