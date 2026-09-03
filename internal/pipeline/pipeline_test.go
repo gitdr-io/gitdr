@@ -498,3 +498,66 @@ func TestVerifyRefusesADocumentThatIsNotAManifest(t *testing.T) {
 		t.Error("the signature check itself should still have run and passed")
 	}
 }
+
+// A drill report can be checked, and the check says what the document claims rather than
+// counting artifacts it never read.
+func TestVerifyDrillChecksTheReportAndSaysWhatItClaims(t *testing.T) {
+	ctx := context.Background()
+	md := newMemDest(true)
+	pubPEM, privPEM, _ := crypto.GenerateKeyPair()
+	signer, _ := crypto.ParsePrivateKey(privPEM)
+	pub, _ := crypto.ParsePublicKey(pubPEM)
+
+	report := pipeline.DrillReport{
+		Schema: pipeline.DrillSchema, DrillID: "d1", ManifestKey: "github.com/octo/manifests/m.json",
+		ManifestSigned: true, Status: pipeline.StatusSuccess, Eligible: 2, Drilled: 2,
+	}
+	canon, err := json.Marshal(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const key = "github.com/octo/drills/20260903T000000Z.drill.json"
+	put := func(k, body string) {
+		t.Helper()
+		if _, err := md.PutImmutable(ctx, k, strings.NewReader(body), int64(len(body)), dest.Retention{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	put(key, string(canon))
+	put(key+".sig", base64.StdEncoding.EncodeToString(crypto.Sign(signer, canon)))
+
+	res, err := pipeline.VerifyDrill(ctx, pipeline.VerifyDeps{Dest: md, PublicKey: pub}, key)
+	if err != nil {
+		t.Fatalf("verify drill: %v", err)
+	}
+	if !res.SignatureValid {
+		t.Error("the signature did not hold on a report this test signed")
+	}
+	if res.ManifestKey != report.ManifestKey || res.Drilled != 2 || res.Eligible != 2 {
+		t.Errorf("the check did not report what the document says: %+v", res)
+	}
+
+	// A manifest under -drill is refused, the mirror of a drill report under -manifest. A
+	// manifest unmarshals into a DrillReport as happily as the reverse, and "0 of 0 restored,
+	// signature valid" over one would be the same green on an unreadable document.
+	manifest := pipeline.Manifest{Schema: pipeline.ManifestSchema}
+	mCanon, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const mKey = "github.com/octo/manifests/20260903T000000Z.manifest.json"
+	put(mKey, string(mCanon))
+	put(mKey+".sig", base64.StdEncoding.EncodeToString(crypto.Sign(signer, mCanon)))
+
+	if _, err := pipeline.VerifyDrill(ctx, pipeline.VerifyDeps{Dest: md, PublicKey: pub}, mKey); err == nil {
+		t.Error("verify -drill passed over a manifest, reporting nothing restored as a success")
+	}
+
+	// And a tampered report fails on the signature, before anything it says is believed.
+	const bad = "github.com/octo/drills/20260903T111111Z.drill.json"
+	put(bad, string(canon)+" ")
+	put(bad+".sig", base64.StdEncoding.EncodeToString(crypto.Sign(signer, canon)))
+	if _, err := pipeline.VerifyDrill(ctx, pipeline.VerifyDeps{Dest: md, PublicKey: pub}, bad); err == nil {
+		t.Error("a report whose bytes changed after signing was accepted")
+	}
+}

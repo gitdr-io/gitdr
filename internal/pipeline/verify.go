@@ -114,3 +114,79 @@ func getSHA(ctx context.Context, d dest.Destination, key string) (string, error)
 	sum, _, err := crypto.SHA256Hex(rc)
 	return sum, err
 }
+
+// VerifyDrillResult is what a drill report says about itself, once its signature has held.
+//
+// Deliberately not VerifyResult with different meanings poured into the same fields. A manifest
+// verification counts artifacts read back out of the bucket; this one reads nothing back and
+// counts nothing. Reusing `artifactsChecked` to mean "repositories the report claims" would put
+// two different measurements behind one name, which is the collapse this codebase keeps undoing.
+type VerifyDrillResult struct {
+	DrillKey       string `json:"drillKey"`
+	SignatureValid bool   `json:"signatureValid"`
+	Schema         string `json:"schema"`
+	DrillID        string `json:"drillId"`
+	// The manifest the drill tested, as the report names it.
+	ManifestKey string `json:"manifestKey"`
+	// Whether that manifest's own signature was checked before its contents were believed. The
+	// report carries a plain bool, so this is the report's word, verbatim.
+	ManifestSigned bool   `json:"manifestSigned"`
+	Status         string `json:"status"`
+	Eligible       int    `json:"eligible"`
+	Drilled        int    `json:"drilled"`
+	// Repositories the report records as not coming back, named so a reader has something to act
+	// on rather than a count to trust.
+	Failures []string `json:"failures,omitempty"`
+}
+
+// VerifyDrill checks a drill report's Ed25519 signature and reports what the document claims.
+//
+// It does not re-drill, and it reads no artifacts. The question it answers is the one an auditor
+// holding a printed evidence pack actually has: is this document authentic, and what does it say.
+// Re-running the drill is a different and much more expensive question, and conflating them would
+// make the cheap check unavailable.
+//
+// In the engine rather than the control plane because the platform holds no read credentials for
+// the customer's bucket and structurally cannot fetch the signed object. This serves the operator
+// running the container from cron, who has no account at all, with the same command.
+func VerifyDrill(ctx context.Context, d VerifyDeps, drillKey string) (*VerifyDrillResult, error) {
+	res := &VerifyDrillResult{DrillKey: drillKey}
+
+	canon, err := getBytes(ctx, d.Dest, drillKey)
+	if err != nil {
+		return res, fmt.Errorf("read drill report: %w", err)
+	}
+	sigB64, err := getBytes(ctx, d.Dest, drillKey+".sig")
+	if err != nil {
+		return res, fmt.Errorf("read signature: %w", err)
+	}
+	sig, err := base64.StdEncoding.DecodeString(strings.TrimSpace(string(sigB64)))
+	if err != nil {
+		return res, fmt.Errorf("decode signature: %w", err)
+	}
+	if err := crypto.Verify(d.PublicKey, canon, sig); err != nil {
+		return res, fmt.Errorf("verify: %w", err)
+	}
+	res.SignatureValid = true
+
+	var r DrillReport
+	if err := json.Unmarshal(canon, &r); err != nil {
+		return res, fmt.Errorf("parse drill report: %w", err)
+	}
+	// The mirror of the refusal in Verify. A manifest unmarshals into a DrillReport as happily as
+	// the reverse, and reporting "0 of 0 restored, signature valid" over one would be the same
+	// green on a document this command cannot read.
+	if r.Schema != DrillSchema {
+		return res, fmt.Errorf("%s is a %q document, not a drill report: use `gitdr verify -manifest` for a manifest", drillKey, r.Schema)
+	}
+
+	res.Schema, res.DrillID, res.ManifestKey = r.Schema, r.DrillID, r.ManifestKey
+	res.ManifestSigned, res.Status = r.ManifestSigned, r.Status
+	res.Eligible, res.Drilled = r.Eligible, r.Drilled
+	for _, repo := range r.Repos {
+		if repo.Status != StatusSuccess {
+			res.Failures = append(res.Failures, fmt.Sprintf("%s: %s", repo.Slug, repo.Error))
+		}
+	}
+	return res, nil
+}

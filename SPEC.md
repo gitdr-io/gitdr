@@ -474,7 +474,22 @@ Wikis are a separate git repository and are out of scope for the metadata dump.
 | `backup`  | the run-manifest above, plus `manifestKey` |
 | `restore` | `{ "bundleKey", "sha256", "outDir", "verified" }` |
 | `verify`  | `{ "manifestKey", "signatureValid", "artifactsChecked", "artifactsOk", "failures": [...] }` |
+| `verify -drill` | `{ "drillKey", "signatureValid", "schema", "drillId", "manifestKey", "manifestSigned", "status", "eligible", "drilled", "failures": [...] }` |
 | `doctor`  | `{ "ok", "checks": [ { "name", "ok", "detail" } ] }` |
+
+`verify -drill <key>` checks a drill report's signature and reports what the document claims.
+It reads nothing back out of the bucket, which is why it has no artifact count: reusing
+`artifactsChecked` to mean "repositories the report mentions" would put two different
+measurements behind one name. It does not re-run the drill — that is a different and far more
+expensive question, and conflating them would make the cheap check unavailable.
+
+The two forms refuse each other's documents. A drill report unmarshals into a manifest as
+happily as the reverse, so without that refusal each would report a valid signature over zero
+artifacts and exit zero on a document it cannot read.
+
+*Added 2026-09. `gitdr.manifest/v4` and `gitdr.drill/v1` are both unchanged, and the existing
+`verify` output shape is untouched: this is a second shape under a new flag, not a change to
+the first.*
 
 Exit codes are fail-closed. Any non-zero code means the run is not to be trusted; the specific
 value narrows why.
