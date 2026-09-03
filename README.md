@@ -53,7 +53,7 @@ gitdr writes to any S3-compatible or major-cloud object storage. Immutability (W
 | IBM Cloud Object Storage | Native / S3-compat | ✅ | Immutable Object Storage |
 | Alibaba Cloud OSS | Native / S3-compat | ✅ | Retention / WORM |
 | Backblaze B2 | S3-compatible | ✅ | Enable at bucket creation |
-| Wasabi | S3-compatible | ✅ | 90-day minimum retention |
+| Wasabi | S3-compatible | ✅ | compliance mode, Cohasset-assessed |
 | MinIO | S3-compatible | ✅ | Self-hosted |
 | Ceph (RGW) | S3-compatible | ✅ | Self-hosted |
 | IDrive e2 | S3-compatible | ✅ | |
@@ -71,7 +71,7 @@ gitdr writes to any S3-compatible or major-cloud object storage. Immutability (W
 | DigitalOcean Spaces | S3-compatible | ❌ | No object lock |
 | Linode / Akamai | S3-compatible | ❌ | No object lock |
 | Vultr | S3-compatible | ❌ | No object lock |
-| Cloudflare R2 | S3-compatible | ❌ | No object lock or versioning |
+| Cloudflare R2 | S3-compatible | ❌ | Bucket locks, not Object Lock; gitdr cannot read them |
 | Fastly Object Storage | S3-compatible | ❌ | No object lock |
 | Garage / SeaweedFS | S3-compatible | ⚠️ | Open-source; limited, verify |
 

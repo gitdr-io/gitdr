@@ -72,10 +72,10 @@ job.
 | AWS S3 | Object Lock (Compliance/Governance + legal hold) | reference implementation |
 | Google Cloud Storage | Bucket Lock (locked retention) + Object Retention | |
 | Azure Blob | Immutability policies (time-based retention + legal hold) | |
-| Wasabi | S3 Object Lock | 90-day minimum retention |
+| Wasabi | S3 Object Lock | compliance mode, Cohasset-assessed |
 | Backblaze B2 | S3 Object Lock (Compliance/Governance) | enable at bucket creation, versioning required |
 | MinIO / IDrive E2 | S3 Object Lock | self-hosted WORM |
-| Cloudflare R2 | none (no S3 Object Lock) | usable as a non-WORM destination, gitdr warns and proceeds |
+| Cloudflare R2 | none (no S3 Object Lock) | bucket locks stop deletes, an administrator can remove them, gitdr cannot read them and reports unknown |
 
 Most are S3-compatible, so one S3 backend (configurable endpoint) covers AWS, Wasabi, B2,
 MinIO, and IDrive. Only GCS and Azure need separate backends.
@@ -101,10 +101,10 @@ MinIO integration test exercises this path).
 | Provider | endpoint | Object Lock | Quirks |
 |---|---|---|---|
 | AWS S3 | default | ✅ reference | none |
-| Wasabi | `https://s3.<region>.wasabisys.com` | ✅ | 90-day minimum retention |
+| Wasabi | `https://s3.<region>.wasabisys.com` | ✅ | compliance mode, Cohasset-assessed |
 | Backblaze B2 | `https://s3.<region>.backblazeb2.com` | ✅ | enable at bucket creation, versioning required, no conditional writes |
 | MinIO / IDrive E2 | `http(s)://host:9000` | ✅ | self-hosted, create the bucket with object lock |
-| Cloudflare R2 | `https://<account>.r2.cloudflarestorage.com` | ❌ | no S3 Object Lock, usable as a non-WORM target, gitdr warns |
+| Cloudflare R2 | `https://<account>.r2.cloudflarestorage.com` | ❌ | bucket locks, not Object Lock; gitdr cannot read them and reports unknown |
 
 Providers not in this list work too, but verify their Object Lock support before you rely
 on WORM. Credentials are static keys via the standard `AWS_*` env (the SDK default chain).
