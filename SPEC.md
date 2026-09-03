@@ -227,7 +227,19 @@ here. `internal/pipeline/manifest_test.go` pins the current field set.
 v2 records the immutability observed at write time, since gitdr now writes to non-WORM
 destinations too (§4). `destination.wormImmutable` and `wormDetails` capture it. The
 manifest is signed, so this is a tamper-evident answer to "was this backup on WORM
-storage?". `verify` doesn't check the schema string, so older manifests still verify.
+storage?". `verify` does not compare the schema *version*, so older manifests still verify — but from
+2026-09 it does refuse a document that is not a manifest at all.
+
+Before that, `verify -manifest` on a drill report printed `signature valid: true` and
+`0 of 0 artifacts ok`, and exited zero. The signature check is schema-agnostic and correct,
+because a signature is over bytes; the problem was what came after it. A drill report unmarshals
+into a `Manifest` without error, having no artifacts, so the command reported success over a
+document it cannot read — and would have gone on reporting success if that document were swapped
+for anything else signed by the same key.
+
+That is a behaviour change from exit 0 to non-zero for one input, and it is a fix rather than a
+break: the previous answer was wrong. A drill report is signed evidence and deserves a real
+check; `verify -manifest` is not it.
 
 **v3 adds `repos[].refs` and `repos[].copiedAt`, and it is additive: every v2 field is
 unchanged, both new fields are `omitempty`, and a v2 manifest still canonicalises to the bytes

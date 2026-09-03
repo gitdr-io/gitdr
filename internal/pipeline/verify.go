@@ -58,6 +58,19 @@ func Verify(ctx context.Context, d VerifyDeps, manifestKey string) (*VerifyResul
 	if err := json.Unmarshal(canon, &m); err != nil {
 		return res, fmt.Errorf("parse manifest: %w", err)
 	}
+	// Refused rather than counted, and this is not pedantry about a field.
+	//
+	// Verify is schema-agnostic up to this point: it fetches the object and its .sig and checks
+	// the signature, which is right, because the signature is over bytes. Then it unmarshals into
+	// a Manifest, and a drill report unmarshals into a Manifest without error - it simply has no
+	// artifacts. So `verify -manifest {ts}.drill.json` printed "signature valid, 0 of 0 artifacts
+	// ok" and exited zero: a check that passes on a document it does not understand, and that
+	// would go on passing if the report were swapped for anything else signed by the same key.
+	//
+	// A drill report is signed evidence and deserves a real check; it is just not this one.
+	if m.Schema != "" && m.Schema != ManifestSchema && !strings.HasPrefix(m.Schema, "gitdr.manifest/") {
+		return res, fmt.Errorf("%s is a %s document, not a manifest: verify checks manifests, and counting its zero artifacts as a pass would be a green over a document this command cannot read", manifestKey, m.Schema)
+	}
 
 	for _, repo := range m.Repos {
 		for _, a := range repo.Artifacts {

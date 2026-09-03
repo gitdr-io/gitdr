@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -450,5 +452,49 @@ func TestEncryptedBackupRestore(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "encrypted") {
 		t.Errorf("want an 'encrypted' hint in the error, got: %v", err)
+	}
+}
+
+// `verify` refuses a document that is not a manifest, rather than passing over it.
+//
+// Verify is schema-agnostic up to the signature, which is correct: a signature is over bytes.
+// Then it unmarshals into a Manifest, and a drill report unmarshals cleanly - it simply has no
+// artifacts. So `verify -manifest {ts}.drill.json` reported "signature valid, 0 of 0 ok" and
+// exited zero, on the evidence surface, for a document the command cannot read. That check
+// would have gone on passing if the report were swapped for anything else signed by the same
+// key, which is the definition of a check that cannot fail.
+func TestVerifyRefusesADocumentThatIsNotAManifest(t *testing.T) {
+	ctx := context.Background()
+	md := newMemDest(true)
+	pubPEM, privPEM, _ := crypto.GenerateKeyPair()
+	signer, _ := crypto.ParsePrivateKey(privPEM)
+	pub, _ := crypto.ParsePublicKey(pubPEM)
+
+	// A drill report, signed exactly as the engine signs one, so the only thing under test is
+	// what verify does after the signature holds.
+	report := pipeline.DrillReport{Schema: pipeline.DrillSchema, DrillID: "d1", Status: pipeline.StatusSuccess}
+	canon, err := json.Marshal(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const key = "github.com/octo/drills/20260903T000000Z.drill.json"
+	if _, err := md.PutImmutable(ctx, key, strings.NewReader(string(canon)), int64(len(canon)), dest.Retention{}); err != nil {
+		t.Fatal(err)
+	}
+	sig := base64.StdEncoding.EncodeToString(crypto.Sign(signer, canon))
+	if _, err := md.PutImmutable(ctx, key+".sig", strings.NewReader(sig), int64(len(sig)), dest.Retention{}); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := pipeline.Verify(ctx, pipeline.VerifyDeps{Dest: md, PublicKey: pub}, key)
+	if err == nil {
+		t.Fatal("verify passed over a drill report; it counted zero artifacts as a success")
+	}
+	if !strings.Contains(err.Error(), pipeline.DrillSchema) {
+		t.Errorf("the refusal does not say what the document was: %v", err)
+	}
+	// The signature still held, and saying so is not the same as saying the document verified.
+	if res == nil || !res.SignatureValid {
+		t.Error("the signature check itself should still have run and passed")
 	}
 }
