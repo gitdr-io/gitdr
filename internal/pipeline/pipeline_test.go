@@ -92,6 +92,11 @@ func (f *fixtureSource) FetchMetadata(_ context.Context, r source.Repo) ([]byte,
 func initFixtureRepo(t *testing.T) string {
 	t.Helper()
 	if _, err := exec.LookPath("git"); err != nil {
+		// A helper, so this skip silences every test built on the fixture repository at once,
+		// and the package still reports ok. That is indistinguishable from passing.
+		if os.Getenv("CI") != "" {
+			t.Fatal("git is not installed; in CI the fixture repository must be built, not skipped")
+		}
 		t.Skip("git not installed")
 	}
 	dir := t.TempDir()

@@ -318,6 +318,12 @@ func gitRun(t *testing.T, dir string, args ...string) {
 // table above pins the rules; this proves the rules are the ones git produces.
 func TestCompareRestoredRefsRealGit(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
+		// The git-lfs skips beside this one already fail in CI; git itself did not, and it is
+		// the more fundamental dependency. This test is what proves the ref comparison matches
+		// what git actually produces, which is the basis of every claim a drill makes.
+		if os.Getenv("CI") != "" {
+			t.Fatal("git is not installed; in CI the real-git comparison must run, not skip")
+		}
 		t.Skip("git is not installed")
 	}
 	// Not inside a repository, the standing the container runs in.
