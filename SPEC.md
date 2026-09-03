@@ -464,7 +464,29 @@ Wikis are a separate git repository and are out of scope for the metadata dump.
 | `verify`  | `{ "manifestKey", "signatureValid", "artifactsChecked", "artifactsOk", "failures": [...] }` |
 | `doctor`  | `{ "ok", "checks": [ { "name", "ok", "detail" } ] }` |
 
-Exit codes are fail-closed, non-zero on any failure.
+Exit codes are fail-closed. Any non-zero code means the run is not to be trusted; the specific
+value narrows why.
+
+| Code | Meaning |
+|---|---|
+| 0 | the command did what it was asked |
+| 1 | the work failed |
+| 2 | the command line was wrong; nothing ran |
+| 3 | the work succeeded and a durable record of it could not be written |
+
+Exit 3 exists because `drill` has two separable outcomes. A drill that restores every eligible
+repository and then cannot store its signed report has proved the backups restore and has not
+filed the proof. Reporting that as exit 1 tells an operator that a repository did not come back,
+which gitdr did not observe and has not earned the right to say. Exit 3 is issued only when the
+drill itself is clean; any repository failure is exit 1, whether or not the report was stored.
+
+`backup` never emits exit 3. Its manifest is not a record of the work, it is part of it:
+artifacts with no stored manifest cannot be verified, cannot be restored with signature
+checking, and cannot be drilled. A backup that did not write its manifest failed, and exit 1 is
+the true answer.
+
+*Added after `gitdr.manifest/v2` and `gitdr.drill/v1`; both schemas are unchanged. Additive for
+any consumer testing `!= 0`, which is every known one.*
 
 `backup`'s `manifestKey` is the object key the manifest was stored under, and it is the value
 `verify -manifest` expects. It is an addition to the *output*, not to the manifest: the

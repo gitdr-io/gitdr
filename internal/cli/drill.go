@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -97,19 +98,40 @@ func runDrill(ctx context.Context, args []string) int {
 			b, _ := json.MarshalIndent(report, "", "  ")
 			fmt.Println(string(b))
 		} else {
-			printDrill(report)
+			printDrill(report, !errors.Is(err, pipeline.ErrReportNotStored))
 		}
 	}
 	if err != nil {
 		log.Error("drill", "err", err)
+	}
+	return drillExit(err)
+}
+
+// The drill's error, as a process exit code.
+//
+// A repository that did not come back outranks a report that was not filed, so exit 3 always
+// means the restores passed and only the evidence is missing. Both can be true at once: the
+// pipeline joins them rather than returning the first, because returning the store failure
+// early reported a broken backup as a storage problem.
+//
+// Kept pure and separate so the mapping is testable without a destination, keys and a config,
+// and so the pipeline never learns what a process exit code is.
+func drillExit(err error) int {
+	switch {
+	case err == nil:
+		return 0
+	case errors.Is(err, pipeline.ErrDrillFailures):
+		return 1
+	case errors.Is(err, pipeline.ErrReportNotStored):
+		return 3
+	default:
 		return 1
 	}
-	return 0
 }
 
 // The human summary. One line per repository and one for the whole run, because a drill of a
 // thousand repositories is read by scrolling to the end.
-func printDrill(r *pipeline.DrillReport) {
+func printDrill(r *pipeline.DrillReport, stored bool) {
 	for _, repo := range r.Repos {
 		if repo.Status != pipeline.StatusSuccess {
 			fmt.Printf("FAIL %s: %s\n", repo.Slug, repo.Error)
@@ -127,5 +149,10 @@ func printDrill(r *pipeline.DrillReport) {
 	fmt.Printf("drill %s: %s restored from %s\n", r.Status, scope, r.ManifestKey)
 	if !r.ManifestSigned {
 		fmt.Println("note: the manifest's signature was not checked, so this proves these artifacts restore, not that gitdr wrote them")
+	}
+	// Without this, a clean run ends "all 214 repositories restored" and then exits non-zero
+	// with nothing on screen to explain it.
+	if !stored {
+		fmt.Println("note: this report was not stored, so the only copy of it is the output above")
 	}
 }
