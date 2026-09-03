@@ -297,6 +297,34 @@ func TestADrillCatchesABundleMissingHistoryTheSourceHad(t *testing.T) {
 	if !named {
 		t.Errorf("mismatches do not name the missing branch: %v", r.Mismatches)
 	}
+
+	// Every declared ref is accounted for exactly once: it came back at the same commit, a
+	// clone created nothing for it, or it came back at a different one.
+	//
+	// The passing case already pins `restored == declared - unreferenced`. This is the same
+	// sum with the third term, and it is the case that needs it: the control plane's evidence
+	// page prints `declared - restored` at readout size and, when both are non-zero, explains
+	// it underneath as "N no ref · M different". If these three ever stop summing, that page
+	// shows an auditor a number its own breakdown does not account for, and nothing downstream
+	// can detect it, because only the engine knows how the refs were partitioned.
+	//
+	// `Mismatches` carries two comparisons in one slice, and only one of them is part of this
+	// sum. A bundle-versus-restore mismatch is a declared ref that came back at a different
+	// object; a source-versus-bundle mismatch is prefixed "source: " and is about a ref the
+	// bundle never declared, so counting it here would overshoot the denominator. That prefix
+	// is the only thing separating them, which is why it is asserted rather than assumed.
+	var restoreMismatches int
+	for _, mm := range r.Mismatches {
+		if !strings.HasPrefix(mm, "source: ") {
+			restoreMismatches++
+		}
+	}
+	if got := r.RestoredRefs + len(r.Unreferenced) + restoreMismatches; got != r.BundleRefs {
+		t.Errorf(
+			"the declared refs do not add up: %d restored + %d unreferenced + %d mismatched = %d, declared %d",
+			r.RestoredRefs, len(r.Unreferenced), restoreMismatches, got, r.BundleRefs,
+		)
+	}
 }
 
 // A pre-v3 copy: the manifest records no source refs. The drill still proves the bundle
