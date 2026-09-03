@@ -28,6 +28,9 @@ type memDest struct {
 	mu     sync.Mutex
 	objs   map[string][]byte
 	locked bool
+	// refuse makes PutImmutable fail for any key containing this substring, so a test can let
+	// the work succeed and the bookkeeping fail. Empty refuses nothing.
+	refuse string
 }
 
 func newMemDest(locked bool) *memDest { return &memDest{objs: map[string][]byte{}, locked: locked} }
@@ -45,6 +48,9 @@ func (m *memDest) PutImmutable(_ context.Context, key string, r io.Reader, _ int
 	defer m.mu.Unlock()
 	if _, exists := m.objs[key]; exists {
 		return dest.PutResult{}, fmt.Errorf("create-only: %s already exists", key)
+	}
+	if m.refuse != "" && strings.Contains(key, m.refuse) {
+		return dest.PutResult{}, fmt.Errorf("access denied: %s", key)
 	}
 	b, err := io.ReadAll(r)
 	if err != nil {

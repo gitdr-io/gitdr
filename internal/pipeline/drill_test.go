@@ -6,6 +6,7 @@ import (
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"strings"
 	"testing"
@@ -473,4 +474,90 @@ func TestLocateHandlesANestedGroupPath(t *testing.T) {
 			}
 		})
 	}
+}
+
+// The two ways a drill ends badly must not be reported as each other.
+//
+// Before exit 3 existed, a drill where every repository restored and the report could not be
+// stored returned one undifferentiated error, and the CLI turned that into exit 1. The agent
+// takes the exit code as the verdict, deliberately, so the control plane told the customer that
+// a repository had not come back. Nothing of the sort had been observed.
+func TestADrillSeparatesAFailedRestoreFromAnUnfiledReport(t *testing.T) {
+	setup := func(t *testing.T, damage bool) (*pipeline.DrillReport, error) {
+		t.Helper()
+		t.Chdir(t.TempDir())
+		ctx := context.Background()
+
+		repoDir := initFixtureRepo(t)
+		src := &fixtureSource{repos: []source.Repo{{
+			Host: "github.com", Owner: "octo", Name: "hello", CloneURL: repoDir, DefaultBranch: "main",
+		}}}
+		md := newMemDest(true)
+
+		pubPEM, privPEM, _ := crypto.GenerateKeyPair()
+		signer, _ := crypto.ParsePrivateKey(privPEM)
+		pub, _ := crypto.ParsePublicKey(pubPEM)
+		clock := func() time.Time { return time.Date(2026, 6, 13, 12, 0, 0, 0, time.UTC) }
+
+		if _, err := pipeline.Backup(ctx, pipeline.BackupDeps{
+			Config: testConfig(), Source: src, Dest: md, Git: gitexec.New(nil),
+			SigningKey: signer, ToolVersion: "test", Now: clock,
+		}); err != nil {
+			t.Fatalf("backup: %v", err)
+		}
+		if damage {
+			md.mu.Lock()
+			for k := range md.objs {
+				if strings.HasSuffix(k, ".bundle") {
+					md.objs[k] = []byte("this is not a git bundle")
+				}
+			}
+			md.mu.Unlock()
+		}
+		// Refuse only the report. The backup is already written, so this is a destination that
+		// took the artifacts and will not take the evidence, which is what a prefix-scoped IAM
+		// policy actually looks like.
+		md.refuse = "/drills/"
+
+		return pipeline.Drill(ctx, pipeline.DrillDeps{
+			Dest: md, Git: gitexec.New(nil), PublicKey: pub, SigningKey: signer,
+			ToolVersion: "test", Now: func() time.Time { return clock().Add(time.Hour) },
+		}, pipeline.DrillRequest{Host: "github.com", Owner: "octo", WorkDir: t.TempDir()})
+	}
+
+	t.Run("everything restored and the report could not be stored", func(t *testing.T) {
+		report, err := setup(t, false)
+		if err == nil {
+			t.Fatal("an unstored report reported no error, so the evidence can go missing silently")
+		}
+		if !errors.Is(err, pipeline.ErrReportNotStored) {
+			t.Errorf("err = %v, want ErrReportNotStored", err)
+		}
+		// The whole point. Claiming this is a restore failure is the unearned negative.
+		if errors.Is(err, pipeline.ErrDrillFailures) {
+			t.Errorf("err = %v, claims a drill failure where every repository restored", err)
+		}
+		if report == nil || report.Status != pipeline.StatusSuccess {
+			t.Fatalf("report = %+v, want a success report to survive as the only copy", report)
+		}
+	})
+
+	t.Run("a repository failed and the report could not be stored", func(t *testing.T) {
+		report, err := setup(t, true)
+		if err == nil {
+			t.Fatal("a damaged bundle reported no error")
+		}
+		// Both are true and the restore failure is the one that decides the exit code. Storing
+		// the report first and returning early, which is what the code did, reported a broken
+		// backup as a storage problem.
+		if !errors.Is(err, pipeline.ErrDrillFailures) {
+			t.Errorf("err = %v, want ErrDrillFailures to survive alongside the store failure", err)
+		}
+		if !errors.Is(err, pipeline.ErrReportNotStored) {
+			t.Errorf("err = %v, want ErrReportNotStored reported too", err)
+		}
+		if report == nil || report.Status != pipeline.StatusFailed {
+			t.Fatalf("report = %+v, want a failed report", report)
+		}
+	})
 }

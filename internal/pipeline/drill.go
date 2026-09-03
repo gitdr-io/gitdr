@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -200,16 +201,34 @@ func Drill(ctx context.Context, d DrillDeps, req DrillRequest) (*DrillReport, er
 	report.FinishedAt = now().UTC()
 	report.Status = statusString(allOK)
 
-	if err := uploadDrill(ctx, d, report, req, log); err != nil {
-		// The drill ran and its result is in hand; failing to store it is a separate problem
-		// and the caller is told both.
-		return report, fmt.Errorf("store drill report: %w", err)
-	}
+	// Both failures are surfaced, and the repository verdict is the one that decides the exit
+	// code. Storing the report first and returning early would report a drill that found a
+	// broken backup as a storage problem, which is the more forgiving of the two answers.
+	var errs []error
 	if !allOK {
-		return report, fmt.Errorf("drill completed with failures")
+		errs = append(errs, ErrDrillFailures)
 	}
-	return report, nil
+	if err := uploadDrill(ctx, d, report, req, log); err != nil {
+		errs = append(errs, fmt.Errorf("%w: %w", ErrReportNotStored, err))
+	}
+	return report, errors.Join(errs...)
 }
+
+// The two ways a drill ends badly, kept apart because they mean opposite things to whoever
+// reads the result.
+//
+// A drill that found a repository which does not come back is a statement about the customer's
+// backups. A drill that restored everything and could not store its signed report is a
+// statement about this run's bookkeeping: the backups were proved and the proof was not filed.
+// Collapsing them, which is what a single non-zero exit did, made the engine assert a restore
+// failure it had not observed. That is the same unearned negative WormVerdict exists to prevent
+// on the other side of the product.
+//
+// Both are still failures. `drill` never exits zero on either.
+var (
+	ErrDrillFailures   = errors.New("drill completed with failures")
+	ErrReportNotStored = errors.New("store drill report")
+)
 
 func drillOne(ctx context.Context, d DrillDeps, req DrillRequest, m *Manifest, entry RepoEntry, log *slog.Logger) DrillRepo {
 	out := DrillRepo{Slug: entry.Slug, Status: StatusSuccess, SourceRefs: len(entry.Refs)}
@@ -400,11 +419,21 @@ func uploadDrill(ctx context.Context, d DrillDeps, report *DrillReport, req Dril
 	base := path.Dir(path.Dir(report.ManifestKey)) // {host}/{org}
 	key := path.Join(base, "drills", report.FinishedAt.UTC().Format("20060102T150405Z")+".drill.json")
 
-	if _, err := d.Dest.PutImmutable(ctx, key, strings.NewReader(string(canon)), int64(len(canon)), dest.Retention{}); err != nil {
+	// Retried like every other write in the pipeline. A drill is the most expensive command in
+	// the product, so a blip on the last PUT should not cost the whole proof. It does not make
+	// the failure impossible - a prefix-denied policy fails all three times - which is why the
+	// exit code still has to distinguish this from a restore that did not come back.
+	if err := retry(ctx, 3, time.Second, func() error {
+		_, err := d.Dest.PutImmutable(ctx, key, strings.NewReader(string(canon)), int64(len(canon)), dest.Retention{})
+		return err
+	}); err != nil {
 		return err
 	}
 	sig := base64.StdEncoding.EncodeToString(crypto.Sign(d.SigningKey, canon))
-	if _, err := d.Dest.PutImmutable(ctx, key+".sig", strings.NewReader(sig), int64(len(sig)), dest.Retention{}); err != nil {
+	if err := retry(ctx, 3, time.Second, func() error {
+		_, err := d.Dest.PutImmutable(ctx, key+".sig", strings.NewReader(sig), int64(len(sig)), dest.Retention{})
+		return err
+	}); err != nil {
 		return err
 	}
 
