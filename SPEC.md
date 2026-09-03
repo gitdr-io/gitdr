@@ -289,6 +289,17 @@ to carry the history the source actually had — which nothing could check befor
 and which is the half an auditor is really asking about. **A bundle written from a half-fetched
 mirror passes the first check perfectly and fails the second.**
 
+Both joins report into the same `mismatches` array, and a source failure is prefixed
+`source: `. That prefix is part of `gitdr.drill/v1`, not an implementation detail: it is the
+only thing distinguishing "a ref the bundle declared came back at a different object" from "the
+bundle never declared a ref the source advertised". A consumer that counts the array without
+reading the prefix mixes the two, and the two are not the same finding - the first says what
+came back is wrong, the second says something was never copied. Only the unprefixed entries
+belong to the ref accounting, where `restoredRefs + unreferenced + mismatches == bundleRefs`.
+
+Documented here because it was already true and nowhere written down. Nothing about the output
+changes.
+
 Git is content addressed, so a commit hash covers its tree, its blobs and its whole ancestry.
 Comparing ref maps is therefore not a sample of the data, it is a proof that the histories are
 equal. A vendor holding backups in a proprietary blob store has nothing to compare against and
