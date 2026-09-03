@@ -14,7 +14,7 @@ import (
 // v3 adds RepoEntry.Refs, the ref-to-commit map the source advertised when the copy was
 // made. It is what lets the next run tell whether a repository has changed without cloning
 // it, and it is additive: every v2 field is unchanged and a v2 manifest still verifies.
-const ManifestSchema = "gitdr.manifest/v4"
+const ManifestSchema = "gitdr.manifest/v5"
 
 // Status values used in the manifest.
 const (
@@ -87,6 +87,25 @@ type DestInfo struct {
 	 */
 	WormVerdict string `json:"wormVerdict,omitempty"`
 	WormDetails string `json:"wormDetails,omitempty"` // observed immutability detail
+	/*
+	 * What was actually on an object gitdr wrote, from `gitdr.manifest/v5` on: "present",
+	 * "absent" or "not-checked".
+	 *
+	 * WormVerdict is a statement about the bucket's configuration. This is a statement about one
+	 * object, and the two can disagree: a store can report Object Lock enabled, accept a write,
+	 * and apply nothing. Nothing else in the manifest could tell those apart, because
+	 * `artifacts[].retainUntil` on the S3 path is the retention gitdr *asked for* - PutObject
+	 * returns no object-lock headers, so there was never anything to observe there.
+	 *
+	 * Absent, like WormVerdict's, means the engine was too old to say. It is **not**
+	 * "not-checked": an engine that did not have the field and an engine that asked and got no
+	 * answer are different facts, and a reader that folds them together is making the same
+	 * mistake this field exists to end.
+	 *
+	 * Only ever lowers a claim. A "present" here does not raise WormVerdict, because one object
+	 * carrying retention proves the store implements the headers and nothing about the rest.
+	 */
+	RetentionObserved string `json:"retentionObserved,omitempty"`
 }
 
 // RepoEntry is the per-repository outcome.

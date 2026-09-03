@@ -561,3 +561,111 @@ func TestVerifyDrillChecksTheReportAndSaysWhatItClaims(t *testing.T) {
 		t.Error("a report whose bytes changed after signing was accepted")
 	}
 }
+
+// A destination that takes the write and applies no retention is recorded as what it is.
+//
+// This is the failure the whole WORM gate exists to prevent, in the one direction the gate could
+// not see: the bucket answers the configuration question correctly, the write is accepted, and
+// nothing lands on the object. Before this, the manifest said `wormImmutable: true` with a
+// retain-until date, signed, and the date was the one gitdr asked for rather than one anybody
+// confirmed - `PutObject` returns no object-lock headers, so on S3 that field was never an
+// observation at all.
+func TestABucketThatAppliesNoRetentionIsNotRecordedAsImmutable(t *testing.T) {
+	ctx := context.Background()
+	repoDir := initFixtureRepo(t)
+	src := &fixtureSource{repos: []source.Repo{{Host: "github.com", Owner: "octo", Name: "hello", CloneURL: repoDir}}}
+	_, privPEM, _ := crypto.GenerateKeyPair()
+	signer, _ := crypto.ParsePrivateKey(privPEM)
+
+	for _, tc := range []struct {
+		name          string
+		observes      dest.RetentionObservation
+		wantVerdict   string
+		wantImmutable bool
+	}{
+		// The earned negative. The store implements the question and said this object holds
+		// nothing, so the claim comes off.
+		{"the store says nothing holds the object", dest.RetentionAbsent, "not-immutable", false},
+		// A refusal is not a no. Most S3 credentials cannot read retention, because this product
+		// tells operators to scope them create/put-only, and warning those operators that their
+		// backups are unprotected would be the unearned negative in the other direction.
+		{"the store will not answer", dest.RetentionNotChecked, "immutable", true},
+		// And a confirmation changes nothing upward: one object proves the store implements the
+		// headers, not that every object carries them.
+		{"the store confirms the object", dest.RetentionPresent, "immutable", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Chdir(t.TempDir())
+			md := &observingDest{memDest: newMemDest(true), says: tc.observes}
+			res, err := pipeline.Backup(ctx, pipeline.BackupDeps{
+				Config: testConfig(), Source: src, Dest: md, Git: gitexec.New(nil),
+				SigningKey: signer, ToolVersion: "test", Now: fixedClock(),
+			})
+			if err != nil {
+				t.Fatalf("backup: %v", err)
+			}
+			d := res.Manifest.Destination
+			if d.WormVerdict != tc.wantVerdict {
+				t.Errorf("wormVerdict = %q, want %q", d.WormVerdict, tc.wantVerdict)
+			}
+			if d.WormImmutable != tc.wantImmutable {
+				t.Errorf("wormImmutable = %v, want %v", d.WormImmutable, tc.wantImmutable)
+			}
+			if d.RetentionObserved != string(tc.observes) {
+				t.Errorf("retentionObserved = %q, want %q", d.RetentionObserved, tc.observes)
+			}
+			if !md.asked {
+				t.Error("the destination was never asked what retention landed")
+			}
+		})
+	}
+}
+
+// A memDest that can also be asked what retention landed, and records that it was asked.
+type observingDest struct {
+	*memDest
+	says  dest.RetentionObservation
+	asked bool
+}
+
+func (o *observingDest) ObserveRetention(context.Context, string) (dest.RetentionObservation, time.Time, error) {
+	o.asked = true
+	if o.says == dest.RetentionPresent {
+		return o.says, time.Now().Add(24 * time.Hour), nil
+	}
+	return o.says, time.Time{}, nil
+}
+
+// --require-worm fails on a store that applied nothing, and not on one that would not say.
+//
+// The distinction is the whole design. Failing on silence would fail the run for every operator
+// who scoped their destination credential create/put-only, which is what SPEC tells them to do -
+// reading an object's retention needs s3:GetObjectRetention, and most credentials will not have
+// it. Failing on an earned negative is the case the flag exists for.
+func TestRequireWormFailsOnAnAppliedNothingAndNotOnSilence(t *testing.T) {
+	ctx := context.Background()
+	repoDir := initFixtureRepo(t)
+	src := &fixtureSource{repos: []source.Repo{{Host: "github.com", Owner: "octo", Name: "hello", CloneURL: repoDir}}}
+	_, privPEM, _ := crypto.GenerateKeyPair()
+	signer, _ := crypto.ParsePrivateKey(privPEM)
+
+	run := func(t *testing.T, says dest.RetentionObservation) error {
+		t.Helper()
+		t.Chdir(t.TempDir())
+		md := &observingDest{memDest: newMemDest(true), says: says}
+		_, err := pipeline.Backup(ctx, pipeline.BackupDeps{
+			Config: testConfig(), Source: src, Dest: md, Git: gitexec.New(nil),
+			SigningKey: signer, ToolVersion: "test", Now: fixedClock(), RequireWORM: true,
+		})
+		return err
+	}
+
+	if err := run(t, dest.RetentionAbsent); err == nil {
+		t.Error("--require-worm passed a run the destination applied no retention to")
+	} else if !strings.Contains(err.Error(), "applied no retention") {
+		t.Errorf("the refusal does not say what happened: %v", err)
+	}
+	if err := run(t, dest.RetentionNotChecked); err != nil {
+		t.Errorf("--require-worm failed a run because the store would not answer: %v", err)
+	}
+}

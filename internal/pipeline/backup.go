@@ -118,6 +118,18 @@ func (r *backupRun) run(ctx context.Context) (*BackupResult, error) {
 		}
 	}
 
+	// What actually landed on one object, before the manifest is composed and signed.
+	observed, verdict := r.observeRetention(ctx, entries)
+	// The case the flag exists for. The objects are already written and cannot be unwritten, so
+	// failing closed here can only mean refusing to report a protection that is not there.
+	//
+	// Only on the earned negative. A store that would not answer has told us nothing, and
+	// failing the run on silence would fail it for every operator who took this product's own
+	// advice and scoped the destination credential create/put-only.
+	if r.requireWORM && observed == dest.RetentionAbsent {
+		return nil, fmt.Errorf("worm: the destination accepted this run and applied no retention to it: %s", r.wormStatus.Details)
+	}
+
 	m := &Manifest{
 		Schema: ManifestSchema,
 		RunID:  newRunID(started),
@@ -125,9 +137,11 @@ func (r *backupRun) run(ctx context.Context) (*BackupResult, error) {
 		Source: SourceInfo{Type: r.cfg.Source.Type, Host: repos[0].Host},
 		Destination: DestInfo{
 			Type: r.cfg.Destination.Type, Bucket: r.cfg.Destination.S3.Bucket, WormMode: string(ret.Mode),
-			WormImmutable: r.wormStatus.Verdict.Immutable(),
-			WormVerdict:   r.wormStatus.Verdict.Wire(),
+			WormImmutable: verdict.Immutable(),
+			WormVerdict:   verdict.Wire(),
 			WormDetails:   r.wormStatus.Details,
+
+			RetentionObserved: string(observed),
 		},
 		StartedAt:  started,
 		FinishedAt: r.now().UTC(),
@@ -530,4 +544,64 @@ func orNow(f func() time.Time) func() time.Time {
 		return time.Now
 	}
 	return f
+}
+
+/*
+ * Ask the destination what retention is on the first object this run wrote.
+ *
+ * One object, not every object. The check is a strong falsifier and a weak confirmer, and the
+ * design leans on exactly that: a store applies object lock in the PUT path, so one that drops
+ * the header for the first object drops it for all of them, and a negative therefore generalises
+ * from a single sample. A positive does not - it proves this object is retained and that the
+ * store implements the headers, and nothing about the rest. Per-object checks would be three or
+ * four thousand extra requests on a large estate buying detection of an anomaly the protocol does
+ * not produce.
+ *
+ * It may only ever lower the verdict. There is no path here that turns "not-immutable" into
+ * "immutable", no badge and no green: the whole purpose is to remove a claim gitdr could not
+ * back, and a confirmation from one object is not entitled to add one.
+ *
+ * Only on the immutable path, because that is the only path where retention was requested at all.
+ * A run whose repositories were all skipped as unchanged has written nothing to look at, and
+ * records not-checked rather than inventing an answer.
+ */
+func (r *backupRun) observeRetention(ctx context.Context, entries []RepoEntry) (dest.RetentionObservation, dest.WormVerdict) {
+	verdict := r.wormStatus.Verdict
+	if !verdict.Immutable() {
+		return dest.RetentionNotChecked, verdict
+	}
+	observer, ok := r.dst.(dest.RetentionObserver)
+	if !ok {
+		return dest.RetentionNotChecked, verdict
+	}
+	var key string
+	for _, e := range entries {
+		if len(e.Artifacts) > 0 {
+			key = e.Artifacts[0].Key
+			break
+		}
+	}
+	if key == "" {
+		return dest.RetentionNotChecked, verdict
+	}
+
+	got, until, err := observer.ObserveRetention(ctx, key)
+	switch got {
+	case dest.RetentionPresent:
+		r.log.Info("retention observed", "key", key, "until", until.Format(time.RFC3339))
+	case dest.RetentionAbsent:
+		// The earned negative, and the reason all of this exists. The bucket said it locks, the
+		// write was accepted, and the object holds nothing. The objects cannot be unwritten -
+		// the destination is create-only - so failing closed here can only mean refusing to
+		// report a protection that is not there.
+		r.log.Warn("the destination accepted this run and applied no retention to it",
+			"key", key, "bucket_said", r.wormStatus.Details)
+		verdict = dest.VerdictNotImmutable
+	default:
+		// A refusal is not a no. On S3 this is the common case rather than the exotic one:
+		// reading an object's retention needs s3:GetObjectRetention, and this product tells
+		// operators to scope destination credentials create/put-only.
+		r.log.Info("could not confirm the retention on this run's objects", "key", key, "err", err)
+	}
+	return got, verdict
 }

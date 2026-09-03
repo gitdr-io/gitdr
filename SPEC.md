@@ -357,15 +357,15 @@ artifact set nobody can attribute to gitdr is worse than no evidence.
 
 Every object is written create-only under object-lock retention.
 
-### Run-manifest (`gitdr.manifest/v4`)
+### Run-manifest (`gitdr.manifest/v5`)
 
 ```json
 {
-  "schema": "gitdr.manifest/v4",
+  "schema": "gitdr.manifest/v5",
   "runId": "20260613T120000Z-a1b2c3d4e5f6",
   "tool": { "name": "gitdr", "version": "v0.1.0 (abc123def456)" },
   "source": { "type": "github", "host": "github.com" },
-  "destination": { "type": "s3", "bucket": "my-worm-bucket", "wormMode": "COMPLIANCE", "wormImmutable": true, "wormVerdict": "immutable", "wormDetails": "Object Lock enabled; default retention COMPLIANCE" },
+  "destination": { "type": "s3", "bucket": "my-worm-bucket", "wormMode": "COMPLIANCE", "wormImmutable": true, "wormVerdict": "immutable", "wormDetails": "Object Lock enabled; default retention COMPLIANCE", "retentionObserved": "present" },
   "startedAt": "2026-06-13T12:00:00Z",
   "finishedAt": "2026-06-13T12:03:00Z",
   "status": "success",
@@ -468,6 +468,50 @@ the gate when immutability "cannot be confirmed", and `unknown` is the definitio
 the non-strict path the two negatives warn differently, because they send an operator to two
 different places — `not-immutable` is local and says turn object lock on, `unknown` says ask the
 provider. Both stay at WARN; `unknown` is not the quieter problem.
+
+**v5 adds `destination.retentionObserved`**, one of exactly three values:
+
+| value | what it means |
+|---|---|
+| `present` | the store returned a retention for an object this run wrote |
+| `absent` | the store implements the question and said that object holds nothing. An **earned** negative |
+| `not-checked` | nobody asked, or the store refused. A statement about gitdr's visibility |
+
+It is the same failure as v4, one level down. `wormVerdict` is about the bucket's
+*configuration*; this is about an object gitdr actually wrote, and the two can disagree: a store
+can report Object Lock enabled, accept the write, and apply nothing. Nothing in v4 could tell
+that apart, because `artifacts[].retainUntil` on the S3 path is the retention that was *asked
+for* — `PutObject` returns no object-lock headers, so there was never anything to observe there,
+while on GCS the same field is the expiry the write returned. One field, two meanings, both
+signed.
+
+**Checked once per run, on the first object written, and only where the preflight said
+`immutable`.** The check is a strong falsifier and a weak confirmer, and the design leans on
+that: a store applies object lock in the PUT path, so one that drops the header for the first
+object drops it for all of them and a negative generalises from one sample — while a positive
+proves only that this object is retained. Per-object checks would be thousands of extra requests
+buying detection of an anomaly the protocol does not produce.
+
+**It only ever lowers a claim.** `absent` sets `wormVerdict` to `not-immutable` and
+`wormImmutable` to `false`; `present` adds nothing, no badge and no upgrade. There is
+deliberately **no fourth `wormVerdict` value** — every pinned consumer switches on three and a
+fourth would fall through.
+
+The read is `GetObjectRetention`, not `HeadObject`, and the difference decides whether the check
+is usable. HeadObject returns the lock headers *only* to a caller holding
+`s3:GetObjectRetention`; without it the response is a 200 with the headers omitted, which is
+byte-identical to an object carrying no retention. §5 tells every operator to scope destination
+credentials create/put-only, so a HeadObject-based check would report an unearned negative about
+correctly configured, genuinely protected buckets belonging to the operators who followed that
+advice.
+
+`--require-worm` fails on `absent` and passes on `not-checked`, for that reason: an earned
+negative is the case the flag exists for, and silence is not one. Note what it cannot do — the
+objects are written before the check runs and the destination is create-only, so failing here
+means refusing to *report* a protection that is not there, never preventing the write.
+
+Absent from a manifest means the engine was too old to say, and is **not** `not-checked`. Same
+rule, and same trap, as `wormVerdict`.
 
 The field is `omitempty` and is never written empty, so a v2 or v3 manifest re-read and
 re-signed still produces identical bytes. **Absent must not be read as `unknown`**: absent means
