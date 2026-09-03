@@ -382,6 +382,28 @@ Every object is written create-only under object-lock retention.
 }
 ```
 
+**`artifacts[].retainUntil` does not mean the same thing on every backend, and today the manifest
+does not say which it is.**
+
+- On **GCS** it is *observed*: the value the store returned for the object it just wrote
+  (`RetentionExpirationTime`).
+- On **S3** it is *requested*: the retain-until gitdr sent. `PutObject` returns no object-lock
+  headers at all, so there is nothing to observe at write time, and the field records an
+  instruction rather than an answer.
+
+Both are written into a signed document, which makes the S3 case a claim gitdr has not earned:
+if a store accepted the write and ignored `x-amz-object-lock-mode`, the manifest still names a
+date, signed, and nothing in it distinguishes that from a date the store confirmed.
+
+This is disclosed rather than fixed because the fix changes the schema. Nothing in the engine
+reads this field — it is written once and consumed only by whoever believes the document — so
+the correction is to observe the retention on one written object per run and downgrade the
+manifest's verdict when a store says the object holds nothing. That needs a schema version and
+is tracked separately.
+
+Until then: **read `retainUntil` as the retention that applies if the destination honoured the
+request, and `destination.wormVerdict` as the only statement about whether it said it would.**
+
 - `status` (run-level and per-repo): `success`, `failed`, or `skipped`.
 - `repos[].error` is present only when that repo's `status` is `failed`.
 - `repos[].reason` is present only when that repo's `status` is `skipped`, and says which of
