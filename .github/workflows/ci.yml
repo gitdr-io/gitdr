@@ -45,7 +45,8 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: '1.27.1'
+          # From go.mod, never a literal: a literal here drifted to 1.27 while go.mod and the GitLab gate stayed on 1.26.
+          go-version-file: go.mod
           check-latest: false
       - name: gofmt
         run: test -z "$(gofmt -l .)" || { echo 'gofmt needed on:'; gofmt -l .; exit 1; }
