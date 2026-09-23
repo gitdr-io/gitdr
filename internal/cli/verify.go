@@ -86,12 +86,8 @@ func verifyDrill(ctx context.Context, deps pipeline.VerifyDeps, key, output stri
 			b, _ := json.MarshalIndent(res, "", "  ")
 			fmt.Println(string(b))
 		} else if res.SignatureValid {
-			scope := fmt.Sprintf("%d of %d repositories", res.Drilled, res.Eligible)
-			if res.Drilled == res.Eligible {
-				scope = fmt.Sprintf("all %d repositories", res.Eligible)
-			}
 			fmt.Printf("signature valid, signed by the key in this config\n")
-			fmt.Printf("the report says: %s, %s restored from %s\n", res.Status, scope, res.ManifestKey)
+			fmt.Println(drillVerifySummary(res))
 			for _, f := range res.Failures {
 				fmt.Printf("  FAIL %s\n", f)
 			}
@@ -108,4 +104,20 @@ func verifyDrill(ctx context.Context, deps pipeline.VerifyDeps, key, output stri
 		return 1
 	}
 	return 0
+}
+
+// drillVerifySummary is the line that says what a verified drill report claims.
+//
+// It had the same fault as the drill's own summary: the drilled count, called restored, so a
+// report whose every repository failed read "the report says: failed, all 1 repositories
+// restored". This side sees each repository's verdict and not whether it came back - a
+// repository that restored and did not match its source is a failure here too - so when
+// anything failed it counts what passed, and does not guess at what restored.
+func drillVerifySummary(res *pipeline.VerifyDrillResult) string {
+	if len(res.Failures) == 0 {
+		return fmt.Sprintf("the report says: %s, %s restored from %s",
+			res.Status, drillScope(res.Drilled, res.Drilled, res.Eligible), res.ManifestKey)
+	}
+	return fmt.Sprintf("the report says: %s, %d of %d drilled repositories passed, from %s",
+		res.Status, res.Drilled-len(res.Failures), res.Drilled, res.ManifestKey)
 }

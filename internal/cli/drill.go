@@ -140,13 +140,7 @@ func printDrill(r *pipeline.DrillReport, stored bool) {
 			}
 		}
 	}
-	// The sample is named in the same breath as the result. A ten-repository drill of a
-	// thousand-repository organisation must not read like a thousand-repository guarantee.
-	scope := fmt.Sprintf("%d of %d repositories", r.Drilled, r.Eligible)
-	if r.Drilled == r.Eligible {
-		scope = fmt.Sprintf("all %d repositories", r.Eligible)
-	}
-	fmt.Printf("drill %s: %s restored from %s\n", r.Status, scope, r.ManifestKey)
+	fmt.Printf("drill %s: %s restored from %s\n", r.Status, drillScope(cameBack(r.Repos), r.Drilled, r.Eligible), r.ManifestKey)
 	if !r.ManifestSigned {
 		fmt.Println("note: the manifest's signature was not checked, so this proves these artifacts restore, not that gitdr wrote them")
 	}
@@ -154,5 +148,39 @@ func printDrill(r *pipeline.DrillReport, stored bool) {
 	// with nothing on screen to explain it.
 	if !stored {
 		fmt.Println("note: this report was not stored, so the only copy of it is the output above")
+	}
+}
+
+// cameBack is how many repositories restored, which is not how many were drilled.
+//
+// The summary used the drilled count and called it restored, so a drill that restored nothing
+// ended "drill failed: all 1 repositories restored". A repository counts once `Restore` has
+// returned cleanly: its status is success, or the source comparison ran - that comparison only
+// happens after a clean restore, so a mismatch there is a repository that came back and does
+// not match, not one that failed to come back. The control plane counts it the same way.
+func cameBack(repos []pipeline.DrillRepo) int {
+	n := 0
+	for _, r := range repos {
+		if r.Status == pipeline.StatusSuccess || r.SourceMatch != nil {
+			n++
+		}
+	}
+	return n
+}
+
+// drillScope is the part of the summary that says how much came back.
+//
+// The sample is named in the same breath as the result. A ten-repository drill of a
+// thousand-repository organisation must not read like a thousand-repository guarantee. When
+// something did not come back, the sentence counts against what was drilled, because that is
+// the population the failure belongs to.
+func drillScope(restored, drilled, eligible int) string {
+	switch {
+	case restored == drilled && drilled == eligible:
+		return fmt.Sprintf("all %d repositories", eligible)
+	case restored == drilled:
+		return fmt.Sprintf("%d of %d repositories", drilled, eligible)
+	default:
+		return fmt.Sprintf("%d of %d drilled repositories", restored, drilled)
 	}
 }
