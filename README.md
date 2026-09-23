@@ -11,7 +11,7 @@
 
 </div>
 
-**Back up your whole git org to storage nobody can delete.**
+**Back up GitHub and GitLab to storage you lock. Then prove it restores.**
 
 Everyone lives in git. Almost nobody backs it up. gitdr copies your entire GitHub or GitLab org into object storage you control, and it checks the bucket is write-once before it writes a thing. Deleted repo, popped account, ransomware, and your history is still sitting somewhere they can't reach.
 
