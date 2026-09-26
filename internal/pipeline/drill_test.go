@@ -7,12 +7,15 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"log/slog"
 	"strings"
 	"testing"
 	"time"
 
 	"gitdr.io/gitdr/internal/crypto"
+	"gitdr.io/gitdr/internal/dest"
 	"gitdr.io/gitdr/internal/gitexec"
 	"gitdr.io/gitdr/internal/pipeline"
 	"gitdr.io/gitdr/internal/source"
@@ -58,7 +61,7 @@ func TestADrillProvesTheBackupRestores(t *testing.T) {
 	// had no supported way to fetch the document they had just produced.
 	var logged bytes.Buffer
 
-	report, err := pipeline.Drill(ctx, pipeline.DrillDeps{
+	res, err := pipeline.Drill(ctx, pipeline.DrillDeps{
 		Dest: md, Git: gitexec.New(nil), PublicKey: pub, SigningKey: signer,
 		ToolVersion: "test", Now: func() time.Time { return clock().Add(time.Hour) },
 		Logger: slog.New(slog.NewTextHandler(&logged, nil)),
@@ -66,10 +69,27 @@ func TestADrillProvesTheBackupRestores(t *testing.T) {
 	if err != nil {
 		t.Fatalf("drill: %v", err)
 	}
+	report := res.Report
 
+	// The log line is kept word for word: the hosted agent reads the key out of it, and an agent
+	// pinned to an older build will keep doing so after `reportKey` exists.
 	if out := logged.String(); !strings.Contains(out, "drill report written") ||
 		!strings.Contains(out, ".drill.json") || !strings.Contains(out, ".drill.json.sig") {
 		t.Errorf("the report's key and its signature were not logged:\n%s", out)
+	}
+	// And the key comes back to the caller, so `drill --output json` can say where the evidence
+	// is without anyone scraping a log. It must be the key actually written, and the one logged.
+	if !strings.HasSuffix(res.ReportKey, ".drill.json") || !strings.Contains(res.ReportKey, "/drills/") {
+		t.Fatalf("ReportKey = %q, want the stored report's key", res.ReportKey)
+	}
+	if _, ok := md.objs[res.ReportKey]; !ok {
+		t.Errorf("ReportKey %q names no stored object", res.ReportKey)
+	}
+	if _, ok := md.objs[res.ReportKey+".sig"]; !ok {
+		t.Errorf("no signature stored beside %q", res.ReportKey)
+	}
+	if !strings.Contains(logged.String(), "key="+res.ReportKey+" ") {
+		t.Errorf("the key returned is not the key logged:\n%s", logged.String())
 	}
 
 	if report.Status != pipeline.StatusSuccess {
@@ -151,7 +171,7 @@ func TestADrillFailsOnADamagedBundle(t *testing.T) {
 	}
 	md.mu.Unlock()
 
-	report, err := pipeline.Drill(ctx, pipeline.DrillDeps{
+	res, err := pipeline.Drill(ctx, pipeline.DrillDeps{
 		Dest: md, Git: gitexec.New(nil), PublicKey: pub, SigningKey: signer,
 		ToolVersion: "test", Now: func() time.Time { return clock().Add(time.Hour) },
 	}, pipeline.DrillRequest{Host: "github.com", Owner: "octo", WorkDir: t.TempDir()})
@@ -159,9 +179,10 @@ func TestADrillFailsOnADamagedBundle(t *testing.T) {
 	if err == nil {
 		t.Fatal("a drill against a corrupted bundle reported no error")
 	}
-	if report == nil {
+	if res == nil || res.Report == nil {
 		t.Fatal("no report, so nobody can see what failed")
 	}
+	report := res.Report
 	if report.Status != pipeline.StatusFailed {
 		t.Errorf("status = %s, want failed", report.Status)
 	}
@@ -218,6 +239,138 @@ func TestADrillRefusesAManifestThatDoesNotMatchItsSignature(t *testing.T) {
 	}
 }
 
+// readOnlyDest is the bucket as a read-only credential sees it: every write is refused, and
+// counted, so a test can prove that none was attempted rather than that none succeeded.
+type readOnlyDest struct {
+	*memDest
+	writes []string
+}
+
+func (r *readOnlyDest) PutImmutable(_ context.Context, key string, _ io.Reader, _ int64, _ dest.Retention) (dest.PutResult, error) {
+	r.writes = append(r.writes, key)
+	return dest.PutResult{}, fmt.Errorf("access denied: %s: this credential can only read", key)
+}
+
+// `drill -no-report`: the proof an auditor re-runs from the customer's own bucket, with a read
+// credential and the public key and nothing else.
+//
+// It is the same drill, not a lighter one. The manifest's signature is checked with the public
+// key and a manifest that fails it is refused, both ref-map joins run, and a failure is still a
+// failure. The only difference is that nothing is signed and nothing is written, and each case
+// proves that by counting writes against a destination that refuses them.
+func TestADrillWithoutASigningKeyWritesNothing(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// tamper runs after the backup, with the signer that wrote it.
+		tamper func(t *testing.T, md *memDest, signer ed25519.PrivateKey)
+		check  func(t *testing.T, res *pipeline.DrillResult, err error)
+	}{
+		{
+			name: "a clean drill proves the restore",
+			check: func(t *testing.T, res *pipeline.DrillResult, err error) {
+				if err != nil {
+					t.Fatalf("drill: %v", err)
+				}
+				r := res.Report
+				if r.Status != pipeline.StatusSuccess || !r.ManifestSigned {
+					t.Fatalf("status %s, manifestSigned %v: want a success against a verified manifest", r.Status, r.ManifestSigned)
+				}
+				if r.Repos[0].SourceMatch == nil || !*r.Repos[0].SourceMatch || r.Repos[0].BundleRefs == 0 {
+					t.Errorf("the ref-map comparison did not run: %+v", r.Repos[0])
+				}
+			},
+		},
+		{
+			name: "a manifest that does not match its signature is refused",
+			tamper: func(t *testing.T, md *memDest, _ ed25519.PrivateKey) {
+				md.mu.Lock()
+				defer md.mu.Unlock()
+				for k, v := range md.objs {
+					if strings.HasSuffix(k, ".manifest.json") {
+						md.objs[k] = append(v[:len(v)-1], ' ')
+					}
+				}
+			},
+			check: func(t *testing.T, res *pipeline.DrillResult, err error) {
+				if err == nil || !strings.Contains(err.Error(), "signature") {
+					t.Fatalf("err = %v, want the manifest refused over its signature", err)
+				}
+				if res != nil {
+					t.Errorf("a report about a manifest nobody can attribute to gitdr: %+v", res.Report)
+				}
+			},
+		},
+		{
+			name: "a bundle missing history the source had still fails",
+			tamper: func(t *testing.T, md *memDest, signer ed25519.PrivateKey) {
+				rewriteManifest(t, md, signer, func(m *pipeline.Manifest) {
+					m.Repos[0].Refs = append(m.Repos[0].Refs, pipeline.RefEntry{
+						Name: "refs/heads/release", Commit: "0000000000000000000000000000000000000001",
+					})
+				})
+			},
+			check: func(t *testing.T, res *pipeline.DrillResult, err error) {
+				if !errors.Is(err, pipeline.ErrDrillFailures) {
+					t.Fatalf("err = %v, want ErrDrillFailures", err)
+				}
+				// Nothing was stored, so this must not read as a storage problem.
+				if errors.Is(err, pipeline.ErrReportNotStored) {
+					t.Errorf("err = %v, reports a store failure for a drill that stores nothing", err)
+				}
+				r := res.Report.Repos[0]
+				if r.SourceMatch == nil || *r.SourceMatch {
+					t.Errorf("sourceMatch = %v, want false", r.SourceMatch)
+				}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Chdir(t.TempDir())
+			ctx := context.Background()
+			repoDir := initFixtureRepo(t)
+			src := &fixtureSource{repos: []source.Repo{{
+				Host: "github.com", Owner: "octo", Name: "hello", CloneURL: repoDir, DefaultBranch: "main",
+			}}}
+			md := newMemDest(true)
+			pubPEM, privPEM, _ := crypto.GenerateKeyPair()
+			signer, _ := crypto.ParsePrivateKey(privPEM)
+			pub, _ := crypto.ParsePublicKey(pubPEM)
+			clock := func() time.Time { return time.Date(2026, 6, 13, 12, 0, 0, 0, time.UTC) }
+
+			if _, err := pipeline.Backup(ctx, pipeline.BackupDeps{
+				Config: testConfig(), Source: src, Dest: md, Git: gitexec.New(nil),
+				SigningKey: signer, ToolVersion: "test", Now: clock,
+			}); err != nil {
+				t.Fatalf("backup: %v", err)
+			}
+			if tc.tamper != nil {
+				tc.tamper(t, md, signer)
+			}
+
+			ro := &readOnlyDest{memDest: md}
+			var logged bytes.Buffer
+			res, err := pipeline.Drill(ctx, pipeline.DrillDeps{
+				Dest: ro, Git: gitexec.New(nil), PublicKey: pub, // and no SigningKey
+				ToolVersion: "test", Now: func() time.Time { return clock().Add(time.Hour) },
+				Logger: slog.New(slog.NewTextHandler(&logged, nil)),
+			}, pipeline.DrillRequest{Host: "github.com", Owner: "octo", WorkDir: t.TempDir()})
+
+			if len(ro.writes) != 0 {
+				t.Fatalf("a drill without a signing key tried to write %v", ro.writes)
+			}
+			if res != nil && res.ReportKey != "" {
+				t.Errorf("ReportKey = %q, but nothing was stored", res.ReportKey)
+			}
+			// The agent reads this line as "a report exists at key". It must never appear for one
+			// that does not.
+			if strings.Contains(logged.String(), "drill report written") {
+				t.Errorf("logged a report as written when none was:\n%s", logged.String())
+			}
+			tc.check(t, res, err)
+		})
+	}
+}
+
 func keysOf(md *memDest) []string {
 	md.mu.Lock()
 	defer md.mu.Unlock()
@@ -267,7 +420,7 @@ func TestADrillCatchesABundleMissingHistoryTheSourceHad(t *testing.T) {
 		})
 	})
 
-	report, err := pipeline.Drill(ctx, pipeline.DrillDeps{
+	res, err := pipeline.Drill(ctx, pipeline.DrillDeps{
 		Dest: md, Git: gitexec.New(nil), PublicKey: pub, SigningKey: signer,
 		ToolVersion: "test", Now: func() time.Time { return clock().Add(time.Hour) },
 	}, pipeline.DrillRequest{Host: "github.com", Owner: "octo", WorkDir: t.TempDir()})
@@ -275,7 +428,7 @@ func TestADrillCatchesABundleMissingHistoryTheSourceHad(t *testing.T) {
 	if err == nil {
 		t.Fatal("a restore missing a branch the source had was reported as a success")
 	}
-	r := report.Repos[0]
+	r := res.Report.Repos[0]
 	if r.Status != pipeline.StatusFailed {
 		t.Errorf("status = %s, want failed", r.Status)
 	}
@@ -375,7 +528,7 @@ func TestADrillDoesNotClaimASourceMatchItCouldNotMake(t *testing.T) {
 	}
 	rewriteManifest(t, md, signer, func(m *pipeline.Manifest) { m.Repos[0].Refs = nil })
 
-	report, err := pipeline.Drill(ctx, pipeline.DrillDeps{
+	res, err := pipeline.Drill(ctx, pipeline.DrillDeps{
 		Dest: md, Git: gitexec.New(nil), PublicKey: pub, SigningKey: signer,
 		ToolVersion: "test", Now: func() time.Time { return clock().Add(time.Hour) },
 	}, pipeline.DrillRequest{Host: "github.com", Owner: "octo", WorkDir: t.TempDir()})
@@ -383,7 +536,7 @@ func TestADrillDoesNotClaimASourceMatchItCouldNotMake(t *testing.T) {
 		t.Fatalf("drill: %v", err)
 	}
 
-	r := report.Repos[0]
+	r := res.Report.Repos[0]
 	if r.Status != pipeline.StatusSuccess {
 		t.Errorf("status = %s: the bundle restores and that is still worth reporting", r.Status)
 	}
@@ -483,7 +636,7 @@ func TestLocateHandlesANestedGroupPath(t *testing.T) {
 // takes the exit code as the verdict, deliberately, so the control plane told the customer that
 // a repository had not come back. Nothing of the sort had been observed.
 func TestADrillSeparatesAFailedRestoreFromAnUnfiledReport(t *testing.T) {
-	setup := func(t *testing.T, damage bool) (*pipeline.DrillReport, error) {
+	setup := func(t *testing.T, damage bool) (*pipeline.DrillResult, error) {
 		t.Helper()
 		t.Chdir(t.TempDir())
 		ctx := context.Background()
@@ -526,7 +679,7 @@ func TestADrillSeparatesAFailedRestoreFromAnUnfiledReport(t *testing.T) {
 	}
 
 	t.Run("everything restored and the report could not be stored", func(t *testing.T) {
-		report, err := setup(t, false)
+		res, err := setup(t, false)
 		if err == nil {
 			t.Fatal("an unstored report reported no error, so the evidence can go missing silently")
 		}
@@ -537,13 +690,18 @@ func TestADrillSeparatesAFailedRestoreFromAnUnfiledReport(t *testing.T) {
 		if errors.Is(err, pipeline.ErrDrillFailures) {
 			t.Errorf("err = %v, claims a drill failure where every repository restored", err)
 		}
-		if report == nil || report.Status != pipeline.StatusSuccess {
-			t.Fatalf("report = %+v, want a success report to survive as the only copy", report)
+		if res == nil || res.Report == nil || res.Report.Status != pipeline.StatusSuccess {
+			t.Fatalf("result = %+v, want a success report to survive as the only copy", res)
+		}
+		// No key for a report that is not there. Naming the key it would have had sends a reader
+		// to `verify -drill` for an object that does not exist.
+		if res.ReportKey != "" {
+			t.Errorf("ReportKey = %q for a report the destination refused", res.ReportKey)
 		}
 	})
 
 	t.Run("a repository failed and the report could not be stored", func(t *testing.T) {
-		report, err := setup(t, true)
+		res, err := setup(t, true)
 		if err == nil {
 			t.Fatal("a damaged bundle reported no error")
 		}
@@ -556,8 +714,11 @@ func TestADrillSeparatesAFailedRestoreFromAnUnfiledReport(t *testing.T) {
 		if !errors.Is(err, pipeline.ErrReportNotStored) {
 			t.Errorf("err = %v, want ErrReportNotStored reported too", err)
 		}
-		if report == nil || report.Status != pipeline.StatusFailed {
-			t.Fatalf("report = %+v, want a failed report", report)
+		if res == nil || res.Report == nil || res.Report.Status != pipeline.StatusFailed {
+			t.Fatalf("result = %+v, want a failed report", res)
+		}
+		if res.ReportKey != "" {
+			t.Errorf("ReportKey = %q for a report the destination refused", res.ReportKey)
 		}
 	})
 }

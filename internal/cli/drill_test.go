@@ -1,11 +1,17 @@
 package cli
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"gitdr.io/gitdr/internal/config"
+	"gitdr.io/gitdr/internal/crypto"
 	"gitdr.io/gitdr/internal/pipeline"
 )
 
@@ -97,7 +103,8 @@ func TestTheDrillSummaryCountsWhatCameBack(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			tc.report.ManifestKey, tc.report.ManifestSigned = "gitlab.com/acme/manifests/m.json", true
-			out := captureStdout(t, func() { printDrill(&tc.report, true) })
+			key := "gitlab.com/acme/drills/d.drill.json"
+			out := captureStdout(t, func() { printDrill(drillOutput{DrillReport: &tc.report, ReportKey: &key}) })
 			if !strings.Contains(out, tc.want) {
 				t.Errorf("summary does not say %q:\n%s", tc.want, out)
 			}
@@ -140,6 +147,197 @@ func TestTheVerifiedDrillSummaryCountsWhatPassed(t *testing.T) {
 			}
 			if tc.mustNot != "" && strings.Contains(got, tc.mustNot) {
 				t.Errorf("got %q, which claims %q", got, tc.mustNot)
+			}
+		})
+	}
+}
+
+// sampleDrill is a finished drill of one repository, as the pipeline hands it back.
+func sampleDrill(reportKey string) *pipeline.DrillResult {
+	ts := time.Date(2026, 9, 25, 12, 0, 0, 0, time.UTC)
+	match := true
+	return &pipeline.DrillResult{
+		Report: &pipeline.DrillReport{
+			Schema: pipeline.DrillSchema, DrillID: "20260925T120000Z-a1b2c3d4e5f6",
+			Tool:        pipeline.ToolInfo{Name: "gitdr", Version: "test"},
+			ManifestKey: "gitlab.com/acme/manifests/20260925T110000Z.manifest.json", ManifestSigned: true,
+			StartedAt: ts, FinishedAt: ts.Add(time.Minute), Status: pipeline.StatusSuccess,
+			Eligible: 1, Drilled: 1,
+			Repos: []pipeline.DrillRepo{{
+				Slug: "acme/api", Status: pipeline.StatusSuccess,
+				SourceRefs: 3, BundleRefs: 3, RestoredRefs: 3, SourceMatch: &match,
+			}},
+		},
+		ReportKey: reportKey,
+	}
+}
+
+// Pins `drill --output json`.
+//
+// Every field the report already had stays at the top level, in order, where consumers read it.
+// Two are appended: where the signed report was stored, which the hosted agent has been scraping
+// out of the "drill report written" log line, and, when nothing was stored, why. `reportKey` is
+// in every document, as null when there is no report, because absent is what an older engine
+// prints and a consumer has to be able to tell the two apart.
+func TestDrillJSONSaysWhereTheReportIs(t *testing.T) {
+	const stored = "gitlab.com/acme/drills/20260925T120100Z.drill.json"
+	for _, tc := range []struct {
+		name       string
+		res        *pipeline.DrillResult
+		noReport   bool
+		wantKey    any // the key, or nil for JSON null
+		wantReason any // the reason, or nil for absent
+	}{
+		{name: "stored", res: sampleDrill(stored), wantKey: stored},
+		{name: "-no-report", res: sampleDrill(""), noReport: true, wantReason: "no-report"},
+		{name: "the destination refused the report", res: sampleDrill(""), wantReason: "store-failed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out := captureStdout(t, func() { emitDrill("json", drillOutputFor(tc.res, tc.noReport)) })
+			var got map[string]any
+			if err := json.Unmarshal([]byte(out), &got); err != nil {
+				t.Fatalf("output is not valid JSON: %v\n%s", err, out)
+			}
+			for _, field := range []string{
+				"schema", "drillId", "tool", "manifestKey", "manifestSigned",
+				"startedAt", "finishedAt", "status", "eligible", "drilled", "repos",
+			} {
+				if _, ok := got[field]; !ok {
+					t.Errorf("missing %q from drill --output json; that is a contract change", field)
+				}
+			}
+			if got["schema"] != pipeline.DrillSchema {
+				t.Errorf("schema = %v, want %v: the report is unchanged, so its version is too", got["schema"], pipeline.DrillSchema)
+			}
+			if strings.Index(out, `"reportKey"`) < strings.Index(out, `"repos"`) {
+				t.Errorf("reportKey is not after the report's own fields:\n%s", out)
+			}
+
+			key, present := got["reportKey"]
+			if !present {
+				t.Fatal("reportKey is absent; it is the key, or null when there is no report")
+			}
+			if key != tc.wantKey {
+				t.Errorf("reportKey = %v, want %v", key, tc.wantKey)
+			}
+			reason, present := got["reportNotWritten"]
+			switch {
+			case tc.wantReason == nil && present:
+				t.Errorf("reportNotWritten = %v beside a stored report", reason)
+			case tc.wantReason != nil && reason != tc.wantReason:
+				t.Errorf("reportNotWritten = %v, want %v", reason, tc.wantReason)
+			}
+		})
+	}
+}
+
+// The report is signed over its own JSON. If the key ever lands in those bytes, the signature
+// covers a location instead of a document, and `verify -drill` fails on every copy of it.
+func TestReportKeyStaysOutOfTheSignedReport(t *testing.T) {
+	canon, err := json.Marshal(sampleDrill("gitlab.com/acme/drills/x.drill.json").Report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range []string{"reportKey", "reportNotWritten"} {
+		if strings.Contains(string(canon), field) {
+			t.Errorf("%s is in the report's signed bytes:\n%s", field, canon)
+		}
+	}
+}
+
+// The human summary says where the evidence went, or that there is none and why.
+func TestTheDrillSummarySaysWhereTheReportWent(t *testing.T) {
+	const stored = "gitlab.com/acme/drills/20260925T120100Z.drill.json"
+	for _, tc := range []struct {
+		name          string
+		res           *pipeline.DrillResult
+		noReport      bool
+		want, mustNot []string
+	}{
+		{
+			name: "stored", res: sampleDrill(stored),
+			want:    []string{"report: " + stored},
+			mustNot: []string{"not stored", "no report was written"},
+		},
+		{
+			name: "-no-report", res: sampleDrill(""), noReport: true,
+			want:    []string{"no report was written", "-no-report", "wrote nothing"},
+			mustNot: []string{"report: "},
+		},
+		{
+			name: "the destination refused the report", res: sampleDrill(""),
+			want:    []string{"this report was not stored"},
+			mustNot: []string{"report: ", "-no-report"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out := captureStdout(t, func() { emitDrill("text", drillOutputFor(tc.res, tc.noReport)) })
+			for _, w := range tc.want {
+				if !strings.Contains(out, w) {
+					t.Errorf("summary does not say %q:\n%s", w, out)
+				}
+			}
+			for _, m := range tc.mustNot {
+				if strings.Contains(out, m) {
+					t.Errorf("summary says %q:\n%s", m, out)
+				}
+			}
+		})
+	}
+}
+
+// -no-report needs the public key and never loads the private one.
+//
+// The auditor re-running a drill has the public key and a read credential. Requiring the signing
+// key would mean handing them the one secret that can forge evidence; reading it when it happens
+// to be configured would put it in memory for a command that has no use for it.
+func TestADrillWithoutAReportNeverLoadsTheSigningKey(t *testing.T) {
+	pubPEM, privPEM, err := crypto.GenerateKeyPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	pub, priv, missing := filepath.Join(dir, "public.pem"), filepath.Join(dir, "signing.pem"), filepath.Join(dir, "absent.pem")
+	if err := os.WriteFile(pub, pubPEM, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(priv, privPEM, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct {
+		name       string
+		noReport   bool
+		pub, priv  string // configured paths; empty is not configured
+		wantFailed string // the key named in the log line; empty is no error
+		wantSigner bool
+	}{
+		{name: "-no-report with only the public key", noReport: true, pub: pub},
+		{name: "-no-report does not read a configured signing key", noReport: true, pub: pub, priv: priv},
+		{name: "-no-report does not trip over a missing one", noReport: true, pub: pub, priv: missing},
+		{name: "-no-report still needs the public key", noReport: true, priv: priv, wantFailed: "public key"},
+		{name: "a report needs the signing key", pub: pub, wantFailed: "signing key"},
+		{name: "a report with both keys", pub: pub, priv: priv, wantSigner: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := config.Default()
+			cfg.Manifest.PublicKeyPath, cfg.Manifest.SigningKeyPath = tc.pub, tc.priv
+
+			gotPub, signer, failed, err := drillKeys(cfg, tc.noReport)
+			if tc.wantFailed != "" {
+				if err == nil || failed != tc.wantFailed {
+					t.Fatalf("failed = %q, err = %v; want a %s error", failed, err, tc.wantFailed)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("%s: %v", failed, err)
+			}
+			if gotPub == nil {
+				t.Error("no public key, so the manifest's signature would go unchecked")
+			}
+			if (signer != nil) != tc.wantSigner {
+				t.Errorf("signing key loaded: %v, want %v", signer != nil, tc.wantSigner)
 			}
 		})
 	}

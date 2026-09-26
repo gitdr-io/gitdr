@@ -74,7 +74,9 @@ type DrillDeps struct {
 	// manifest proves the artifacts restore, not that they are the ones gitdr wrote.
 	PublicKey ed25519.PublicKey
 	// SigningKey signs the report. A drill report is evidence, and unsigned evidence is a
-	// text file anybody can write.
+	// text file anybody can write, so without a key the report is neither signed nor stored:
+	// the drill writes nothing to the destination. That is `drill -no-report`, the read-only
+	// proof an auditor runs with a read credential and the public key.
 	SigningKey  ed25519.PrivateKey
 	ToolVersion string
 	Logger      *slog.Logger
@@ -121,6 +123,19 @@ type DrillReport struct {
 	Repos    []DrillRepo `json:"repos"`
 }
 
+// DrillResult is a drill's report and where it was stored.
+//
+// The key sits beside the report and never inside it, the same split as BackupResult: the
+// report is signed over its exact bytes, and a document that named its own location would have
+// to be signed after that location was chosen.
+type DrillResult struct {
+	Report *DrillReport
+	// ReportKey is the object key the signed report was stored under, the value
+	// `verify -drill` expects. Empty when nothing was stored: the drill ran without a signing
+	// key, or the destination refused the write (ErrReportNotStored).
+	ReportKey string
+}
+
 // DrillRepo is one repository's drill outcome.
 type DrillRepo struct {
 	Slug   string `json:"slug"`
@@ -145,8 +160,10 @@ type DrillRepo struct {
 	Mismatches []string `json:"mismatches,omitempty"`
 }
 
-// Drill restores repositories from a signed manifest and proves what came back.
-func Drill(ctx context.Context, d DrillDeps, req DrillRequest) (*DrillReport, error) {
+// Drill restores repositories from a signed manifest and proves what came back. The result is
+// nil only when there was no manifest to drill; otherwise it carries the report, whatever the
+// error says.
+func Drill(ctx context.Context, d DrillDeps, req DrillRequest) (*DrillResult, error) {
 	now := d.Now
 	if now == nil {
 		now = time.Now
@@ -208,10 +225,11 @@ func Drill(ctx context.Context, d DrillDeps, req DrillRequest) (*DrillReport, er
 	if !allOK {
 		errs = append(errs, ErrDrillFailures)
 	}
-	if err := uploadDrill(ctx, d, report, req, log); err != nil {
+	reportKey, err := uploadDrill(ctx, d, report, req, log)
+	if err != nil {
 		errs = append(errs, fmt.Errorf("%w: %w", ErrReportNotStored, err))
 	}
-	return report, errors.Join(errs...)
+	return &DrillResult{Report: report, ReportKey: reportKey}, errors.Join(errs...)
 }
 
 // The two ways a drill ends badly, kept apart because they mean opposite things to whoever
@@ -404,17 +422,23 @@ func readSig(ctx context.Context, dst dest.Destination, key string) ([]byte, err
 	return base64.StdEncoding.DecodeString(strings.TrimSpace(string(b)))
 }
 
-// uploadDrill stores the report and its signature beside the manifest it drills.
+// uploadDrill stores the report and its signature beside the manifest it drills, and returns
+// the key it stored the report under.
 //
 // Written through the same create-only path as everything else, so a drill report cannot be
 // replaced by a later one that says something more comfortable.
-func uploadDrill(ctx context.Context, d DrillDeps, report *DrillReport, req DrillRequest, log *slog.Logger) error {
+//
+// Without a signing key it stores nothing and returns no key. This is the only read-only path,
+// and `drill -no-report` is built on it rather than beside it: a second way of skipping the write
+// would be a second place for a write to slip back in.
+func uploadDrill(ctx context.Context, d DrillDeps, report *DrillReport, req DrillRequest, log *slog.Logger) (string, error) {
 	if d.Dest == nil || d.SigningKey == nil {
-		return nil
+		log.Info("nothing stored: this drill ran without a signing key, so there is no signed report to keep")
+		return "", nil
 	}
 	canon, err := json.Marshal(report)
 	if err != nil {
-		return err
+		return "", err
 	}
 	base := path.Dir(path.Dir(report.ManifestKey)) // {host}/{org}
 	key := path.Join(base, "drills", report.FinishedAt.UTC().Format("20060102T150405Z")+".drill.json")
@@ -427,14 +451,14 @@ func uploadDrill(ctx context.Context, d DrillDeps, report *DrillReport, req Dril
 		_, err := d.Dest.PutImmutable(ctx, key, strings.NewReader(string(canon)), int64(len(canon)), dest.Retention{})
 		return err
 	}); err != nil {
-		return err
+		return "", err
 	}
 	sig := base64.StdEncoding.EncodeToString(crypto.Sign(d.SigningKey, canon))
 	if err := retry(ctx, 3, time.Second, func() error {
 		_, err := d.Dest.PutImmutable(ctx, key+".sig", strings.NewReader(sig), int64(len(sig)), dest.Retention{})
 		return err
 	}); err != nil {
-		return err
+		return "", err
 	}
 
 	// Say where it went.
@@ -444,12 +468,13 @@ func uploadDrill(ctx context.Context, d DrillDeps, report *DrillReport, req Dril
 	// had just produced, and a reader of the report would have had to re-derive the path from
 	// the manifest key — a second copy of a rule, which drifts.
 	//
-	// A log line rather than a field on the report: the signature covers the report's exact
-	// bytes, so a report naming its own key would have to be signed after the key was chosen,
-	// and `gitdr.drill/v1` consumers would need a version bump for something no consumer of
-	// the JSON needs.
+	// Not a field on the report: the signature covers the report's exact bytes, so a report
+	// naming its own key would have to be signed after the key was chosen. The key is returned
+	// instead and `drill --output json` prints it beside the report as `reportKey`. The log line
+	// stays exactly as it is, because the hosted agent reads the key from it and pinned agents
+	// will go on doing so.
 	log.Info("drill report written", "key", key, "signature", key+".sig")
-	return nil
+	return key, nil
 }
 
 // LocateForTest exposes locate to the package's external tests. The parsing it does was wrong

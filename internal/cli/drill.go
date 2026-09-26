@@ -2,12 +2,14 @@ package cli
 
 import (
 	"context"
+	"crypto/ed25519"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"os"
 
+	"gitdr.io/gitdr/internal/config"
 	"gitdr.io/gitdr/internal/crypto"
 	"gitdr.io/gitdr/internal/gitexec"
 	"gitdr.io/gitdr/internal/pipeline"
@@ -23,6 +25,10 @@ import (
 //
 // It writes a signed report beside the manifest it drilled, through the same create-only path
 // as everything else, so the evidence is as immutable as the thing it proves.
+//
+// With -no-report it writes nothing at all. That is the drill an auditor re-runs from the
+// customer's own bucket: a read credential and the public key, no private key, no gitdr account,
+// and the same checks.
 func runDrill(ctx context.Context, args []string) int {
 	fs := flag.NewFlagSet("drill", flag.ContinueOnError)
 	common := registerCommon(fs)
@@ -31,6 +37,7 @@ func runDrill(ctx context.Context, args []string) int {
 	owner := fs.String("owner", "", "organisation; needed when -manifest is not given")
 	sample := fs.Int("sample", 0, "restore at most this many repositories, in slug order; 0 means all")
 	workdir := fs.String("workdir", "", "where to restore; defaults to the system temp directory")
+	noReport := fs.Bool("no-report", false, "write nothing to the bucket: no report is signed or stored, so only a read credential and the public key are needed")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -54,27 +61,9 @@ func runDrill(ctx context.Context, args []string) int {
 		return 1
 	}
 
-	// The public half verifies the manifest being drilled; the private half signs the report.
-	// Both are required: a drill of an unattributable manifest proves the wrong thing, and an
-	// unsigned report is a text file anybody can write.
-	pubPEM, err := cfg.ResolveManifestPublicKey()
+	pub, signer, failed, err := drillKeys(cfg, *noReport)
 	if err != nil {
-		log.Error("public key", "err", err)
-		return 1
-	}
-	pub, err := crypto.ParsePublicKey(pubPEM)
-	if err != nil {
-		log.Error("public key", "err", err)
-		return 1
-	}
-	privPEM, err := cfg.ResolveManifestSigningKey()
-	if err != nil {
-		log.Error("signing key", "err", err)
-		return 1
-	}
-	signer, err := crypto.ParsePrivateKey(privPEM)
-	if err != nil {
-		log.Error("signing key", "err", err)
+		log.Error(failed, "err", err)
 		return 1
 	}
 
@@ -84,7 +73,9 @@ func runDrill(ctx context.Context, args []string) int {
 		return 1
 	}
 
-	report, err := pipeline.Drill(ctx, pipeline.DrillDeps{
+	// No signing key is the whole of -no-report. The pipeline stores a report only when it can
+	// sign one, so there is one read-only path, not a second one beside it.
+	res, err := pipeline.Drill(ctx, pipeline.DrillDeps{
 		Dest: dst, Git: gitexec.New(log), EncryptionKey: encKey,
 		PublicKey: pub, SigningKey: signer,
 		ToolVersion: version(), Logger: log,
@@ -93,18 +84,90 @@ func runDrill(ctx context.Context, args []string) int {
 		Sample: *sample, WorkDir: *workdir,
 	})
 
-	if report != nil {
-		if common.output == "json" {
-			b, _ := json.MarshalIndent(report, "", "  ")
-			fmt.Println(string(b))
-		} else {
-			printDrill(report, !errors.Is(err, pipeline.ErrReportNotStored))
-		}
+	if res != nil {
+		emitDrill(common.output, drillOutputFor(res, *noReport))
 	}
 	if err != nil {
 		log.Error("drill", "err", err)
 	}
 	return drillExit(err)
+}
+
+// drillKeys resolves the keys a drill needs, and names the one that failed for the log line.
+//
+// The public key is required either way: it verifies the manifest being drilled, and a drill of
+// a manifest nobody can attribute to gitdr proves the wrong thing. The private key signs the
+// report, so it is required only when there will be one. Under -no-report it is not read at all,
+// even when the config names it: the auditor's copy of a config should not have to carry the one
+// secret that can forge evidence, and a key that is never loaded cannot leak.
+func drillKeys(cfg *config.Config, noReport bool) (ed25519.PublicKey, ed25519.PrivateKey, string, error) {
+	pubPEM, err := cfg.ResolveManifestPublicKey()
+	if err != nil {
+		return nil, nil, "public key", err
+	}
+	pub, err := crypto.ParsePublicKey(pubPEM)
+	if err != nil {
+		return nil, nil, "public key", err
+	}
+	if noReport {
+		return pub, nil, "", nil
+	}
+	privPEM, err := cfg.ResolveManifestSigningKey()
+	if err != nil {
+		return nil, nil, "signing key", err
+	}
+	signer, err := crypto.ParsePrivateKey(privPEM)
+	if err != nil {
+		return nil, nil, "signing key", err
+	}
+	return pub, signer, "", nil
+}
+
+// drillOutput is the JSON shape of a drill: the report's own fields, then where it was stored.
+//
+// The same split as backupOutput. The report is signed over its exact bytes and must not name its
+// own location, so the key sits beside it rather than in it. Embedded, so the report's fields
+// stay at the top level in their existing order and a reader written before this sees what it
+// saw before.
+//
+// This is not the signed document. `verify -drill` checks the stored bytes; never check a
+// signature against stdout.
+type drillOutput struct {
+	*pipeline.DrillReport
+	// ReportKey is the object key the signed report was stored under, the value `verify -drill`
+	// takes. Null, never absent, when no report was written: absent means an engine too old to
+	// say, which is a different answer.
+	ReportKey *string `json:"reportKey"`
+	// ReportNotWritten says why ReportKey is null, and is present only then. One of the two
+	// constants below, compared whole.
+	ReportNotWritten string `json:"reportNotWritten,omitempty"`
+}
+
+const (
+	// reportNotRequested: the drill ran with -no-report. It read the bucket, wrote nothing to it
+	// and signed nothing, so stdout is the only record and it is not signed.
+	reportNotRequested = "no-report"
+	// reportStoreFailed: the destination did not accept the report. Exit 3 when every
+	// repository came back, 1 when one did not.
+	reportStoreFailed = "store-failed"
+)
+
+// drillOutputFor says where the report went, or why it went nowhere.
+//
+// The pipeline returns a key only for a report it stored. Without one there are two causes: this
+// command withheld the signing key because of -no-report, or the destination refused the write.
+func drillOutputFor(res *pipeline.DrillResult, noReport bool) drillOutput {
+	out := drillOutput{DrillReport: res.Report}
+	switch {
+	case res.ReportKey != "":
+		key := res.ReportKey
+		out.ReportKey = &key
+	case noReport:
+		out.ReportNotWritten = reportNotRequested
+	default:
+		out.ReportNotWritten = reportStoreFailed
+	}
+	return out
 }
 
 // The drill's error, as a process exit code.
@@ -129,9 +192,19 @@ func drillExit(err error) int {
 	}
 }
 
+func emitDrill(output string, out drillOutput) {
+	if output == "json" {
+		b, _ := json.MarshalIndent(out, "", "  ")
+		fmt.Println(string(b))
+		return
+	}
+	printDrill(out)
+}
+
 // The human summary. One line per repository and one for the whole run, because a drill of a
 // thousand repositories is read by scrolling to the end.
-func printDrill(r *pipeline.DrillReport, stored bool) {
+func printDrill(out drillOutput) {
+	r := out.DrillReport
 	for _, repo := range r.Repos {
 		if repo.Status != pipeline.StatusSuccess {
 			fmt.Printf("FAIL %s: %s\n", repo.Slug, repo.Error)
@@ -144,9 +217,14 @@ func printDrill(r *pipeline.DrillReport, stored bool) {
 	if !r.ManifestSigned {
 		fmt.Println("note: the manifest's signature was not checked, so this proves these artifacts restore, not that gitdr wrote them")
 	}
-	// Without this, a clean run ends "all 214 repositories restored" and then exits non-zero
-	// with nothing on screen to explain it.
-	if !stored {
+	switch {
+	case out.ReportKey != nil:
+		fmt.Printf("report: %s\n", *out.ReportKey)
+	case out.ReportNotWritten == reportNotRequested:
+		fmt.Println("note: no report was written, because -no-report was given. This drill only read the bucket, wrote nothing to it and signed nothing, so the output above is the only record of it")
+	default:
+		// Without this, a clean run ends "all 214 repositories restored" and then exits non-zero
+		// with nothing on screen to explain it.
 		fmt.Println("note: this report was not stored, so the only copy of it is the output above")
 	}
 }
