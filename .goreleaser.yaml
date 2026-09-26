@@ -119,3 +119,8 @@ release:
     name: gitdr
   draft: false
   prerelease: auto
+  # What to read before upgrading, from docs/releases/<tag>.md, above the changelog. A tag with
+  # no such file gets no header: readFile returns nothing for a missing file and GoReleaser
+  # drops an empty header. That also means a wrong path here fails silently, so
+  # cmd/gitdr/release_test.go renders this template for every file in docs/releases.
+  header: '{{ readFile (printf "docs/releases/%s.md" .Tag) }}'
