@@ -471,8 +471,8 @@ func uploadDrill(ctx context.Context, d DrillDeps, report *DrillReport, req Dril
 	// Not a field on the report: the signature covers the report's exact bytes, so a report
 	// naming its own key would have to be signed after the key was chosen. The key is returned
 	// instead and `drill --output json` prints it beside the report as `reportKey`. The log line
-	// stays exactly as it is, because the hosted agent reads the key from it and pinned agents
-	// will go on doing so.
+	// still carries it too, as a stopgap for consumers written before 0.1.19 that read it from
+	// here. It is not part of the output contract; `reportKey` is.
 	log.Info("drill report written", "key", key, "signature", key+".sig")
 	return key, nil
 }

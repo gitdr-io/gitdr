@@ -71,8 +71,9 @@ func TestADrillProvesTheBackupRestores(t *testing.T) {
 	}
 	report := res.Report
 
-	// The log line is kept word for word: the hosted agent reads the key out of it, and an agent
-	// pinned to an older build will keep doing so after `reportKey` exists.
+	// The log line is a stopgap for consumers written before 0.1.19, which read the key out of it.
+	// It is not the contract, `reportKey` is, but dropping it by accident would break them
+	// without a word.
 	if out := logged.String(); !strings.Contains(out, "drill report written") ||
 		!strings.Contains(out, ".drill.json") || !strings.Contains(out, ".drill.json.sig") {
 		t.Errorf("the report's key and its signature were not logged:\n%s", out)

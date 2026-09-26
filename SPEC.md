@@ -92,8 +92,10 @@ A container is immutable only under a time-based retention policy that is **lock
 unlocked policy can be shortened or deleted by the account owner. Version-level immutability on
 its own locks nothing: it lets blob versions carry policies, and none does until a default
 policy is set on the container, and that policy is only a lock once it is locked. Up to v0.1.18
-gitdr reported version-level immutability as `immutable`, so manifests from those versions can
-say `immutable` about containers that were not.
+gitdr decided from the version-level flag alone and was wrong in both directions: a container
+with the flag read `immutable` whether or not anything was locked, and a container under a locked
+container-level policy, the usual setup, read `not-immutable`. §11 says what that means for
+manifests already written.
 
 Only Azure Resource Manager reports whether a policy is locked. The blob endpoint says whether a
 container has a policy (`x-ms-has-immutability-policy`) and whether it has version-level
@@ -270,11 +272,19 @@ Packaging files ship in-repo so downstream maintainers have little to do.
 AGPL-3.0. gitdr is free and open-source and stays that way. If the AGPL doesn't fit your
 org, a commercial license is available from the maintainer.
 
-## 11. Output contract (v3)
+## 11. Output contract
 
-The run-manifest schema and the `--output json` shapes are a stable, versioned public
-contract that downstream tooling consumes. Changes need a new schema version and a note
-here. `internal/pipeline/manifest_test.go` pins the current field set.
+The signed documents (the run-manifest, `gitdr.manifest/v5`, and the drill report,
+`gitdr.drill/v1`) and the `--output json` shapes are a stable public contract that downstream
+tooling consumes. `internal/pipeline/manifest_test.go` pins the manifest's current field set.
+
+**Schema versions name signed documents.** Adding a field to one, or changing what a field
+means, takes a new version and a note here, because `schema` is how a reader asks whether a
+document can carry a field, and a field that is absent is not the same as one that is empty.
+A field printed to stdout beside a signed document changes no document, so it takes only a
+dated note here. Examples are `backup`'s `manifestKey` and `drill`'s `reportKey`. The same
+goes for a new command, flag or output shape. Removing or repurposing anything a consumer
+already reads is a break under either rule, and is not done.
 
 v2 records the immutability observed at write time, since gitdr now writes to non-WORM
 destinations too (§4). `destination.wormImmutable` and `wormDetails` capture it. The
@@ -406,8 +416,9 @@ the way `backup` prints `manifestKey` after the manifest:
 
 `reportKey` is in every document from v0.1.19, as `null` rather than absent, because absent is
 what an older engine prints and a consumer has to be able to tell "no report" from "too old to
-say". Before it, the only place the key appeared was the `drill report written` log line. That
-line is unchanged, word for word, so an agent that reads it keeps working.
+say". Before it, the only place the key appeared was the `drill report written` log line, which
+still carries it. That line is a stopgap for consumers written before 0.1.19 and not part of
+this contract: logs are not an interface, and a consumer should read `reportKey`.
 
 **`drill -no-report`** is the same drill with nothing written. No report is signed or stored, so
 it needs a read credential and the public key, and it never loads the signing key, even when the
@@ -418,14 +429,13 @@ with nothing but this binary, the public key and read access. The printed report
 record and it is not signed: evidence of what the auditor saw, not something anyone else can
 verify later.
 
-**Why `gitdr.drill/v1` did not move.** This section says changes need a new schema version, and
-the practice recorded in it is narrower: the version names the signed document. `backup`'s
-`manifestKey`, the `verify -drill` shape and exit 3 were each added beside a signed document,
-with a dated note and no version change. This is the same case. The stored report is byte for
-byte what v0.1.18 wrote, `-no-report` produces that same report without storing it, and only
-stdout gains two fields, appended after the report's own. A bump would also break something
-real: `verify -drill` accepts exactly `gitdr.drill/v1`, so every report written after a bump
-would fail `verify -drill` on every engine pinned before it.
+**Why `gitdr.drill/v1` did not move.** The version names the signed document, and the stored
+report is byte for byte what v0.1.18 wrote. `-no-report` produces that same report without
+storing it, and only stdout gains two fields, appended after the report's own. That is the
+case of `backup`'s `manifestKey`, the `verify -drill` shape and exit 3, each added with a dated
+note and no version change. A bump would also break something real: `verify -drill` accepts
+exactly `gitdr.drill/v1`, so every report written after a bump would fail `verify -drill` on
+every engine pinned before it.
 
 *Added in v0.1.19. `gitdr.drill/v1` and `gitdr.manifest/v5` are unchanged.*
 
@@ -554,12 +564,22 @@ the non-strict path the two negatives warn differently, because they send an ope
 different places — `not-immutable` is local and says turn object lock on, `unknown` says ask the
 provider. Both stay at WARN; `unknown` is not the quieter problem.
 
-**On Azure the value changed in v0.1.19, not the schema.** A container with version-level
-immutability and no locked policy was reported `immutable`, and now reads `unknown`, or
-`not-immutable` when its policy is unlocked. `immutable` now needs a policy that Resource Manager
-reports as locked (§4, Azure). The same container can therefore carry `immutable` in an older
-manifest and `unknown` in a newer one; the newer one is right, and a consumer comparing runs
-should treat that as a correction rather than a regression of the storage.
+**On Azure the value changed in v0.1.19, not the schema, and in both directions.** Up to v0.1.18
+the verdict came from the version-level immutability flag alone. `immutable` now needs a policy
+that Resource Manager reports as locked (§4, Azure).
+
+- A container with the flag read `immutable` whether or not any policy was locked. It now reads
+  `unknown`, or `not-immutable` when its policy is unlocked. `--require-worm` runs that passed
+  there now fail.
+- A container under a locked container-level policy, which is the usual Azure setup, read
+  `not-immutable`. It now reads `unknown` without `subscriptionID` and `resourceGroup`, and
+  `immutable` with them. `--require-worm` runs that failed there now pass once both are set.
+
+Neither older answer was earned, so the same container can carry one value in an older manifest
+and another in a newer one, and the newer one is right. A reader can tell which is which without
+trusting either: the signed manifest's `tool.version` names the engine that wrote it (its first
+word is the version) and `destination.type` says `azure`. An Azure `wormVerdict` from an engine
+before 0.1.19 is best read as `unknown`, whatever value it carries.
 
 **v5 adds `destination.retentionObserved`**, one of exactly three values:
 
