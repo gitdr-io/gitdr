@@ -208,7 +208,7 @@ func Drill(ctx context.Context, d DrillDeps, req DrillRequest) (*DrillResult, er
 
 	allOK := true
 	for _, entry := range chosen {
-		res := drillOne(ctx, d, req, m, entry, log)
+		res := drillOne(ctx, d, req, key, m, signed, entry, log)
 		if res.Status != StatusSuccess {
 			allOK = false
 		}
@@ -248,7 +248,7 @@ var (
 	ErrReportNotStored = errors.New("store drill report")
 )
 
-func drillOne(ctx context.Context, d DrillDeps, req DrillRequest, m *Manifest, entry RepoEntry, log *slog.Logger) DrillRepo {
+func drillOne(ctx context.Context, d DrillDeps, req DrillRequest, manifestKey string, m *Manifest, signed bool, entry RepoEntry, log *slog.Logger) DrillRepo {
 	out := DrillRepo{Slug: entry.Slug, Status: StatusSuccess, SourceRefs: len(entry.Refs)}
 
 	host, owner, name, date, err := locate(m, entry)
@@ -256,6 +256,38 @@ func drillOne(ctx context.Context, d DrillDeps, req DrillRequest, m *Manifest, e
 		out.Status = StatusFailed
 		out.Error = err.Error()
 		return out
+	}
+
+	// Each repository is judged by the manifest this drill is about, verified once before
+	// anything was restored, and not by whichever manifest of that date a restore finds
+	// first. Looking again cost a listing and a verified fetch of every manifest of the day,
+	// per repository.
+	var verified *restoreChecks
+	if signed {
+		bundleKey, _, lfsKey := artifactKeys(host, owner, name, date)
+		c := restoreChecks{manifestKey: manifestKey, pub: d.PublicKey}
+		for _, a := range entry.Artifacts {
+			switch a.Key {
+			case bundleKey:
+				c.bundleSHA = a.SHA256
+			case lfsKey:
+				c.lfsSHA = a.SHA256
+			}
+		}
+		if c.bundleSHA == "" {
+			out.Status = StatusFailed
+			out.Error = fmt.Sprintf("the manifest %s records no bundle at %s", manifestKey, bundleKey)
+			return out
+		}
+		// A restore finds its manifest from the artifact's owner and date, and a manifest it
+		// cannot find that way is refused by `gitdr restore` even though it verifies here. A
+		// drill that passed it would vouch for a restore the operator cannot run.
+		if dir, prefix := manifestSearch(host, owner, date); !strings.HasPrefix(manifestKey, prefix) {
+			out.Status = StatusFailed
+			out.Error = fmt.Sprintf("a restore cannot find %s: it looks for the manifest of %s under %s/", manifestKey, date, dir)
+			return out
+		}
+		verified = &c
 	}
 
 	dir, err := os.MkdirTemp(req.WorkDir, "gitdr-drill-")
@@ -274,7 +306,8 @@ func drillOne(ctx context.Context, d DrillDeps, req DrillRequest, m *Manifest, e
 		PublicKey: d.PublicKey, Logger: log,
 	}, RestoreRequest{
 		Host: host, Owner: owner, Name: name, Date: date,
-		OutDir: path.Join(dir, name),
+		OutDir:   path.Join(dir, name),
+		verified: verified,
 	})
 	if err != nil {
 		out.Status = StatusFailed

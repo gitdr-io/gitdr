@@ -41,6 +41,20 @@ type RestoreRequest struct {
 	Name   string
 	Date   string // YYYY-MM-DD
 	OutDir string
+
+	// verified is a signed manifest's word on this restore's artifacts, for a caller that has
+	// already verified that manifest with the same public key. Drill sets it: it verifies the
+	// manifest it drills before it restores anything, and finding it again cost every
+	// repository a listing plus a fetch and a verification of each manifest of that date.
+	// Unexported, so only this package can vouch for a manifest.
+	verified *restoreChecks
+}
+
+// artifactKeys names one repository's dated artifacts: the bundle, its checksum sidecar and
+// the LFS archive. Restore and Drill both look them up, and must look in the same place.
+func artifactKeys(host, owner, name, date string) (bundle, sidecar, lfs string) {
+	prefix := path.Join(host, owner, name, date)
+	return path.Join(prefix, name+".bundle"), path.Join(prefix, name+".sha256"), path.Join(prefix, name+".lfs.tar")
 }
 
 // RestoreResult reports what was restored.
@@ -68,21 +82,29 @@ type RestoreResult struct {
 // bundle, and clones it into OutDir. Read-only against the destination.
 func Restore(ctx context.Context, d RestoreDeps, req RestoreRequest) (*RestoreResult, error) {
 	log := orDefault(d.Logger)
-	prefix := path.Join(req.Host, req.Owner, req.Name, req.Date)
-	bundleKey := path.Join(prefix, req.Name+".bundle")
-	shaKey := path.Join(prefix, req.Name+".sha256")
-	lfsKey := path.Join(prefix, req.Name+".lfs.tar")
+	bundleKey, shaKey, lfsKey := artifactKeys(req.Host, req.Owner, req.Name, req.Date)
 
 	// With a public key the signed manifest is located and its signature verified
 	// before a single artifact byte is trusted. Failing to find or verify one is a
 	// failure, not a downgrade to the sidecar-only check.
 	var checks *restoreChecks
-	if d.PublicKey != nil {
+	switch {
+	case req.verified != nil:
+		// Vouched for by a caller in this package, which must have verified the manifest with
+		// the key this restore was given. Anything else is a bug, and ignoring it would be a
+		// silent fall back to the unsigned sidecar.
+		if d.PublicKey == nil || !d.PublicKey.Equal(req.verified.pub) {
+			return nil, fmt.Errorf("restore: %s was not verified with this restore's public key", req.verified.manifestKey)
+		}
+		checks = req.verified
+	case d.PublicKey != nil:
 		var err error
 		checks, err = findRestoreChecks(ctx, d.Dest, d.PublicKey, log, req, bundleKey, lfsKey)
 		if err != nil {
 			return nil, err
 		}
+	}
+	if checks != nil {
 		log.Info("manifest verified", "manifest", checks.manifestKey)
 	}
 
@@ -281,7 +303,15 @@ func Restore(ctx context.Context, d RestoreDeps, req RestoreRequest) (*RestoreRe
 type restoreChecks struct {
 	manifestKey string
 	bundleSHA   string
-	lfsSHA      string // empty when the manifest records no LFS tar for this repo
+	lfsSHA      string            // empty when the manifest records no LFS tar for this repo
+	pub         ed25519.PublicKey // the key the manifest was verified with
+}
+
+// manifestSearch is where Restore looks for the manifest that records a dated bundle. Drill
+// checks the manifest it drills against the same place, so the two cannot drift apart.
+func manifestSearch(host, owner, date string) (dir, prefix string) {
+	dir = path.Join(host, owner, "manifests")
+	return dir, path.Join(dir, strings.ReplaceAll(date, "-", ""))
 }
 
 // findRestoreChecks locates the signed manifest covering this restore and returns the
@@ -304,8 +334,7 @@ type restoreChecks struct {
 // verified manifest records the bundle the restore fails below, naming how many could
 // not be verified.
 func findRestoreChecks(ctx context.Context, d dest.Destination, pub ed25519.PublicKey, log *slog.Logger, req RestoreRequest, bundleKey, lfsKey string) (*restoreChecks, error) {
-	dir := path.Join(req.Host, req.Owner, "manifests")
-	prefix := path.Join(dir, strings.ReplaceAll(req.Date, "-", ""))
+	dir, prefix := manifestSearch(req.Host, req.Owner, req.Date)
 	objs, err := d.List(ctx, prefix)
 	if err != nil {
 		return nil, fmt.Errorf("list manifests under %s: %w", prefix, err)
@@ -340,6 +369,7 @@ func findRestoreChecks(ctx context.Context, d dest.Destination, pub ed25519.Publ
 				}
 			}
 			if checks.bundleSHA != "" {
+				checks.pub = pub
 				return &checks, nil
 			}
 		}

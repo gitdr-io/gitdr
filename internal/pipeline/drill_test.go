@@ -10,7 +10,9 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -722,4 +724,241 @@ func TestADrillSeparatesAFailedRestoreFromAnUnfiledReport(t *testing.T) {
 			t.Errorf("ReportKey = %q for a report the destination refused", res.ReportKey)
 		}
 	})
+}
+
+// countingDest counts the manifest reads a drill makes.
+type countingDest struct {
+	*memDest
+	countMu   sync.Mutex
+	listings  int // listings under a manifests/ prefix
+	manifests int // fetches of a .manifest.json
+}
+
+func (c *countingDest) List(ctx context.Context, prefix string) ([]dest.Object, error) {
+	if strings.Contains(prefix, "/manifests") {
+		c.countMu.Lock()
+		c.listings++
+		c.countMu.Unlock()
+	}
+	return c.memDest.List(ctx, prefix)
+}
+
+func (c *countingDest) Get(ctx context.Context, key string) (io.ReadCloser, error) {
+	if strings.HasSuffix(key, ".manifest.json") {
+		c.countMu.Lock()
+		c.manifests++
+		c.countMu.Unlock()
+	}
+	return c.memDest.Get(ctx, key)
+}
+
+// A drill verifies the manifest it drills once, and every repository is restored against it.
+// Each restore used to find a manifest of its own: a listing of the day's manifests and a
+// verified fetch of each, per repository, so a drill of 500 repositories fetched the same large
+// file a thousand times.
+func TestADrillReadsItsManifestOnce(t *testing.T) {
+	t.Chdir(t.TempDir())
+	ctx := context.Background()
+
+	repoDir := initFixtureRepo(t)
+	var repos []source.Repo
+	for _, name := range []string{"alpha", "beta", "gamma"} {
+		repos = append(repos, source.Repo{Host: "github.com", Owner: "octo", Name: name, CloneURL: repoDir, DefaultBranch: "main"})
+	}
+	md := newMemDest(true)
+	pub, signer := drillKeys(t)
+
+	clock := func() time.Time { return time.Date(2026, 6, 13, 12, 0, 0, 0, time.UTC) }
+	if _, err := pipeline.Backup(ctx, pipeline.BackupDeps{
+		Config: testConfig(), Source: &fixtureSource{repos: repos}, Dest: md, Git: gitexec.New(nil),
+		SigningKey: signer, ToolVersion: "test", Now: clock,
+	}); err != nil {
+		t.Fatalf("backup: %v", err)
+	}
+
+	counted := &countingDest{memDest: md}
+	res, err := pipeline.Drill(ctx, pipeline.DrillDeps{
+		Dest: counted, Git: gitexec.New(nil), PublicKey: pub,
+		ToolVersion: "test", Now: func() time.Time { return clock().Add(time.Hour) },
+	}, pipeline.DrillRequest{Host: "github.com", Owner: "octo", WorkDir: t.TempDir()})
+	if err != nil {
+		t.Fatalf("drill: %v", err)
+	}
+	if res.Report.Drilled != 3 || res.Report.Status != pipeline.StatusSuccess {
+		t.Fatalf("drilled %d with status %s, want 3 and success: %+v", res.Report.Drilled, res.Report.Status, res.Report.Repos)
+	}
+	if counted.listings != 1 || counted.manifests != 1 {
+		t.Errorf("3 repositories cost %d manifest listings and %d manifest fetches, want 1 and 1", counted.listings, counted.manifests)
+	}
+}
+
+// Every repository is judged by the manifest the drill is about. A restore on its own takes the
+// newest verified manifest of that date that records the bundle, and a drill of an older
+// manifest must not be decided by a newer one. Create-only storage keeps two manifests from
+// recording one key with different checksums, which is what makes a disagreement here a
+// forgery, and a drill that trusted the newer one would report its forgery as a broken backup.
+func TestADrillJudgesEveryRepositoryByTheManifestItDrills(t *testing.T) {
+	t.Chdir(t.TempDir())
+	ctx := context.Background()
+
+	repoDir := initFixtureRepo(t)
+	src := &fixtureSource{repos: []source.Repo{{
+		Host: "github.com", Owner: "octo", Name: "hello", CloneURL: repoDir, DefaultBranch: "main",
+	}}}
+	md := newMemDest(true)
+	pub, signer := drillKeys(t)
+
+	clock := func() time.Time { return time.Date(2026, 6, 13, 12, 0, 0, 0, time.UTC) }
+	if _, err := pipeline.Backup(ctx, pipeline.BackupDeps{
+		Config: testConfig(), Source: src, Dest: md, Git: gitexec.New(nil),
+		SigningKey: signer, ToolVersion: "test", Now: clock,
+	}); err != nil {
+		t.Fatalf("backup: %v", err)
+	}
+
+	var drilled string
+	for _, k := range keysOf(md) {
+		if strings.HasSuffix(k, ".manifest.json") {
+			drilled = k
+		}
+	}
+	if drilled == "" {
+		t.Fatal("the backup wrote no manifest")
+	}
+
+	// A later manifest of the same day, signed with the same key, that records the same bundle
+	// with a checksum it does not have.
+	var later map[string]any
+	if err := json.Unmarshal(md.objs[drilled], &later); err != nil {
+		t.Fatal(err)
+	}
+	forged := 0
+	for _, repo := range later["repos"].([]any) {
+		for _, a := range repo.(map[string]any)["artifacts"].([]any) {
+			artifact := a.(map[string]any)
+			if strings.HasSuffix(artifact["key"].(string), ".bundle") {
+				artifact["sha256"] = strings.Repeat("0", 64)
+				forged++
+			}
+		}
+	}
+	if forged != 1 {
+		t.Fatalf("forged %d bundle checksums, want 1", forged)
+	}
+	raw, err := json.Marshal(later)
+	if err != nil {
+		t.Fatal(err)
+	}
+	laterKey := "github.com/octo/manifests/20260613T130000Z.manifest.json"
+	md.objs[laterKey] = raw
+	md.objs[laterKey+".sig"] = []byte(base64.StdEncoding.EncodeToString(crypto.Sign(signer, raw)))
+
+	res, err := pipeline.Drill(ctx, pipeline.DrillDeps{
+		Dest: md, Git: gitexec.New(nil), PublicKey: pub,
+		ToolVersion: "test", Now: func() time.Time { return clock().Add(2 * time.Hour) },
+	}, pipeline.DrillRequest{Host: "github.com", Owner: "octo", ManifestKey: drilled, WorkDir: t.TempDir()})
+	if err != nil {
+		t.Fatalf("drill of %s: %v (%+v)", drilled, err, res.Report.Repos)
+	}
+	if res.Report.ManifestKey != drilled || res.Report.Status != pipeline.StatusSuccess {
+		t.Errorf("drilled %s with status %s, want %s and success", res.Report.ManifestKey, res.Report.Status, drilled)
+	}
+}
+
+func drillKeys(t *testing.T) (ed25519.PublicKey, ed25519.PrivateKey) {
+	t.Helper()
+	pubPEM, privPEM, err := crypto.GenerateKeyPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	signer, err := crypto.ParsePrivateKey(privPEM)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pub, err := crypto.ParsePublicKey(pubPEM)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pub, signer
+}
+
+// A signed drill holds every artifact to the manifest it verified. Each case is a rewrite only
+// that manifest can catch, and a restore that ignored it would look exactly like one that used it.
+func TestASignedDrillHoldsEveryArtifactToItsManifest(t *testing.T) {
+	t.Chdir(t.TempDir())
+	for _, tc := range []struct {
+		name    string
+		lfs     bool
+		mutate  func(*testing.T, *restoreFixture)
+		wantErr string
+	}{
+		{"bundle and sidecar rewritten together", false, rewriteBundleAndSidecar, "does not match the signed manifest"},
+		{"lfs tar altered", true, flipByte(".lfs.tar"), "does not match the signed manifest"},
+		{"recorded lfs tar missing", true, dropKeys(".lfs.tar"), "does not have it"},
+		{"lfs tar the manifest does not record", false, plantLfsTar, "does not record"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.lfs && !gitexec.LFSAvailable() {
+				if os.Getenv("CI") != "" {
+					t.Fatal("git-lfs is not installed; in CI the LFS path must be exercised, not skipped")
+				}
+				t.Skip("git-lfs not installed")
+			}
+			f := backupForRestore(t, tc.lfs)
+			tc.mutate(t, f)
+			res, err := pipeline.Drill(context.Background(), pipeline.DrillDeps{
+				Dest: f.md, Git: gitexec.New(nil), PublicKey: f.pub, ToolVersion: "test",
+				Now: func() time.Time { return time.Date(2026, 6, 13, 13, 0, 0, 0, time.UTC) },
+			}, pipeline.DrillRequest{ManifestKey: f.res.ManifestKey, WorkDir: t.TempDir()})
+			if !errors.Is(err, pipeline.ErrDrillFailures) {
+				t.Fatalf("err = %v, want ErrDrillFailures", err)
+			}
+			if r := res.Report.Repos[0]; !res.Report.ManifestSigned || r.Status != pipeline.StatusFailed || !strings.Contains(r.Error, tc.wantErr) {
+				t.Fatalf("signed=%v %s: %q, want a failure containing %q", res.Report.ManifestSigned, r.Status, r.Error, tc.wantErr)
+			}
+		})
+	}
+}
+
+// A drill vouches only for a restore the operator can run. `gitdr restore` looks for a bundle's
+// manifest under the repository's own owner and date, and a run over several namespaces writes
+// one manifest, under the first. The drill verifies that manifest either way, so without this
+// check it passed a repository whose verified restore fails with "no signed manifest".
+func TestADrillFailsARestoreThatCouldNotFindItsManifest(t *testing.T) {
+	t.Chdir(t.TempDir())
+	ctx := context.Background()
+
+	repoDir := initFixtureRepo(t)
+	src := &fixtureSource{repos: []source.Repo{
+		{Host: "gitlab.com", Owner: "acme", Name: "app", CloneURL: repoDir, DefaultBranch: "main"},
+		{Host: "gitlab.com", Owner: "alice", Name: "tool", CloneURL: repoDir, DefaultBranch: "main"},
+	}}
+	md := newMemDest(true)
+	pub, signer := drillKeys(t)
+
+	clock := func() time.Time { return time.Date(2026, 6, 13, 12, 0, 0, 0, time.UTC) }
+	if _, err := pipeline.Backup(ctx, pipeline.BackupDeps{
+		Config: testConfig(), Source: src, Dest: md, Git: gitexec.New(nil),
+		SigningKey: signer, ToolVersion: "test", Now: clock,
+	}); err != nil {
+		t.Fatalf("backup: %v", err)
+	}
+
+	res, err := pipeline.Drill(ctx, pipeline.DrillDeps{
+		Dest: md, Git: gitexec.New(nil), PublicKey: pub,
+		ToolVersion: "test", Now: func() time.Time { return clock().Add(time.Hour) },
+	}, pipeline.DrillRequest{Host: "gitlab.com", Owner: "acme", WorkDir: t.TempDir()})
+	if !errors.Is(err, pipeline.ErrDrillFailures) {
+		t.Fatalf("err = %v, want ErrDrillFailures", err)
+	}
+	got := map[string]pipeline.DrillRepo{}
+	for _, r := range res.Report.Repos {
+		got[r.Slug] = r
+	}
+	if r := got["acme/app"]; r.Status != pipeline.StatusSuccess {
+		t.Errorf("acme/app: %s %q, want success: its manifest is where a restore looks", r.Status, r.Error)
+	}
+	if r := got["alice/tool"]; r.Status != pipeline.StatusFailed || !strings.Contains(r.Error, "a restore cannot find") {
+		t.Errorf("alice/tool: %s %q, want a failure saying a restore cannot find its manifest", r.Status, r.Error)
+	}
 }
