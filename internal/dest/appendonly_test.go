@@ -1,11 +1,21 @@
 package dest_test
 
 import (
+	"bytes"
+	"encoding/json"
+	"errors"
+	"fmt"
 	"go/ast"
+	"go/importer"
 	"go/parser"
 	"go/token"
+	"go/types"
+	"io"
 	"io/fs"
+	"os"
+	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -47,10 +57,8 @@ var forbiddenCalls = []string{
 	// Azure
 	"DeleteBlob", "DeleteContainer", "SetImmutabilityPolicy", "DeleteImmutabilityPolicy",
 	"SetLegalHold", "Undelete",
-	// Azure Resource Manager, imported to read whether a container's policy is locked. The same
-	// client replaces an unlocked policy with a shorter one, clears a legal hold, and builds the
-	// lifecycle rules that delete blobs on a timer. Reading is the only thing it is here for.
-	"CreateOrUpdateImmutabilityPolicy", "ClearLegalHold", "NewManagementPoliciesClient",
+	// Azure Resource Manager (armstorage) is not listed here. It is held to an allowlist instead,
+	// in TestArmstorageReachesOnlyTheContainerRead, because no list of names keeps up with it.
 }
 
 // PutObjectRetention and SetImmutabilityPolicy are on the list deliberately. They do not
@@ -186,4 +194,207 @@ func forEachFile(t *testing.T, check func(*testing.T, string, *ast.File, *token.
 	if seen < 4 {
 		t.Fatalf("only %d source files walked; expected the interface plus each backend", seen)
 	}
+}
+
+// armstorage is in this module for one question: is a container's immutability policy locked.
+//
+// The same package deletes containers, clears legal holds, replaces an unlocked policy with a
+// shorter one, writes the lifecycle rules that delete blobs on a timer, and restores an account
+// to an earlier point in time, which rewrites and removes blobs (BeginRestoreBlobRanges). It is
+// generated, it grows with every API version, and forbiddenCalls above matches exact names, so
+// a list of what not to call is always behind. What the code may reach is short and fixed, so
+// that is what is listed. It is checked with the type checker rather than by name, because
+// `x.Update` means nothing until you know what x is.
+const armstoragePath = "github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/storage/armstorage"
+
+var armstorageAllowed = map[string]bool{
+	"NewBlobContainersClient":     true, // the one client
+	"(*BlobContainersClient).Get": true, // the one call: the container, with its policy's state
+}
+
+// Every function or method in armstorage that code in this module can reach is on the
+// allowlist, whether it is named or reached through an interface a client is held by.
+//
+// Types, constants and struct fields are data and may be used freely; only what runs is checked.
+// Both allowed entries must actually be reached, or this would go on passing after the code it
+// guards had moved somewhere it does not look.
+func TestArmstorageReachesOnlyTheContainerRead(t *testing.T) {
+	pkgs := typecheckImporters(t, armstoragePath)
+	if len(pkgs) == 0 {
+		t.Fatal("no package in this module imports armstorage: this test asserts nothing")
+	}
+
+	reached := map[string]bool{}
+	reach := func(pos token.Position, name, how string) {
+		reached[name] = true
+		if !armstorageAllowed[name] {
+			t.Errorf("%s: %s armstorage %s, which is not on the allowlist. armstorage is here to "+
+				"read whether a container's policy is locked. Another read can be added to "+
+				"armstorageAllowed in review; anything that changes state cannot.", pos, how, name)
+		}
+	}
+	for _, p := range pkgs {
+		// By name: calls, method values, anything that refers to a function.
+		for id, obj := range p.info.Uses {
+			if fn, ok := obj.(*types.Func); ok && fn.Pkg() != nil && fn.Pkg().Path() == armstoragePath {
+				reach(p.fset.Position(id.Pos()), funcName(fn), "reaches")
+			}
+		}
+		// Through an interface. The azure backend holds its client as containerResource, which
+		// declares Get. Adding Update to that interface would let code call armstorage through a
+		// method this module declares, and the loop above would never see it.
+		clients := armstorageClients(p.pkg)
+		seen := map[*types.Interface]bool{}
+		for expr, tv := range p.info.Types {
+			iface, ok := tv.Type.Underlying().(*types.Interface)
+			if !ok || iface.NumMethods() == 0 || seen[iface] {
+				continue
+			}
+			seen[iface] = true
+			for _, c := range clients {
+				if !types.Implements(types.NewPointer(c), iface) && !types.Implements(c, iface) {
+					continue
+				}
+				for i := range iface.NumMethods() {
+					reach(p.fset.Position(expr.Pos()), "(*"+c.Obj().Name()+")."+iface.Method(i).Name(), "an interface exposes")
+				}
+			}
+		}
+	}
+	for name := range armstorageAllowed {
+		if !reached[name] {
+			t.Errorf("armstorage %s is allowed and nothing reaches it: the code moved, or this test no longer looks where it is", name)
+		}
+	}
+}
+
+// funcName is how the allowlist spells a function: NewX, or (*T).M for a method.
+func funcName(fn *types.Func) string {
+	recv := fn.Type().(*types.Signature).Recv()
+	if recv == nil {
+		return fn.Name()
+	}
+	t := recv.Type()
+	if ptr, ok := t.(*types.Pointer); ok {
+		if named, ok := ptr.Elem().(*types.Named); ok {
+			return "(*" + named.Obj().Name() + ")." + fn.Name()
+		}
+	}
+	if named, ok := t.(*types.Named); ok {
+		return "(" + named.Obj().Name() + ")." + fn.Name()
+	}
+	return fn.FullName()
+}
+
+// armstorageClients is every client type in the armstorage that pkg imports. Operations live on
+// clients; everything else in the package is a model.
+func armstorageClients(pkg *types.Package) []*types.Named {
+	var out []*types.Named
+	for _, imp := range pkg.Imports() {
+		if imp.Path() != armstoragePath {
+			continue
+		}
+		for _, name := range imp.Scope().Names() {
+			isClient := strings.HasSuffix(name, "Client") || name == "ClientFactory"
+			tn, ok := imp.Scope().Lookup(name).(*types.TypeName)
+			if !ok || !isClient {
+				continue
+			}
+			if named, ok := tn.Type().(*types.Named); ok {
+				out = append(out, named)
+			}
+		}
+	}
+	return out
+}
+
+type typedPkg struct {
+	fset *token.FileSet
+	pkg  *types.Package
+	info *types.Info
+}
+
+type listedPkg struct {
+	ImportPath string
+	Dir        string
+	GoFiles    []string
+	Imports    []string
+	Export     string
+}
+
+// typecheckImporters type-checks, from source, every non-test package in this module that
+// imports target, reading everything they import from the compiler's own export data.
+//
+// Standard library and the go command only, so guarding a dependency adds none. `go test` puts
+// its own GOROOT/bin first on PATH, so "go" here is the toolchain that built this test and its
+// export data is what go/importer expects.
+func typecheckImporters(t *testing.T, target string) []typedPkg {
+	t.Helper()
+	list := func(args ...string) []listedPkg {
+		t.Helper()
+		out, err := exec.Command("go", append([]string{"list", "-json"}, args...)...).Output()
+		if err != nil {
+			var exit *exec.ExitError
+			if errors.As(err, &exit) {
+				t.Fatalf("go list %v: %v\n%s", args, err, exit.Stderr)
+			}
+			t.Fatalf("go list %v: %v", args, err)
+		}
+		var pkgs []listedPkg
+		for dec := json.NewDecoder(bytes.NewReader(out)); dec.More(); {
+			var p listedPkg
+			if err := dec.Decode(&p); err != nil {
+				t.Fatalf("read go list output: %v", err)
+			}
+			pkgs = append(pkgs, p)
+		}
+		return pkgs
+	}
+
+	var importers []listedPkg
+	for _, p := range list("gitdr.io/gitdr/...") {
+		if slices.Contains(p.Imports, target) {
+			importers = append(importers, p)
+		}
+	}
+	if len(importers) == 0 {
+		return nil
+	}
+	args := []string{"-export", "-deps"}
+	for _, p := range importers {
+		args = append(args, p.ImportPath)
+	}
+	exports := map[string]string{}
+	for _, p := range list(args...) {
+		if p.Export != "" {
+			exports[p.ImportPath] = p.Export
+		}
+	}
+
+	fset := token.NewFileSet()
+	imp := importer.ForCompiler(fset, "gc", func(path string) (io.ReadCloser, error) {
+		file, ok := exports[path]
+		if !ok {
+			return nil, fmt.Errorf("no export data for %s", path)
+		}
+		return os.Open(file)
+	})
+	var out []typedPkg
+	for _, p := range importers {
+		var files []*ast.File
+		for _, name := range p.GoFiles {
+			f, err := parser.ParseFile(fset, filepath.Join(p.Dir, name), nil, 0)
+			if err != nil {
+				t.Fatalf("parse %s: %v", name, err)
+			}
+			files = append(files, f)
+		}
+		info := &types.Info{Uses: map[*ast.Ident]types.Object{}, Types: map[ast.Expr]types.TypeAndValue{}}
+		pkg, err := (&types.Config{Importer: imp}).Check(p.ImportPath, fset, files, info)
+		if err != nil {
+			t.Fatalf("type-check %s: %v", p.ImportPath, err)
+		}
+		out = append(out, typedPkg{fset: fset, pkg: pkg, info: info})
+	}
+	return out
 }
