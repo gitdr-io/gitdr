@@ -36,10 +36,102 @@ gcloud storage buckets create gs://my-worm-bucket --location=US \
 gcloud storage buckets update gs://my-worm-bucket --lock-retention-period
 ```
 
-**Azure Blob**, create a storage account with version-level immutability plus blob
-versioning, then a container ([Azure docs](https://learn.microsoft.com/azure/storage/blobs/immutable-version-level-worm-policies)).
+**Azure Blob**, a container with a time-based retention policy, then lock the policy
+([Azure docs](https://learn.microsoft.com/azure/storage/blobs/immutable-policy-configure-container-scope)).
+Version-level immutability on its own locks nothing, and an unlocked policy can be shortened or
+deleted. Only Azure Resource Manager says whether a policy is locked, so set
+`destination.azure.subscriptionID` and `resourceGroup` and run gitdr as an Entra ID identity
+(managed identity, workload identity or service principal). Without them gitdr reports the
+container as `unknown`.
 
-Scope the credential gitdr uses to create/put only. It never needs delete.
+### Scope the credential
+
+gitdr never deletes, so its credential should not be able to. The lists below come from the
+storage calls the engine makes (`internal/dest/s3/s3.go`) for `backup`, `verify` and `drill`.
+**They are derived from the code and have not yet been tested against a live account.** Run
+`gitdr doctor`, then one `backup`, `verify` and `drill`, before you rely on them.
+
+**AWS S3**, for the job that runs `backup` (and `drill`, which stores a report):
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "BucketLockAndListing",
+      "Effect": "Allow",
+      "Action": ["s3:GetBucketObjectLockConfiguration", "s3:ListBucket"],
+      "Resource": "arn:aws:s3:::my-worm-bucket"
+    },
+    {
+      "Sid": "ReadObjects",
+      "Effect": "Allow",
+      "Action": ["s3:GetObject", "s3:GetObjectRetention"],
+      "Resource": "arn:aws:s3:::my-worm-bucket/*"
+    },
+    {
+      "Sid": "CreateObjects",
+      "Effect": "Allow",
+      "Action": ["s3:PutObject", "s3:PutObjectRetention"],
+      "Resource": "arn:aws:s3:::my-worm-bucket/*"
+    }
+  ]
+}
+```
+
+| Action | S3 call | Why |
+|---|---|---|
+| `s3:GetBucketObjectLockConfiguration` | `GetObjectLockConfiguration` | the WORM check before every backup, and `doctor`. Without it the verdict is `unknown` and backups are written without retention |
+| `s3:ListBucket` | `ListObjectsV2` | the previous manifest, the resume check, the manifest a drill or restore looks up, the LFS archive |
+| `s3:GetObject` | `GetObject`, `HeadObject` | reading manifests, signatures and artifacts back. `HeadObject` is the create-only check before each write when `endpoint` is set |
+| `s3:GetObjectRetention` | `GetObjectRetention` | confirming the first object of a run holds its lock. Optional: without it the manifest says `not-checked` |
+| `s3:PutObject` | `PutObject` | artifacts, the signed manifest, the drill report |
+| `s3:PutObjectRetention` | `PutObject` with `x-amz-object-lock-*` headers | AWS requires it to set retention on a new object, and `backup` does on every write to a bucket it confirmed immutable |
+
+`s3:PutObjectRetention` also allows the `PutObjectRetention` call on existing objects. Under
+COMPLIANCE that can only lengthen a lock, and under GOVERNANCE shortening one also needs
+`s3:BypassGovernanceRetention`, which this policy leaves out. gitdr never makes that call.
+
+Left out on purpose: `s3:DeleteObject`, `s3:DeleteObjectVersion`,
+`s3:BypassGovernanceRetention`, `s3:PutObjectLegalHold`, `s3:PutBucketObjectLockConfiguration`,
+`s3:PutLifecycleConfiguration`, `s3:PutBucketPolicy`.
+
+Two things a policy cannot stop. `s3:PutObject` can always add a new version under an existing
+key; Object Lock keeps the old one, and `verify` catches the swap by its checksum. And if the
+bucket encrypts with SSE-KMS under your own key, add `kms:GenerateDataKey` for writing and
+`kms:Decrypt` for reading, on that key.
+
+An auditor re-running the proof (`verify`, `restore`, `drill -no-report`) needs only
+`s3:ListBucket` on the bucket and `s3:GetObject` on its objects. `verify` alone needs only
+`s3:GetObject`.
+
+**Backblaze B2**, an application key restricted to the bucket:
+
+```sh
+b2 key create --bucket my-worm-bucket gitdr-backup \
+  listFiles,readFiles,writeFiles,readBucketRetentions,writeFileRetentions,readFileRetentions
+```
+
+| Capability | S3 call | Why |
+|---|---|---|
+| `readBucketRetentions` | `GetObjectLockConfiguration` | the WORM check |
+| `listFiles` | `ListObjectsV2` | as `s3:ListBucket` above |
+| `readFiles` | `GetObject`, `HeadObject` | reading back. B2 answers `If-None-Match` with 501, so gitdr checks every key with `HeadObject` before it writes |
+| `writeFiles` | `PutObject` | artifacts, manifests, drill reports |
+| `writeFileRetentions` | `PutObject` with Object Lock headers | Backblaze documents it as required to set a retention on upload (for its native upload call; its S3 page does not say either way) |
+| `readFileRetentions` | `GetObjectRetention` | the post-write lock check. Optional, as on AWS |
+
+Left out on purpose: `deleteFiles`, `bypassGovernance`, `writeBucketRetentions`, `writeBuckets`,
+`deleteBuckets`, `writeFileLegalHolds`, `shareFiles`, and every `*Keys` capability.
+Backblaze says a key restricted to one bucket needs `listAllBucketNames` for "compatibility with
+SDKs and integrations". gitdr never lists buckets, so try without it and add it only if the key
+is refused.
+
+One B2 difference: `writeFiles` also lets a key hide a file through B2's native API. Hiding is
+not deleting, the earlier versions stay and a locked one cannot be removed, but a hidden bundle
+reads as missing until it is unhidden. `verify` reports it.
+
+The auditor's key needs `listFiles,readFiles`.
 
 ## 3. Source credentials (read-only)
 
@@ -116,7 +208,18 @@ gitdr drill --config config.yaml --manifest <manifest-key-from-step-7> --output 
 Every repository is compared against the bundle's own header and against the ref map the
 manifest signed. Refs a clone creates nothing for, `refs/merge-requests/*` and the like, are
 counted apart and named rather than folded into the total. Non-zero exit if anything fails to
-restore or comes back at a different commit.
+restore or comes back at a different commit. The signed report is stored beside the manifest,
+and `reportKey` in the JSON says where.
+
+An auditor can re-run the same proof from your bucket without your signing key. Give them read
+access (see step 2) and the public key, and they run:
+
+```sh
+gitdr drill --config config.yaml --manifest <manifest-key-from-step-7> --no-report
+```
+
+It checks the manifest's signature and runs the same comparison, and writes and signs nothing,
+which the output says.
 
 For a restore you drive by hand, follow [`../RESTORE-RUNBOOK.md`](../RESTORE-RUNBOOK.md).
 

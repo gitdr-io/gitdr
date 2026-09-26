@@ -71,9 +71,9 @@ job.
 |---|---|---|
 | AWS S3 | Object Lock (Compliance/Governance + legal hold) | reference implementation |
 | Google Cloud Storage | Bucket Lock (locked retention) + Object Retention | |
-| Azure Blob | Immutability policies (time-based retention + legal hold) | |
+| Azure Blob | Time-based retention policy on the container, locked | the lock is read through Azure Resource Manager, see below |
 | Wasabi | S3 Object Lock | compliance mode, Cohasset-assessed |
-| Backblaze B2 | S3 Object Lock (Compliance/Governance) | enable at bucket creation, versioning required |
+| Backblaze B2 | S3 Object Lock (Compliance/Governance) | turn it on for a new or existing bucket; B2 buckets are always versioned |
 | MinIO / IDrive E2 | S3 Object Lock | self-hosted WORM |
 | Cloudflare R2 | none (no S3 Object Lock) | bucket locks stop deletes, an administrator can remove them, gitdr cannot read them and reports unknown |
 
@@ -81,10 +81,59 @@ Most are S3-compatible, so one S3 backend (configurable endpoint) covers AWS, Wa
 MinIO, and IDrive. Only GCS and Azure need separate backends.
 
 WORM check. Before any write, gitdr probes the lock configuration (S3
-`GetObjectLockConfiguration`, GCS retention policy, Azure immutability policy). If it can't
-confirm enabled-and-locked immutability, it warns loudly and proceeds. `--require-worm`
-(`worm.require`, off by default) makes the run fail closed instead, for people who want a
-hard immutability guarantee.
+`GetObjectLockConfiguration`, the GCS retention policy, the state of the Azure container's
+immutability policy). If it can't confirm enabled-and-locked immutability, it warns loudly and
+proceeds. `--require-worm` (`worm.require`, off by default) makes the run fail closed instead,
+for people who want a hard immutability guarantee.
+
+### Azure
+
+A container is immutable only under a time-based retention policy that is **locked**. An
+unlocked policy can be shortened or deleted by the account owner. Version-level immutability on
+its own locks nothing: it lets blob versions carry policies, and none does until a default
+policy is set on the container, and that policy is only a lock once it is locked. Up to v0.1.18
+gitdr reported version-level immutability as `immutable`, so manifests from those versions can
+say `immutable` about containers that were not.
+
+Only Azure Resource Manager reports whether a policy is locked. The blob endpoint says whether a
+container has a policy (`x-ms-has-immutability-policy`) and whether it has version-level
+immutability, and never the policy's state or period. A written blob's properties do carry its
+policy's mode and expiry on a version-level container, but only after the write. The WORM check
+has to answer before the first one, because `--require-worm` refuses to write at all, and
+nothing seen after a write ever raises a verdict (v5, below). So the verdict comes from:
+
+| What gitdr read | Verdict |
+|---|---|
+| Resource Manager: the container's policy is `Locked`, with its period | `immutable` |
+| Resource Manager: the policy is `Unlocked` | `not-immutable` |
+| Either API: no policy and no version-level immutability | `not-immutable` |
+| A policy or version-level immutability, and no Resource Manager read | `unknown` |
+| Version-level immutability and no container policy (a policy on the storage account is not read) | `unknown` |
+| Resource Manager refused (`AuthorizationFailed`, `ResourceNotFound`, ...) or could not be reached | `unknown` |
+
+A legal hold counts as neither. It holds until someone with the right role clears it, which is
+the same kind of protection as an unlocked policy.
+
+The Resource Manager read is opt-in: set `destination.azure.subscriptionID` and
+`resourceGroup`, with `account`. What it changes about credentials:
+
+- It needs an Entra ID identity through `DefaultAzureCredential` (managed identity, workload
+  identity, service principal). An account key, a SAS or a connection string cannot
+  authenticate to Resource Manager. With a connection string for the blob endpoint, gitdr still
+  asks `DefaultAzureCredential` for this one read.
+- The RBAC action is `Microsoft.Storage/storageAccounts/blobServices/containers/read`, the one
+  the blob endpoint already requires for Get Container Properties. It is in Storage Blob Data
+  Reader and Contributor, so the role gitdr writes with already carries it, whether it is
+  assigned on the container or the account.
+- The request goes to `management.azure.com`, which a locked-down network has to allow as well
+  as the blob endpoint.
+- gitdr refuses a config whose blob endpoint belongs to a different account from `account`.
+  A lock read off another account's container would otherwise be reported as protecting this
+  one.
+
+After a write, on a version-level container, gitdr reads the first blob's policy back. A blob
+that carries none is the earned negative of v5. Blobs under a container-level policy never carry
+one, however locked the container is, so there it records `not-checked`.
 
 ### S3-compatible providers
 
@@ -102,7 +151,7 @@ MinIO integration test exercises this path).
 |---|---|---|---|
 | AWS S3 | default | ✅ reference | none |
 | Wasabi | `https://s3.<region>.wasabisys.com` | ✅ | compliance mode, Cohasset-assessed |
-| Backblaze B2 | `https://s3.<region>.backblazeb2.com` | ✅ | enable at bucket creation, versioning required, no conditional writes |
+| Backblaze B2 | `https://s3.<region>.backblazeb2.com` | ✅ | Object Lock can be turned on for a new or existing bucket; always versioned; `If-None-Match` answers 501, so gitdr checks each key with `HeadObject` before writing it |
 | MinIO / IDrive E2 | `http(s)://host:9000` | ✅ | self-hosted, create the bucket with object lock |
 | Cloudflare R2 | `https://<account>.r2.cloudflarestorage.com` | ❌ | bucket locks, not Object Lock; gitdr cannot read them and reports unknown |
 
@@ -122,6 +171,9 @@ only for S3-compatible providers. Scope every credential create/put-only.
 | GCS | SA JSON key | Workload Identity Federation, GKE WI, metadata server |
 | Azure Blob | account key / SAS | Entra ID with Managed Identity / workload identity / service principal |
 | Wasabi / B2 / MinIO / IDrive | access keys only | none |
+
+Confirming an Azure lock needs the keyless path: Resource Manager does not accept an account key
+or a SAS. See §4, Azure.
 
 ## 6. Security by design
 
@@ -344,6 +396,39 @@ artifact set nobody can attribute to gitdr is worse than no evidence.
 {host}/{org}/drills/{ts}.drill.json.sig  # ed25519 over the report, base64
 ```
 
+**Where the report went.** `drill --output json` prints the report, then two fields after it,
+the way `backup` prints `manifestKey` after the manifest:
+
+| field | meaning |
+|---|---|
+| `reportKey` | the object key the signed report was stored under, the value `verify -drill` takes. `null` when no report was written |
+| `reportNotWritten` | present only when `reportKey` is `null`, and one of two whole strings: `no-report` (the drill ran with `-no-report`) or `store-failed` (the destination refused the report: exit 3, or 1 if a repository also failed) |
+
+`reportKey` is in every document from v0.1.19, as `null` rather than absent, because absent is
+what an older engine prints and a consumer has to be able to tell "no report" from "too old to
+say". Before it, the only place the key appeared was the `drill report written` log line. That
+line is unchanged, word for word, so an agent that reads it keeps working.
+
+**`drill -no-report`** is the same drill with nothing written. No report is signed or stored, so
+it needs a read credential and the public key, and it never loads the signing key, even when the
+config names one. Everything else holds: the manifest's signature is checked and a manifest that
+fails it is refused, both joins run, and the exit codes mean what they meant (3 cannot happen,
+since nothing is stored). It lets an auditor re-run the restore from the customer's own bucket
+with nothing but this binary, the public key and read access. The printed report is the only
+record and it is not signed: evidence of what the auditor saw, not something anyone else can
+verify later.
+
+**Why `gitdr.drill/v1` did not move.** This section says changes need a new schema version, and
+the practice recorded in it is narrower: the version names the signed document. `backup`'s
+`manifestKey`, the `verify -drill` shape and exit 3 were each added beside a signed document,
+with a dated note and no version change. This is the same case. The stored report is byte for
+byte what v0.1.18 wrote, `-no-report` produces that same report without storing it, and only
+stdout gains two fields, appended after the report's own. A bump would also break something
+real: `verify -drill` accepts exactly `gitdr.drill/v1`, so every report written after a bump
+would fail `verify -drill` on every engine pinned before it.
+
+*Added in v0.1.19. `gitdr.drill/v1` and `gitdr.manifest/v5` are unchanged.*
+
 ### Object layout (per run)
 
 ```
@@ -469,6 +554,13 @@ the non-strict path the two negatives warn differently, because they send an ope
 different places — `not-immutable` is local and says turn object lock on, `unknown` says ask the
 provider. Both stay at WARN; `unknown` is not the quieter problem.
 
+**On Azure the value changed in v0.1.19, not the schema.** A container with version-level
+immutability and no locked policy was reported `immutable`, and now reads `unknown`, or
+`not-immutable` when its policy is unlocked. `immutable` now needs a policy that Resource Manager
+reports as locked (§4, Azure). The same container can therefore carry `immutable` in an older
+manifest and `unknown` in a newer one; the newer one is right, and a consumer comparing runs
+should treat that as a correction rather than a regression of the storage.
+
 **v5 adds `destination.retentionObserved`**, one of exactly three values:
 
 | value | what it means |
@@ -538,6 +630,7 @@ Wikis are a separate git repository and are out of scope for the metadata dump.
 | Command | Shape |
 |---|---|
 | `backup`  | the run-manifest above, plus `manifestKey` |
+| `drill`   | the drill report (`gitdr.drill/v1`), plus `reportKey` and `reportNotWritten` |
 | `restore` | `{ "bundleKey", "sha256", "outDir", "verified" }` |
 | `verify`  | `{ "manifestKey", "signatureValid", "artifactsChecked", "artifactsOk", "failures": [...] }` |
 | `verify -drill` | `{ "drillKey", "signatureValid", "schema", "drillId", "manifestKey", "manifestSigned", "status", "eligible", "drilled", "failures": [...] }` |
