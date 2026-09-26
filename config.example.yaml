@@ -28,9 +28,15 @@ destination:
     endpoint: ""               # empty = real GCS; set for an emulator
   azure:
     account: ""                # storage account (real Azure; uses DefaultAzureCredential)
-    container: ""              # blob container with an immutability policy
+    container: ""              # blob container with a LOCKED time-based retention policy
     endpoint: ""               # optional service URL override
     # connection string is a secret: set GITDR_DESTINATION_AZURE_CONNECTIONSTRING (e.g. Azurite)
+    # Where the account lives in Azure Resource Manager, the only API that says whether the
+    # policy is locked. Without both, gitdr reports the container as unknown. Needs an Entra ID
+    # identity with Microsoft.Storage/storageAccounts/blobServices/containers/read (in Storage
+    # Blob Data Reader and Contributor); an account key or SAS cannot read it.
+    subscriptionID: ""
+    resourceGroup: ""
   retention:
     mode: COMPLIANCE           # COMPLIANCE (true WORM) or GOVERNANCE, S3 only; GCS uses bucket retention
     days: 30

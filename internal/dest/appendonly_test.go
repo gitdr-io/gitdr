@@ -47,6 +47,10 @@ var forbiddenCalls = []string{
 	// Azure
 	"DeleteBlob", "DeleteContainer", "SetImmutabilityPolicy", "DeleteImmutabilityPolicy",
 	"SetLegalHold", "Undelete",
+	// Azure Resource Manager, imported to read whether a container's policy is locked. The same
+	// client replaces an unlocked policy with a shorter one, clears a legal hold, and builds the
+	// lifecycle rules that delete blobs on a timer. Reading is the only thing it is here for.
+	"CreateOrUpdateImmutabilityPolicy", "ClearLegalHold", "NewManagementPoliciesClient",
 }
 
 // PutObjectRetention and SetImmutabilityPolicy are on the list deliberately. They do not

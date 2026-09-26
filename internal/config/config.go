@@ -73,6 +73,11 @@ type AzureConfig struct {
 	Container        string        `yaml:"container"`
 	Endpoint         string        `yaml:"endpoint"`
 	ConnectionString redact.Secret `yaml:"-"`
+	// SubscriptionID and ResourceGroup locate the storage account in Azure Resource Manager,
+	// the only API that reports whether the container's immutability policy is locked.
+	// Optional; without them gitdr cannot confirm immutability on Azure and says unknown.
+	SubscriptionID string `yaml:"subscriptionID"`
+	ResourceGroup  string `yaml:"resourceGroup"`
 }
 
 // S3Config configures the S3 (and S3-compatible) backend.
@@ -185,6 +190,8 @@ func applyEnvOverrides(c *Config) {
 	envStr(&c.Destination.Azure.Container, "DESTINATION_AZURE_CONTAINER")
 	envStr(&c.Destination.Azure.Endpoint, "DESTINATION_AZURE_ENDPOINT")
 	envSecret(&c.Destination.Azure.ConnectionString, "DESTINATION_AZURE_CONNECTIONSTRING")
+	envStr(&c.Destination.Azure.SubscriptionID, "DESTINATION_AZURE_SUBSCRIPTIONID")
+	envStr(&c.Destination.Azure.ResourceGroup, "DESTINATION_AZURE_RESOURCEGROUP")
 	envStr(&c.Destination.Retention.Mode, "DESTINATION_RETENTION_MODE")
 	envInt(&c.Destination.Retention.Days, "DESTINATION_RETENTION_DAYS")
 

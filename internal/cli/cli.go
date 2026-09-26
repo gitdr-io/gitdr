@@ -147,6 +147,8 @@ func buildDest(ctx context.Context, cfg *config.Config, log *slog.Logger) (dest.
 			Container:        cfg.Destination.Azure.Container,
 			Endpoint:         cfg.Destination.Azure.Endpoint,
 			ConnectionString: cfg.Destination.Azure.ConnectionString.Reveal(),
+			SubscriptionID:   cfg.Destination.Azure.SubscriptionID,
+			ResourceGroup:    cfg.Destination.Azure.ResourceGroup,
 		}, log)
 	default:
 		return nil, fmt.Errorf("unsupported destination type %q", cfg.Destination.Type)
