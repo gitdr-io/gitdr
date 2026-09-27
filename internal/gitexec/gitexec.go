@@ -398,23 +398,7 @@ func (g *Git) output(ctx context.Context, workdir string, args ...string) (strin
 // GIT_CONFIG_VALUE_n and never on the command line, where `ps` would show it to every other
 // process on the machine.
 func (g *Git) outputCfg(ctx context.Context, workdir string, cfg []gitConfig, args ...string) (string, error) {
-	// audited: g.bin is the constant "git" and args are an argv array (no shell).
-	// nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command
-	cmd := exec.CommandContext(ctx, g.bin, args...)
-	if workdir != "" {
-		cmd.Dir = workdir
-	}
-	env := append(baseEnv(), "GIT_TERMINAL_PROMPT=0")
-	if len(cfg) > 0 {
-		env = append(env, fmt.Sprintf("GIT_CONFIG_COUNT=%d", len(cfg)))
-		for i, c := range cfg {
-			env = append(env,
-				fmt.Sprintf("GIT_CONFIG_KEY_%d=%s", i, c.key),
-				fmt.Sprintf("GIT_CONFIG_VALUE_%d=%s", i, c.value),
-			)
-		}
-	}
-	cmd.Env = env
+	cmd := g.command(ctx, workdir, cfg, []string{"GIT_TERMINAL_PROMPT=0"}, args)
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -427,27 +411,10 @@ func (g *Git) outputCfg(ctx context.Context, workdir string, cfg []gitConfig, ar
 }
 
 func (g *Git) run(ctx context.Context, workdir string, cfg []gitConfig, args ...string) error {
-	// audited: g.bin is the constant "git" and args are an argv array (no shell), so
-	// shell injection is impossible; "-"-leading positional args are guarded with "--".
-	// nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command
-	cmd := exec.CommandContext(ctx, g.bin, args...)
-	if workdir != "" {
-		cmd.Dir = workdir
-	}
-	env := append(baseEnv(),
+	cmd := g.command(ctx, workdir, cfg, []string{
 		"GIT_TERMINAL_PROMPT=0", // never block on a credential prompt
 		"GIT_LFS_SKIP_SMUDGE=1", // LFS is fetched explicitly later (M2)
-	)
-	if len(cfg) > 0 {
-		env = append(env, fmt.Sprintf("GIT_CONFIG_COUNT=%d", len(cfg)))
-		for i, c := range cfg {
-			env = append(env,
-				fmt.Sprintf("GIT_CONFIG_KEY_%d=%s", i, c.key),
-				fmt.Sprintf("GIT_CONFIG_VALUE_%d=%s", i, c.value),
-			)
-		}
-	}
-	cmd.Env = env
+	}, args)
 
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
@@ -456,6 +423,56 @@ func (g *Git) run(ctx context.Context, workdir string, cfg []gitConfig, args ...
 		return fmt.Errorf("git %s: %w: %s", args[0], err, strings.TrimSpace(stderr.String()))
 	}
 	return nil
+}
+
+// command builds every git process gitdr starts. It is the only place one is built, so every
+// command gets the same environment: commandEnv's, with the low-speed limits in it.
+func (g *Git) command(ctx context.Context, workdir string, cfg []gitConfig, extra, args []string) *exec.Cmd {
+	// audited: g.bin is the constant "git" and args are an argv array (no shell), so
+	// shell injection is impossible; "-"-leading positional args are guarded with "--".
+	// nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command
+	cmd := exec.CommandContext(ctx, g.bin, args...)
+	if workdir != "" {
+		cmd.Dir = workdir
+	}
+	cmd.Env = commandEnv(cfg, extra)
+	return cmd
+}
+
+// A transfer that moves fewer than lowSpeedLimit bytes a second for lowSpeedTime seconds is
+// aborted by git, as http.lowSpeedLimit and http.lowSpeedTime. Without them a server that stops
+// sending and keeps the connection open holds a clone, a fetch or an ls-remote, and with it the
+// run, for good. The clone retry then runs, and a transfer that stalls every time fails its
+// repository.
+//
+// Constants, with no setting of their own: git's GIT_HTTP_LOW_SPEED_LIMIT and
+// GIT_HTTP_LOW_SPEED_TIME, which baseEnv passes through, override both, because git reads the
+// environment after its configuration. Commands that touch no network ignore them, and git-lfs
+// does too; it has its own inactivity timeout, lfs.activitytimeout, 30 seconds by default.
+const (
+	lowSpeedLimit = "1000" // bytes per second
+	lowSpeedTime  = "600"  // seconds
+)
+
+// commandEnv is the environment of every git command: the caller's, without any GIT_CONFIG_*
+// it carried, then extra, then gitdr's own configuration as GIT_CONFIG_* pairs, the low-speed
+// limits first and then cfg. The auth header is one of cfg's entries, and it travels in
+// GIT_CONFIG_VALUE_n rather than on the command line, where `ps` would show it to every other
+// process on the machine.
+func commandEnv(cfg []gitConfig, extra []string) []string {
+	all := append([]gitConfig{
+		{key: "http.lowSpeedLimit", value: lowSpeedLimit},
+		{key: "http.lowSpeedTime", value: lowSpeedTime},
+	}, cfg...)
+	env := append(baseEnv(), extra...)
+	env = append(env, fmt.Sprintf("GIT_CONFIG_COUNT=%d", len(all)))
+	for i, c := range all {
+		env = append(env,
+			fmt.Sprintf("GIT_CONFIG_KEY_%d=%s", i, c.key),
+			fmt.Sprintf("GIT_CONFIG_VALUE_%d=%s", i, c.value),
+		)
+	}
+	return env
 }
 
 // extraHeaderKey scopes the auth header to the clone host, so the token is never sent

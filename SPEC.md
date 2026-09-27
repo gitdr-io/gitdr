@@ -192,6 +192,13 @@ or a SAS. See §4, Azure.
 - Hardened container. Wolfi/Chainguard base, non-root, read-only rootfs, no shell, plus
   `git` and `git-lfs`, pinned by digest.
 - Fail closed, bounded concurrency, rate-limit aware, resumable.
+- Bounded transfers. gitdr runs git with `http.lowSpeedLimit=1000` and `http.lowSpeedTime=600`,
+  so a clone, fetch or `ls-remote` that moves under 1000 bytes a second for ten minutes is
+  aborted and its repository fails. Before this, a server that stopped sending while keeping the
+  connection open could hold a run for good. git's own `GIT_HTTP_LOW_SPEED_LIMIT` and
+  `GIT_HTTP_LOW_SPEED_TIME` override both values, as git documents, and gitdr has no setting of
+  its own for them. git-lfs keeps its own inactivity timeout, `lfs.activitytimeout`, 30 seconds
+  by default. *Added in v0.1.20.*
 - No telemetry.
 
 ## 7. Restore
