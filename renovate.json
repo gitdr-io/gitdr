@@ -6,6 +6,7 @@
     ":semanticCommits",
     "helpers:pinGitHubActionDigests"
   ],
+  "gitAuthor": "keeper <keeper@gitdr.io>",
   "labels": [
     "dependencies"
   ],
@@ -85,6 +86,7 @@
     "before 7am on monday"
   ],
   "description": [
-    "Batch routine updates into one Monday morning pass instead of letting them arrive continuously. vulnerabilityAlerts above sets schedule: [] deliberately, which overrides this \u2014 a security fix is not made to wait for Monday."
+    "Batch routine updates into one Monday morning pass instead of letting them arrive continuously. vulnerabilityAlerts above sets schedule: [] deliberately, which overrides this \u2014 a security fix is not made to wait for Monday.",
+    "gitAuthor keeps Renovate's commits on keeper, the same identity as every other commit in this repository."
   ]
 }
