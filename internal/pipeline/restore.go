@@ -4,8 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
-	"encoding/base64"
-	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -14,6 +12,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"time"
 
 	"gitdr.io/gitdr/internal/crypto"
 	"gitdr.io/gitdr/internal/dest"
@@ -25,17 +24,26 @@ type RestoreDeps struct {
 	Dest          dest.Destination
 	Git           *gitexec.Git
 	EncryptionKey []byte // optional; must match the backup's key
-	// PublicKey is optional. When set, restore locates the signed run-manifest for the
-	// requested date, verifies its signature, and checks every artifact it downloads
-	// against the checksums the manifest records. The unsigned .sha256 sidecar catches
-	// corruption but not tampering; the manifest catches both. Without a key restore
-	// keeps the sidecar-only check and says so in RestoreResult.Verification.
+	// PublicKey is optional. When set, restore verifies the signed run-manifest of the run that
+	// wrote the bundle, the one RestoreRequest.ManifestKey names or the one it finds for the
+	// requested date, and checks every artifact it downloads against the checksums that manifest
+	// records. The unsigned .sha256 sidecar catches corruption but not tampering; the manifest
+	// catches both. Without a key restore keeps the sidecar-only check and says so in
+	// RestoreResult.Verification, and a ManifestKey is refused.
 	PublicKey ed25519.PublicKey
 	Logger    *slog.Logger
 }
 
-// RestoreRequest selects which dated bundle to restore and where to put it.
+// RestoreRequest selects which bundle to restore and where to put it.
 type RestoreRequest struct {
+	// ManifestKey names the run-manifest to restore from, the key backup prints as manifestKey.
+	// Owner and Name then pick the repository in it by slug, exactly, and the host and date come
+	// from the bundle key the manifest records, so Host and Date stay empty. It needs
+	// RestoreDeps.PublicKey: a manifest is read only once its signature holds.
+	//
+	// Empty, restore looks for the manifest from Host, Owner and Date; see findRestoreChecks.
+	ManifestKey string
+
 	Host   string // e.g. github.com
 	Owner  string
 	Name   string
@@ -82,7 +90,6 @@ type RestoreResult struct {
 // bundle, and clones it into OutDir. Read-only against the destination.
 func Restore(ctx context.Context, d RestoreDeps, req RestoreRequest) (*RestoreResult, error) {
 	log := orDefault(d.Logger)
-	bundleKey, shaKey, lfsKey := artifactKeys(req.Host, req.Owner, req.Name, req.Date)
 
 	// With a public key the signed manifest is located and its signature verified
 	// before a single artifact byte is trusted. Failing to find or verify one is a
@@ -97,9 +104,15 @@ func Restore(ctx context.Context, d RestoreDeps, req RestoreRequest) (*RestoreRe
 			return nil, fmt.Errorf("restore: %s was not verified with this restore's public key", req.verified.manifestKey)
 		}
 		checks = req.verified
+	case req.ManifestKey != "":
+		var err error
+		req, checks, err = checksFromManifest(ctx, d, req)
+		if err != nil {
+			return nil, err
+		}
 	case d.PublicKey != nil:
 		var err error
-		checks, err = findRestoreChecks(ctx, d.Dest, d.PublicKey, log, req, bundleKey, lfsKey)
+		checks, err = findRestoreChecks(ctx, d.Dest, d.PublicKey, log, req)
 		if err != nil {
 			return nil, err
 		}
@@ -107,6 +120,7 @@ func Restore(ctx context.Context, d RestoreDeps, req RestoreRequest) (*RestoreRe
 	if checks != nil {
 		log.Info("manifest verified", "manifest", checks.manifestKey)
 	}
+	bundleKey, shaKey, lfsKey := artifactKeys(req.Host, req.Owner, req.Name, req.Date)
 
 	tmp, err := os.MkdirTemp("", "gitdr-restore-")
 	if err != nil {
@@ -251,7 +265,7 @@ func Restore(ctx context.Context, d RestoreDeps, req RestoreRequest) (*RestoreRe
 			// same reason the rest of this tool re-reads what it writes. Handing someone a
 			// 130-byte pointer where their file should be, and calling it a restore, is the
 			// failure this product exists to prevent.
-			remaining, err := d.Git.LFSPointersRemaining(ctx, req.OutDir)
+			remaining, err := lfsPointers(ctx, req.OutDir)
 			if err != nil {
 				return nil, fmt.Errorf("lfs verify: %w", err)
 			}
@@ -267,6 +281,27 @@ func Restore(ctx context.Context, d RestoreDeps, req RestoreRequest) (*RestoreRe
 			return nil, fmt.Errorf(
 				"repository uses git-lfs and git-lfs is not installed: LFS objects were restored to %s but the working tree still holds pointer files",
 				req.OutDir)
+		}
+	} else {
+		// No archive to put back, and the tree is read back anyway. A backup taken with
+		// backup.lfs off, or where git-lfs was not installed, holds no LFS objects, and its
+		// restore used to pass with a pointer in place of every LFS file. Nothing else looked:
+		// the check above only ran when there was an archive to extract.
+		//
+		// With a key, "no archive" is the signed manifest's word, since a stored archive it does
+		// not record was refused above. Without one it is the listing's, and a listing that
+		// failed has not said there is none.
+		pointers, err := lfsPointers(ctx, req.OutDir)
+		if err != nil {
+			return nil, fmt.Errorf("lfs verify: %w", err)
+		}
+		if len(pointers) > 0 {
+			if listErr != nil && checks == nil {
+				return nil, fmt.Errorf("%d file(s) came back as git-lfs pointers, first is %q, and looking for this backup's LFS archive (%s) failed: %w",
+					len(pointers), pointers[0], lfsKey, listErr)
+			}
+			return nil, fmt.Errorf("%d file(s) came back as git-lfs pointers, first is %q, and this backup holds no LFS archive (%s): the content of those files was not backed up. gitdr stores LFS objects only when backup.lfs is on and git-lfs is installed where the backup runs",
+				len(pointers), pointers[0], lfsKey)
 		}
 	}
 
@@ -307,102 +342,142 @@ type restoreChecks struct {
 	pub         ed25519.PublicKey // the key the manifest was verified with
 }
 
-// manifestSearch is where Restore looks for the manifest that records a dated bundle. Drill
-// checks the manifest it drills against the same place, so the two cannot drift apart.
-func manifestSearch(host, owner, date string) (dir, prefix string) {
-	dir = path.Join(host, owner, "manifests")
-	return dir, path.Join(dir, strings.ReplaceAll(date, "-", ""))
+// recordedChecks is what a verified manifest's entry records for the artifacts at these keys:
+// the bundle's checksum, empty when it records no such bundle, and the LFS archive's, empty when
+// it records none.
+func recordedChecks(manifestKey string, pub ed25519.PublicKey, entry RepoEntry, bundleKey, lfsKey string) restoreChecks {
+	c := restoreChecks{manifestKey: manifestKey, pub: pub}
+	for _, a := range entry.Artifacts {
+		switch a.Key {
+		case bundleKey:
+			c.bundleSHA = a.SHA256
+		case lfsKey:
+			c.lfsSHA = a.SHA256
+		}
+	}
+	return c
 }
 
-// findRestoreChecks locates the signed manifest covering this restore and returns the
-// checksums it records. Manifest objects are named with a compact UTC timestamp
-// (20260613T120000Z.manifest.json), so the requested YYYY-MM-DD date with the dashes
-// dropped is their prefix.
+// checksFromManifest is `restore -manifest`. The named manifest, read through the one loader,
+// says where the repository's artifacts are and what they hash to, and the request comes back
+// with the host, owner, name and date of the bundle it records.
 //
-// Several manifests can match one date: a resume run writes a second manifest that
-// records this repo as skipped with no artifacts, and a run over a different repo
-// selection does not mention it at all. Artifact keys are create-only, though, so
-// exactly one run wrote this bundle and only that run's manifest records the artifact.
-// Scanning newest to oldest for the first verified manifest that records the bundle
-// finds that run; the order only makes the common case, restoring a recent backup,
-// cheap.
+// The entry is the one whose slug is the request's, exactly, and it has to be a copy that run
+// made. A repository a run skipped or failed has no copy in that run, and restoring one that some
+// other run wrote, under this run's name, would put a verified label on the wrong copy.
 //
-// A manifest that cannot be verified is skipped with a loud warning rather than failing
-// the restore outright: the configured key may have been rotated since an older run,
-// and a bucket shared by several backup jobs holds manifests signed by other keys.
-// Skipping trusts nothing, no byte of an unverified manifest is used, and if no
-// verified manifest records the bundle the restore fails below, naming how many could
-// not be verified.
-func findRestoreChecks(ctx context.Context, d dest.Destination, pub ed25519.PublicKey, log *slog.Logger, req RestoreRequest, bundleKey, lfsKey string) (*restoreChecks, error) {
-	dir, prefix := manifestSearch(req.Host, req.Owner, req.Date)
-	objs, err := d.List(ctx, prefix)
+// From here the restore takes the path a drill's does: the manifest has been verified once, and
+// every artifact is held to what it records.
+func checksFromManifest(ctx context.Context, d RestoreDeps, req RestoreRequest) (RestoreRequest, *restoreChecks, error) {
+	key := req.ManifestKey
+	if d.PublicKey == nil {
+		return req, nil, fmt.Errorf("restore from %s needs the public key: a manifest is read only once its signature holds; set manifest.publicKeyPath", key)
+	}
+	if req.Host != "" || req.Date != "" {
+		return req, nil, fmt.Errorf("restore from %s: the host and date come from the manifest, and this request gives its own", key)
+	}
+	m, err := loadManifest(ctx, d.Dest, d.PublicKey, key)
 	if err != nil {
-		return nil, fmt.Errorf("list manifests under %s: %w", prefix, err)
+		return req, nil, err
 	}
-	var keys []string
-	for _, o := range objs {
-		if strings.HasSuffix(o.Key, ".manifest.json") {
-			keys = append(keys, o.Key)
-		}
-	}
-	if len(keys) == 0 {
-		return nil, fmt.Errorf("no signed manifest for %s under %s/: either the date is wrong or that backup wrote no manifest; to restore without manifest verification, unset manifest.publicKeyPath", req.Date, dir)
-	}
-	slices.SortFunc(keys, func(a, b string) int { return strings.Compare(b, a) }) // newest first
 
-	unverified := 0
-	for _, key := range keys {
-		m, err := verifiedManifest(ctx, d, pub, key)
-		if err != nil {
-			unverified++
-			log.Warn("manifest cannot be verified with the configured public key; skipping it", "manifest", key, "err", err)
-			continue
+	slug := req.Owner + "/" + req.Name
+	i := slices.IndexFunc(m.Repos, func(e RepoEntry) bool { return e.Slug == slug })
+	if i < 0 {
+		return req, nil, fmt.Errorf("the manifest %s records no repository %q", key, slug)
+	}
+	entry := m.Repos[i]
+	if entry.Status != StatusSuccess {
+		why := entry.Reason
+		if why == "" {
+			why = entry.Error
 		}
-		for _, repo := range m.Repos {
-			checks := restoreChecks{manifestKey: key}
-			for _, a := range repo.Artifacts {
-				switch a.Key {
-				case bundleKey:
-					checks.bundleSHA = a.SHA256
-				case lfsKey:
-					checks.lfsSHA = a.SHA256
+		if why != "" {
+			why = " (" + why + ")"
+		}
+		return req, nil, fmt.Errorf("the manifest %s records %q as %s%s, so this run holds no copy of it to restore: a copy is recorded by the manifest of the run that made it",
+			key, slug, entry.Status, why)
+	}
+	i = slices.IndexFunc(entry.Artifacts, func(a ArtifactInfo) bool { return a.Kind == "bundle" })
+	if i < 0 {
+		return req, nil, fmt.Errorf("the manifest %s records %q as copied and names no bundle for it, so there is nothing to restore", key, slug)
+	}
+	recorded := entry.Artifacts[i].Key
+
+	// Parsed from the end, as locate does, and then held to the one layout backup writes. A key
+	// that does not come back out of artifactKeys unchanged is not one gitdr wrote.
+	host, owner, name, date, ok := splitArtifactKey(recorded)
+	bundleKey, _, lfsKey := artifactKeys(host, owner, name, date)
+	if !ok || bundleKey != recorded {
+		return req, nil, fmt.Errorf("the manifest %s records the bundle of %q at %s, which is not a key gitdr writes: refusing it", key, slug, recorded)
+	}
+	c := recordedChecks(key, d.PublicKey, entry, bundleKey, lfsKey)
+	req.Host, req.Owner, req.Name, req.Date = host, owner, name, date
+	return req, &c, nil
+}
+
+// findRestoreChecks is restore without -manifest. It finds the signed manifest of the run that
+// wrote this bundle and returns the checksums it records.
+//
+// It looks where backup files one. A run files its manifest under the deepest namespace holding
+// every repository it copied, which is this repository's own namespace or one above it, and names
+// it for the moment it finished, which is the day of the copy or, for a run that crossed midnight
+// UTC, the day after. So the search goes through the repository's namespace, each one above it and
+// then the host, and in each through the manifests of the date and of the next day. That finds
+// every run from v0.1.20 on that finished within a day of its copy. A manifest an older engine
+// filed under another namespace, or a longer run's, takes -manifest.
+//
+// Artifact keys are create-only, so exactly one run wrote this bundle and only that run's
+// manifest records it. Newest first only makes the common case cheap. The search stops at the
+// first manifest that records the exact bundle key.
+//
+// A candidate that cannot be read, or that the loader refuses, is skipped with a warning and
+// counted rather than failing the restore: the signing key may have been rotated since, a bucket
+// shared by several backup jobs holds manifests signed by other keys, and a copy stored under
+// another name is somebody's doing and not this backup's. Skipping trusts nothing, and if nothing
+// records the bundle the restore fails and says how many were passed over.
+func findRestoreChecks(ctx context.Context, d dest.Destination, pub ed25519.PublicKey, log *slog.Logger, req RestoreRequest) (*restoreChecks, error) {
+	day, err := time.Parse("2006-01-02", req.Date)
+	if err != nil {
+		return nil, fmt.Errorf("restore: the date %q is not in the form YYYY-MM-DD", req.Date)
+	}
+	next := day.AddDate(0, 0, 1)
+	bundleKey, _, lfsKey := artifactKeys(req.Host, req.Owner, req.Name, req.Date)
+	dirs := manifestSearchDirs(req.Host, req.Owner)
+
+	seen, passed := 0, 0
+	for _, dir := range dirs {
+		for _, on := range []time.Time{day, next} {
+			prefix := path.Join(dir, on.Format("20060102"))
+			objs, err := d.List(ctx, prefix)
+			if err != nil {
+				return nil, fmt.Errorf("list manifests under %s: %w", prefix, err)
+			}
+			for _, key := range filedManifests(objs, dir) {
+				seen++
+				m, err := loadManifest(ctx, d, pub, key)
+				if err != nil {
+					passed++
+					log.Warn("skipping a manifest this restore cannot rely on", "manifest", key, "err", err)
+					continue
+				}
+				for _, entry := range m.Repos {
+					if c := recordedChecks(key, pub, entry, bundleKey, lfsKey); c.bundleSHA != "" {
+						return &c, nil
+					}
 				}
 			}
-			if checks.bundleSHA != "" {
-				checks.pub = pub
-				return &checks, nil
-			}
 		}
 	}
-	if unverified > 0 {
-		return nil, fmt.Errorf("no verified manifest for %s records %s: %d of %d manifest(s) did not verify with the configured public key; if the signing key was rotated, point manifest.publicKeyPath at the key that signed this backup", req.Date, bundleKey, unverified, len(keys))
-	}
-	return nil, fmt.Errorf("%d manifest(s) for %s verify but none records %s: the run that wrote this bundle left no manifest here", len(keys), req.Date, bundleKey)
-}
 
-// verifiedManifest fetches a manifest and its detached signature and parses it only
-// after the signature verifies over the exact stored bytes.
-func verifiedManifest(ctx context.Context, d dest.Destination, pub ed25519.PublicKey, key string) (*Manifest, error) {
-	canon, err := getBytes(ctx, d, key)
-	if err != nil {
-		return nil, fmt.Errorf("read manifest: %w", err)
+	searched := fmt.Sprintf("manifests that finished on %s or %s, under %s/",
+		day.Format("2006-01-02"), next.Format("2006-01-02"), strings.Join(dirs, "/, "))
+	if passed > 0 {
+		return nil, fmt.Errorf("no signed manifest records %s: %d of the %d %s did not verify with the configured public key or could not be used, as the warnings above say. If the signing key was rotated, point manifest.publicKeyPath at the key that signed this backup; otherwise pass -manifest <key>, the manifestKey the backup printed",
+			bundleKey, passed, seen, searched)
 	}
-	sigB64, err := getBytes(ctx, d, key+".sig")
-	if err != nil {
-		return nil, fmt.Errorf("read signature: %w", err)
-	}
-	sig, err := base64.StdEncoding.DecodeString(strings.TrimSpace(string(sigB64)))
-	if err != nil {
-		return nil, fmt.Errorf("decode signature: %w", err)
-	}
-	if err := crypto.Verify(pub, canon, sig); err != nil {
-		return nil, err
-	}
-	var m Manifest
-	if err := json.Unmarshal(canon, &m); err != nil {
-		return nil, fmt.Errorf("parse manifest: %w", err)
-	}
-	return &m, nil
+	return nil, fmt.Errorf("no signed manifest records %s: looked through %d %s. The manifest of a run that finished more than a day after the copy, or one an engine older than v0.1.20 filed under another namespace, is reached only by its key: pass -manifest <key>, the manifestKey the backup printed",
+		bundleKey, seen, searched)
 }
 
 // fileIsEncrypted reports whether the file at p begins with the gitdr envelope magic.

@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"gitdr.io/gitdr/internal/dest"
-	"gitdr.io/gitdr/internal/source"
 )
 
 var (
@@ -241,8 +240,9 @@ func TestAFailedEntryIsNotEvidenceEvenWhenItCarriesRefs(t *testing.T) {
 			"github.com/octo/manifests/20260901T120000Z.manifest.json": raw,
 		}},
 		log: slog.New(slog.DiscardHandler),
+		now: func() time.Time { return now },
 	}
-	got := r.loadPrevious(context.Background(), source.Repo{Host: "github.com", Owner: "octo"})
+	got := r.loadPrevious(context.Background(), "github.com/octo/manifests")
 
 	if _, ok := got["octo/failed"]; ok {
 		t.Error("a failed copy's refs were read as evidence; its retry would be skipped and the repository would have no copy at all")
@@ -269,8 +269,8 @@ func TestAnUnreadablePreviousManifestMeansCopyEverything(t *testing.T) {
 	}
 	for name, objs := range cases {
 		t.Run(name, func(t *testing.T) {
-			r := &backupRun{dst: &stubDest{objs: objs}, log: slog.New(slog.DiscardHandler)}
-			if got := r.loadPrevious(context.Background(), source.Repo{Host: "github.com", Owner: "octo"}); len(got) != 0 {
+			r := &backupRun{dst: &stubDest{objs: objs}, log: slog.New(slog.DiscardHandler), now: func() time.Time { return now }}
+			if got := r.loadPrevious(context.Background(), "github.com/octo/manifests"); len(got) != 0 {
 				t.Errorf("got %d entries, want none", len(got))
 			}
 		})
@@ -292,9 +292,9 @@ func TestTheNewestManifestWins(t *testing.T) {
 		"github.com/octo/manifests/20260101T000000Z.manifest.json": mk("old", time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)),
 		"github.com/octo/manifests/20260901T120000Z.manifest.json": mk("new", time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)),
 		"github.com/octo/manifests/20260501T000000Z.manifest.json": mk("mid", time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)),
-	}}, log: slog.New(slog.DiscardHandler)}
+	}}, log: slog.New(slog.DiscardHandler), now: func() time.Time { return now }}
 
-	got := r.loadPrevious(context.Background(), source.Repo{Host: "github.com", Owner: "octo"})
+	got := r.loadPrevious(context.Background(), "github.com/octo/manifests")
 	if got["octo/x"].refs["refs/heads/main"] != "new" {
 		t.Errorf("read %q, want the newest manifest's %q", got["octo/x"].refs["refs/heads/main"], "new")
 	}

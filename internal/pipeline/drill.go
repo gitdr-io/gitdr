@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"os"
 	"path"
@@ -58,6 +57,10 @@ import (
 // Not that unreferenced objects survive. A clone uses the default refspec, so a bundle's
 // refs/merge-requests/* and refs/notes/* arrive as objects with nothing pointing at them. They
 // are counted separately and named, never quietly folded into the matched total.
+//
+// Not LFS content off the checked-out tree. Restore fails on a git-lfs pointer left in the
+// working tree at HEAD, and a pointer that exists only on another branch or in history is not
+// read.
 
 // DrillSchema is the versioned identifier of the drill-report contract. Like the manifest, this
 // is a stable public contract: an auditor's tooling reads it, and changing it needs a version
@@ -174,7 +177,7 @@ func Drill(ctx context.Context, d DrillDeps, req DrillRequest) (*DrillResult, er
 	}
 	started := now().UTC()
 
-	key, m, signed, err := loadManifestForDrill(ctx, d, req)
+	key, m, signed, err := loadManifestForDrill(ctx, d, req, started)
 	if err != nil {
 		return nil, err
 	}
@@ -262,29 +265,16 @@ func drillOne(ctx context.Context, d DrillDeps, req DrillRequest, manifestKey st
 	// anything was restored, and not by whichever manifest of that date a restore finds
 	// first. Looking again cost a listing and a verified fetch of every manifest of the day,
 	// per repository.
+	//
+	// What passes here is what `gitdr restore -manifest <this manifest> -repo <slug>` restores:
+	// the same verified manifest, the same entry, the same checks.
 	var verified *restoreChecks
 	if signed {
 		bundleKey, _, lfsKey := artifactKeys(host, owner, name, date)
-		c := restoreChecks{manifestKey: manifestKey, pub: d.PublicKey}
-		for _, a := range entry.Artifacts {
-			switch a.Key {
-			case bundleKey:
-				c.bundleSHA = a.SHA256
-			case lfsKey:
-				c.lfsSHA = a.SHA256
-			}
-		}
+		c := recordedChecks(manifestKey, d.PublicKey, entry, bundleKey, lfsKey)
 		if c.bundleSHA == "" {
 			out.Status = StatusFailed
 			out.Error = fmt.Sprintf("the manifest %s records no bundle at %s", manifestKey, bundleKey)
-			return out
-		}
-		// A restore finds its manifest from the artifact's owner and date, and a manifest it
-		// cannot find that way is refused by `gitdr restore` even though it verifies here. A
-		// drill that passed it would vouch for a restore the operator cannot run.
-		if dir, prefix := manifestSearch(host, owner, date); !strings.HasPrefix(manifestKey, prefix) {
-			out.Status = StatusFailed
-			out.Error = fmt.Sprintf("a restore cannot find %s: it looks for the manifest of %s under %s/", manifestKey, date, dir)
 			return out
 		}
 		verified = &c
@@ -370,16 +360,9 @@ func drillOne(ctx context.Context, d DrillDeps, req DrillRequest, manifestKey st
 // GitLab ones.
 func locate(m *Manifest, entry RepoEntry) (host, owner, name, date string, err error) {
 	for _, a := range entry.Artifacts {
-		parts := strings.Split(a.Key, "/")
-		// host + owner(1+) + name + date + file
-		if len(parts) < 5 {
-			continue
+		if host, owner, name, date, ok := splitArtifactKey(a.Key); ok {
+			return host, owner, name, date, nil
 		}
-		return parts[0],
-			strings.Join(parts[1:len(parts)-3], "/"),
-			parts[len(parts)-3],
-			parts[len(parts)-2],
-			nil
 	}
 
 	owner, name, found := strings.Cut(entry.Slug, "/")
@@ -389,70 +372,42 @@ func locate(m *Manifest, entry RepoEntry) (host, owner, name, date string, err e
 	return m.Source.Host, owner, name, "", fmt.Errorf("no artifact key to locate %q by", entry.Slug)
 }
 
-func loadManifestForDrill(ctx context.Context, d DrillDeps, req DrillRequest) (string, *Manifest, bool, error) {
-	key := req.ManifestKey
-	if key == "" {
-		prefix := path.Join(req.Host, req.Owner, "manifests") + "/"
-		objs, err := d.Dest.List(ctx, prefix)
-		if err != nil {
-			return "", nil, false, fmt.Errorf("list manifests: %w", err)
-		}
-		var keys []string
-		for _, o := range objs {
-			if strings.HasSuffix(o.Key, ".manifest.json") {
-				keys = append(keys, o.Key)
-			}
-		}
-		if len(keys) == 0 {
-			return "", nil, false, fmt.Errorf("no manifest to drill under %s", prefix)
-		}
-		sort.Strings(keys)
-		key = keys[len(keys)-1]
+// splitArtifactKey reads {host}/{owner}/{name}/{date}/{file} from the end, because the owner can
+// be more than one segment. See locate.
+func splitArtifactKey(key string) (host, owner, name, date string, ok bool) {
+	parts := strings.Split(key, "/")
+	// host + owner(1+) + name + date + file
+	if len(parts) < 5 {
+		return "", "", "", "", false
 	}
-
-	rc, err := d.Dest.Get(ctx, key)
-	if err != nil {
-		return "", nil, false, fmt.Errorf("read manifest %s: %w", key, err)
-	}
-	defer func() { _ = rc.Close() }()
-	raw, err := io.ReadAll(io.LimitReader(rc, maxManifestBytes+1))
-	if err != nil {
-		return "", nil, false, fmt.Errorf("read manifest %s: %w", key, err)
-	}
-
-	signed := false
-	if d.PublicKey != nil {
-		sig, err := readSig(ctx, d.Dest, key+".sig")
-		if err != nil {
-			return "", nil, false, fmt.Errorf("read manifest signature: %w", err)
-		}
-		if !ed25519.Verify(d.PublicKey, raw, sig) {
-			// Refused, not recorded. Drilling a manifest whose signature does not match would
-			// produce evidence about an artifact set nobody can attribute to gitdr, which is
-			// worse than no evidence.
-			return "", nil, false, fmt.Errorf("manifest %s does not match its signature", key)
-		}
-		signed = true
-	}
-
-	var m Manifest
-	if err := json.Unmarshal(raw, &m); err != nil {
-		return "", nil, false, fmt.Errorf("parse manifest %s: %w", key, err)
-	}
-	return key, &m, signed, nil
+	return parts[0], strings.Join(parts[1:len(parts)-3], "/"), parts[len(parts)-3], parts[len(parts)-2], true
 }
 
-func readSig(ctx context.Context, dst dest.Destination, key string) ([]byte, error) {
-	rc, err := dst.Get(ctx, key)
-	if err != nil {
-		return nil, err
+// loadManifestForDrill reads the manifest the drill is about: the one named, or the newest filed
+// directly under {host}/{owner}/manifests/ and not named later than now. Either way it comes
+// through the one loader, and a manifest it refuses is not drilled.
+//
+// Refused, not recorded. Drilling a manifest whose signature does not match, or a signed document
+// that is not a manifest, or a copy of an old manifest under a newer name, would produce evidence
+// about something other than what the report names, which is worse than no evidence.
+func loadManifestForDrill(ctx context.Context, d DrillDeps, req DrillRequest, now time.Time) (string, *Manifest, bool, error) {
+	key := req.ManifestKey
+	if key == "" {
+		dir := path.Join(req.Host, req.Owner, "manifests")
+		newest, err := newestManifest(ctx, d.Dest, dir, now)
+		if err != nil {
+			return "", nil, false, err
+		}
+		if newest == "" {
+			return "", nil, false, fmt.Errorf("no manifest to drill under %s/", dir)
+		}
+		key = newest
 	}
-	defer func() { _ = rc.Close() }()
-	b, err := io.ReadAll(io.LimitReader(rc, 1<<16))
+	m, err := loadManifest(ctx, d.Dest, d.PublicKey, key)
 	if err != nil {
-		return nil, err
+		return "", nil, false, err
 	}
-	return base64.StdEncoding.DecodeString(strings.TrimSpace(string(b)))
+	return key, m, d.PublicKey != nil, nil
 }
 
 // uploadDrill stores the report and its signature beside the manifest it drills, and returns
@@ -473,7 +428,7 @@ func uploadDrill(ctx context.Context, d DrillDeps, report *DrillReport, req Dril
 	if err != nil {
 		return "", err
 	}
-	base := path.Dir(path.Dir(report.ManifestKey)) // {host}/{org}
+	base := path.Dir(path.Dir(report.ManifestKey)) // {host}/{namespace}, or {host} when the manifest is filed there
 	key := path.Join(base, "drills", report.FinishedAt.UTC().Format("20060102T150405Z")+".drill.json")
 
 	// Retried like every other write in the pipeline. A drill is the most expensive command in

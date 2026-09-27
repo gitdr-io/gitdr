@@ -45,8 +45,16 @@ A single static Go binary, run as a one-shot job. Two pluggable interfaces.
 {host}/{org}/{repo}/{ISO8601-date}/{repo}.meta.json
 {host}/{org}/{repo}/{ISO8601-date}/{repo}.sha256
 {host}/{org}/{repo}/{ISO8601-date}/{repo}.lfs.tar          (when the repo has LFS)
-{host}/{org}/manifests/{ISO8601-timestamp}.manifest.json   (signed, plus a .sig sidecar)
+{host}/{namespace}/manifests/{ISO8601-timestamp}.manifest.json   (signed, plus a .sig sidecar)
 ```
+
+`{namespace}` is the deepest namespace that holds every repository in the run. On GitHub that is
+the organisation or user. On GitLab it is the group above every subgroup the run covers, and a
+run whose repositories share no namespace files its manifest under `{host}/manifests/`. Up to
+v0.1.19 a run over several GitLab namespaces filed it under whichever namespace the source listed
+first, which could change from one run to the next. The first such run after upgrading may not
+find the previous manifest, and then copies every repository once instead of skipping the
+unchanged ones. *Changed in v0.1.20.*
 
 ## 3. Sources
 
@@ -237,7 +245,7 @@ or a SAS. See §4, Azure.
 `gitdr restore` fetches a bundle, verifies its checksum, `git clone`s it, and rehydrates
 LFS. Git data restores faithfully.
 
-Three checks run, and they are not the same check:
+Four checks run, and they are not the same check:
 
 - **SHA-256 against the `.sha256` sidecar**, which the signed manifest covers. This is the
   integrity guarantee: any changed byte fails here.
@@ -252,6 +260,14 @@ Three checks run, and they are not the same check:
   that is missing, or present at another object, fails the restore and names the first one
   that differs. It runs with or without a public key; without one the wording says the bundle
   it compared against was not itself verified against a signed manifest.
+- **LFS pointers.** After the clone, and after the LFS objects are put back when the backup has
+  them, restore reads the working tree back. A file under 1024 bytes that starts with a git-lfs
+  pointer line is a pointer, not the file, and any pointer left fails the restore and the drill
+  of it. When the backup holds no LFS archive for the repository, the error says the content was
+  not backed up. Up to v0.1.19 that case passed, so a backup taken with `backup.lfs: false`, or
+  without git-lfs installed, restored and drilled clean with 130-byte pointers where the files
+  should be. The check does not need git-lfs. It reads only the checked-out tree, and a text file
+  that is itself a pointer, such as a git-lfs test fixture, fails it. *Added in v0.1.20.*
 
 The order matters: the checksum runs first, so a corrupt copy is refused before git is asked
 anything. Removing or weakening the checksum would leave only a check that does not look at
@@ -283,6 +299,30 @@ The metadata JSON is for audit and manual reference
 only. The GitHub and GitLab APIs can't recreate original issue/PR numbers, authors,
 timestamps, or cross-references. That's true of every backup tool, and it's documented for
 users so nobody is surprised.
+
+### Which manifest a restore checks
+
+With a public key configured, restore checks the bundle against the signed manifest of the run
+that wrote it.
+
+`-manifest <key>` names that manifest, with the key `backup` prints as `manifestKey`. `-repo`
+then picks the repository in it, and the host and date come from the manifest, so `-host` and
+`-date` are refused. `-manifest` needs the public key. The manifest has to verify, carry a
+`gitdr.manifest/` schema and be named for its own `finishedAt`. This is the form for anything a
+drill passed, since `gitdr restore -manifest <drilled key> -repo <slug> -out <dir>` restores
+exactly what the drill restored.
+
+Without `-manifest`, restore looks in the repository's own namespace, then each namespace above
+it, then `{host}/manifests/`, for a manifest that finished on the backup's date or the day
+after. That finds every run from v0.1.20 on that finished within a day of its copy. It does not
+find a manifest an older engine filed under another namespace, or a run that took longer than
+that. Use `-manifest` for those.
+
+`-repo` splits at the last slash, so `acme/platform/api` is the project `api` in the group
+`acme/platform`. It used to split at the first, and a project in a GitLab subgroup could not be
+restored at all.
+
+*Added in v0.1.20. The manifest and `--output json` are unchanged.*
 
 ## 8. Supply chain and build
 
@@ -435,13 +475,27 @@ What it does not prove, stated because the report is read by people who will act
   as a thousand-repository guarantee.
 - **`sourceMatch` is null, not false, for a pre-v3 copy.** "Not recorded" and "did not match"
   are different answers.
+- **Not LFS content off the checked-out tree.** The pointer check reads the working tree at
+  HEAD, so a pointer that exists only on another branch or in history is not checked.
 
 A manifest whose signature does not verify is **refused**, not drilled: evidence about an
 artifact set nobody can attribute to gitdr is worse than no evidence.
 
+**Which manifest a drill reads.** A drill refuses a document whose schema does not start with
+`gitdr.manifest/`, as `verify` already did, and a manifest whose name is not its own
+`finishedAt` in the form `20060102T150405Z.manifest.json`, which every manifest gitdr has
+written satisfies. Without `-manifest` it takes the newest manifest filed directly under
+`{host}/{namespace}/manifests/` and ignores names later than now. Before, a byte copy of an old
+manifest stored under a later name stayed the newest for good, and every drill after it tested
+the old run. Restore applies both refusals, and a backup's read of the previous manifest makes
+the same choice of newest. *Added in v0.1.20. `gitdr.drill/v1` is unchanged.*
+
+A drill no longer fails a repository because a restore without `-manifest` could not find its
+manifest. That check stood in for the flag. *Changed in v0.1.20.*
+
 ```
-{host}/{org}/drills/{ts}.drill.json      # the report
-{host}/{org}/drills/{ts}.drill.json.sig  # ed25519 over the report, base64
+{host}/{namespace}/drills/{ts}.drill.json      # the report
+{host}/{namespace}/drills/{ts}.drill.json.sig  # ed25519 over the report, base64
 ```
 
 **Where the report went.** `drill --output json` prints the report, then two fields after it,
@@ -484,11 +538,12 @@ every engine pinned before it.
 {host}/{org}/{repo}/{YYYY-MM-DD}/{repo}.meta.json   # per-resource metadata dump (gitdr.meta/v1)
 {host}/{org}/{repo}/{YYYY-MM-DD}/{repo}.sha256      # sha256sum line for the bundle
 {host}/{org}/{repo}/{YYYY-MM-DD}/{repo}.lfs.tar     # LFS objects, when present
-{host}/{org}/manifests/{YYYYMMDDThhmmssZ}.manifest.json       # signed run-manifest
-{host}/{org}/manifests/{YYYYMMDDThhmmssZ}.manifest.json.sig   # detached signature
+{host}/{namespace}/manifests/{YYYYMMDDThhmmssZ}.manifest.json       # signed run-manifest
+{host}/{namespace}/manifests/{YYYYMMDDThhmmssZ}.manifest.json.sig   # detached signature
 ```
 
-Every object is written create-only under object-lock retention.
+Every object is written create-only under object-lock retention. `{namespace}` is the one §2
+defines.
 
 ### Run-manifest (`gitdr.manifest/v5`)
 

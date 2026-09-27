@@ -7,7 +7,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/url"
 	"os"
@@ -350,44 +349,6 @@ func (g *Git) LFSInstallLocal(ctx context.Context, repoDir string) error {
 func (g *Git) LFSCheckout(ctx context.Context, repoDir string) error {
 	return g.run(ctx, repoDir, nil, "lfs", "checkout")
 }
-
-// LFSPointersRemaining lists tracked paths that are still pointer files.
-//
-// Checked rather than assumed: "git lfs checkout" reports success whether or not it replaced
-// anything, so its exit code says a command ran, not that the bytes are there. This reads the
-// working tree back and is what lets restore fail instead of handing over pointers.
-func (g *Git) LFSPointersRemaining(ctx context.Context, repoDir string) ([]string, error) {
-	out, err := g.output(ctx, repoDir, "lfs", "ls-files", "--name-only")
-	if err != nil {
-		return nil, fmt.Errorf("list lfs files: %w", err)
-	}
-
-	var stillPointers []string
-	for _, name := range strings.Split(strings.TrimSpace(out), "\n") {
-		name = strings.TrimSpace(name)
-		if name == "" {
-			continue
-		}
-		// A pointer file is a few lines of text beginning with a fixed version line.
-		f, err := os.Open(filepath.Join(repoDir, name))
-		if err != nil {
-			// Not on disk at all is a different failure, and not one this check owns.
-			continue
-		}
-		head := make([]byte, len(lfsPointerMagic))
-		n, _ := io.ReadFull(f, head)
-		if cerr := f.Close(); cerr != nil {
-			return nil, fmt.Errorf("close %s: %w", name, cerr)
-		}
-		if n == len(lfsPointerMagic) && string(head) == lfsPointerMagic {
-			stillPointers = append(stillPointers, name)
-		}
-	}
-	return stillPointers, nil
-}
-
-// The first bytes of every git-lfs pointer file, per the v1 spec.
-const lfsPointerMagic = "version https://git-lfs.github.com/spec/v1"
 
 // output runs git and returns stdout. Same construction and environment as run.
 func (g *Git) output(ctx context.Context, workdir string, args ...string) (string, error) {

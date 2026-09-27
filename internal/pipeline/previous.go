@@ -2,11 +2,7 @@ package pipeline
 
 import (
 	"context"
-	"encoding/json"
-	"io"
-	"path"
-	"sort"
-	"strings"
+	"errors"
 	"time"
 
 	"gitdr.io/gitdr/internal/gitexec"
@@ -16,9 +12,9 @@ import (
 // Reading the last successful run, so this one can tell what has changed since.
 //
 // One List and one Get for the whole run, not per repository. Manifests live under
-// {host}/{org}/manifests/{ts}.manifest.json with a lexicographically sortable timestamp, so
-// the newest is the last key, and one small object carries the ref map of every repository the
-// previous run copied.
+// {host}/{namespace}/manifests/{ts}.manifest.json with a lexicographically sortable timestamp,
+// so the newest is the last key, and one small object carries the ref map of every repository
+// the previous run copied.
 
 // previousCopy is what the last successful run recorded about one repository.
 type previousCopy struct {
@@ -33,50 +29,32 @@ type previousCopy struct {
 // run proceeds without a comparison, which costs a full copy and loses nothing.
 const maxManifestBytes = 32 << 20
 
-// loadPrevious reads the newest manifest under the organisation and returns, per repository
-// slug, what it recorded.
+// loadPrevious reads the newest manifest in dir, where this run files its own, and returns, per
+// repository slug, what it recorded.
+//
+// The newest is picked the way a drill picks one: filed directly in dir, named like a manifest,
+// and not named later than now. The loader then refuses a manifest that is not named for its own
+// finishedAt, or is not a manifest at all. That is bookkeeping this run cannot trust, so it is
+// warned about and treated like a manifest that could not be read.
 //
 // Every failure here returns an empty map and no error. Not being able to read the last
 // manifest means this run cannot tell what changed, and the correct response to not knowing is
 // to copy everything — which is exactly what gitdr did before any of this existed. A backup
 // that fails because an optimisation could not read its own bookkeeping would be a worse
 // product than one that never had the optimisation.
-func (r *backupRun) loadPrevious(ctx context.Context, anchor source.Repo) map[string]previousCopy {
-	prefix := path.Join(anchor.Host, anchor.Owner, "manifests") + "/"
-
-	objs, err := r.dst.List(ctx, prefix)
-	if err != nil || len(objs) == 0 {
+func (r *backupRun) loadPrevious(ctx context.Context, dir string) map[string]previousCopy {
+	newest, err := newestManifest(ctx, r.dst, dir, r.now())
+	if err != nil || newest == "" {
 		return nil
 	}
-
-	keys := make([]string, 0, len(objs))
-	for _, o := range objs {
-		// The signature sits beside the manifest under the same prefix.
-		if strings.HasSuffix(o.Key, ".manifest.json") {
-			keys = append(keys, o.Key)
-		}
-	}
-	if len(keys) == 0 {
-		return nil
-	}
-	// The timestamp is 20060102T150405Z, so lexical order is chronological order.
-	sort.Strings(keys)
-	newest := keys[len(keys)-1]
-
-	rc, err := r.dst.Get(ctx, newest)
+	m, err := loadManifest(ctx, r.dst, nil, newest)
 	if err != nil {
-		r.log.Debug("could not read the previous manifest; every repository will be copied", "key", newest, "err", err)
-		return nil
-	}
-	defer func() { _ = rc.Close() }()
-
-	raw, err := io.ReadAll(io.LimitReader(rc, maxManifestBytes+1))
-	if err != nil || len(raw) > maxManifestBytes {
-		return nil
-	}
-
-	var m Manifest
-	if err := json.Unmarshal(raw, &m); err != nil {
+		var refused *manifestRefused
+		if errors.As(err, &refused) {
+			r.log.Warn("the previous manifest cannot be trusted; every repository will be copied", "key", newest, "err", err)
+		} else {
+			r.log.Debug("could not read the previous manifest; every repository will be copied", "key", newest, "err", err)
+		}
 		return nil
 	}
 

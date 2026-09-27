@@ -111,7 +111,7 @@ func (r *backupRun) run(ctx context.Context) (*BackupResult, error) {
 	// One List and one Get for the whole run, before any repository is touched. What it
 	// returns decides which repositories can be left alone; see unchanged.go for the rules,
 	// including the one that refreshes a copy before its object lock expires.
-	r.previous = r.loadPrevious(ctx, repos[0])
+	r.previous = r.loadPrevious(ctx, manifestDir(repos))
 
 	entries := r.fanOut(ctx, repos, ret)
 	allOK := true
@@ -152,7 +152,7 @@ func (r *backupRun) run(ctx context.Context) (*BackupResult, error) {
 		Repos:      entries,
 	}
 
-	key, err := r.uploadManifest(ctx, m, repos[0], ret)
+	key, err := r.uploadManifest(ctx, m, manifestDir(repos), ret)
 	res := &BackupResult{Manifest: m, ManifestKey: key}
 	if err != nil {
 		return res, fmt.Errorf("manifest: %w", err)
@@ -454,15 +454,16 @@ func (r *backupRun) backupRepo(ctx context.Context, repo source.Repo, ret dest.R
 	return entry
 }
 
-// uploadManifest signs the canonical manifest and stores it with a detached .sig.
-func (r *backupRun) uploadManifest(ctx context.Context, m *Manifest, anchor source.Repo, ret dest.Retention) (string, error) {
+// uploadManifest signs the canonical manifest and stores it with a detached .sig in dir, named
+// for the moment the run finished. See manifestDir for which directory, and loadManifest for why
+// the name has to be that moment.
+func (r *backupRun) uploadManifest(ctx context.Context, m *Manifest, dir string, ret dest.Retention) (string, error) {
 	canon, err := m.Canonical()
 	if err != nil {
 		return "", fmt.Errorf("canonicalize: %w", err)
 	}
 	sig := crypto.Sign(r.signer, canon)
-	ts := m.FinishedAt.UTC().Format("20060102T150405Z")
-	key := path.Join(anchor.Host, anchor.Owner, "manifests", ts+".manifest.json")
+	key := path.Join(dir, m.FinishedAt.UTC().Format(manifestStamp)+manifestSuffix)
 
 	if _, err := r.dst.PutImmutable(ctx, key, bytes.NewReader(canon), int64(len(canon)), ret); err != nil {
 		return "", fmt.Errorf("upload manifest: %w", err)
