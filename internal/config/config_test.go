@@ -116,3 +116,100 @@ func TestSecretNeverFormatted(t *testing.T) {
 		t.Fatalf("secret leaked in formatted output: %s", s)
 	}
 }
+
+// Which GitHub credential a run uses is decided from the config alone. The token file is never
+// opened to decide it: every path here names a file that does not exist.
+func TestGitHubTokenFileChoosesExactlyOneCredential(t *testing.T) {
+	const both = "source.github: both a token file (source.github.tokenPath) and an App private key " +
+		"(GITDR_GITHUB_APP_PRIVATE_KEY or source.github.privateKeyPath) are set; set exactly one"
+	missing := filepath.Join(t.TempDir(), "never-written")
+
+	for _, tc := range []struct {
+		name     string
+		gh       GitHubConfig
+		wantPath string
+		wantErr  string
+	}{
+		{name: "a token file", gh: GitHubConfig{TokenPath: missing}, wantPath: missing},
+		{name: "a token file, with whitespace around the path", gh: GitHubConfig{TokenPath: " " + missing + "\n"}, wantPath: missing},
+		{name: "a token file, appID and installationID ignored", gh: GitHubConfig{TokenPath: missing, AppID: 7, InstallationID: 9}, wantPath: missing},
+		{name: "a token file, and a key that is only whitespace", gh: GitHubConfig{TokenPath: missing, PrivateKey: " \n"}, wantPath: missing},
+		{name: "an App key from env", gh: GitHubConfig{PrivateKey: "pem"}},
+		{name: "an App key from a file", gh: GitHubConfig{PrivateKeyPath: missing}},
+		{name: "a blank token path is not a token file", gh: GitHubConfig{TokenPath: "  ", PrivateKey: "pem"}},
+		{name: "a token file and a key from env", gh: GitHubConfig{TokenPath: missing, PrivateKey: "pem"}, wantErr: both},
+		{name: "a token file and a key file", gh: GitHubConfig{TokenPath: missing, PrivateKeyPath: missing}, wantErr: both},
+		{name: "a token file and both kinds of key", gh: GitHubConfig{TokenPath: missing, PrivateKey: "pem", PrivateKeyPath: missing}, wantErr: both},
+		{name: "neither", gh: GitHubConfig{AppID: 7, InstallationID: 9},
+			wantErr: "no GitHub App private key: set GITDR_GITHUB_APP_PRIVATE_KEY or source.github.privateKeyPath, " +
+				"or set source.github.tokenPath to a file holding an installation token"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := Default()
+			c.Source.GitHub = tc.gh
+			got, err := c.GitHubTokenFile()
+			switch {
+			case tc.wantErr != "" && (err == nil || err.Error() != tc.wantErr):
+				t.Fatalf("err = %v, want exactly %q", err, tc.wantErr)
+			case tc.wantErr == "" && err != nil:
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != tc.wantPath {
+				t.Errorf("token file = %q, want %q", got, tc.wantPath)
+			}
+		})
+	}
+}
+
+// The key's own resolver names the token file too, since either would have done.
+func TestNoGitHubAppKeyNamesTheTokenFile(t *testing.T) {
+	_, err := Default().ResolveGitHubPrivateKey()
+	if err == nil || !strings.Contains(err.Error(), "source.github.tokenPath") {
+		t.Errorf("err = %v, want it to name source.github.tokenPath", err)
+	}
+}
+
+// tokenPath arrives from YAML and from GITDR_SOURCE_GITHUB_TOKENPATH, env winning, like every
+// other path. It is a path, so YAML may set it; the token itself never comes from config.
+func TestGitHubTokenPathFromYAMLAndEnv(t *testing.T) {
+	const yamlDoc = "source:\n  type: github\n  github:\n    tokenPath: /run/yaml/github-token\n"
+	for _, tc := range []struct {
+		name, env, want string
+	}{
+		{name: "from YAML", want: "/run/yaml/github-token"},
+		{name: "env over YAML", env: "/run/env/github-token", want: "/run/env/github-token"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("GITDR_SOURCE_GITHUB_TOKENPATH", "")
+			if err := os.Unsetenv("GITDR_SOURCE_GITHUB_TOKENPATH"); err != nil {
+				t.Fatal(err)
+			}
+			if tc.env != "" {
+				t.Setenv("GITDR_SOURCE_GITHUB_TOKENPATH", tc.env)
+			}
+			path := filepath.Join(t.TempDir(), "gitdr.yaml")
+			if err := os.WriteFile(path, []byte(yamlDoc), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			c, err := Load(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if c.Source.GitHub.TokenPath != tc.want {
+				t.Errorf("tokenPath = %q, want %q", c.Source.GitHub.TokenPath, tc.want)
+			}
+		})
+	}
+}
+
+// Validate never looks at the token file. verify, restore and drill call it and nothing more, so
+// this is what keeps them from needing, or touching, a GitHub credential.
+func TestValidateDoesNotTouchTheTokenFile(t *testing.T) {
+	c := Default()
+	c.Destination.S3.Bucket = "b"
+	c.Source.GitHub.TokenPath = filepath.Join(t.TempDir(), "no-such-dir", "github-token")
+	c.Source.GitHub.PrivateKey = "pem" // both set: refused by backup and doctor, not here
+	if err := c.Validate(); err != nil {
+		t.Errorf("Validate read the GitHub credential: %v", err)
+	}
+}

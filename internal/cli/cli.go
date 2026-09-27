@@ -97,6 +97,17 @@ func (o *commonOpts) load() (*config.Config, *slog.Logger, error) {
 func buildSource(cfg *config.Config, log *slog.Logger) (source.Source, error) {
 	switch cfg.Source.Type {
 	case "github":
+		// Which credential, decided here and nowhere earlier: backup and doctor are the only
+		// commands that build a source, so they are the only ones that refuse a config with
+		// both a token file and an App key, and the refusal comes before any network call.
+		tokenPath, err := cfg.GitHubTokenFile()
+		if err != nil {
+			return nil, err
+		}
+		if tokenPath != "" {
+			// appID and installationID are ignored: the token belongs to one installation.
+			return ghsrc.New(ghsrc.Options{BaseURL: cfg.Source.BaseURL, TokenPath: tokenPath}, log)
+		}
 		key, err := cfg.ResolveGitHubPrivateKey()
 		if err != nil {
 			return nil, err

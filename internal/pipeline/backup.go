@@ -90,8 +90,11 @@ func (r *backupRun) run(ctx context.Context) (*BackupResult, error) {
 		return nil, err
 	}
 
-	authHeader, err := gitAuthHeader(ctx, r.src)
-	if err != nil {
+	// A preflight, and its header is thrown away. Every git command below asks for its own
+	// immediately before it starts, because a credential can change during a run: a token file
+	// is replaced, an App token expires after an hour. This stays so that a credential that
+	// cannot produce a header at all fails the run here, before any repository is touched.
+	if _, err := gitAuthHeader(ctx, r.src); err != nil {
 		return nil, fmt.Errorf("source auth: %w", err)
 	}
 	// Object Lock retention is only meaningful on an immutable destination. On the
@@ -110,7 +113,7 @@ func (r *backupRun) run(ctx context.Context) (*BackupResult, error) {
 	// including the one that refreshes a copy before its object lock expires.
 	r.previous = r.loadPrevious(ctx, repos[0])
 
-	entries := r.fanOut(ctx, repos, authHeader, ret)
+	entries := r.fanOut(ctx, repos, ret)
 	allOK := true
 	for _, e := range entries {
 		if e.Status == StatusFailed {
@@ -228,7 +231,7 @@ func (r *backupRun) selectRepos(ctx context.Context) ([]source.Repo, error) {
 
 // fanOut backs up repos with bounded concurrency, preserving input order. Each
 // goroutine writes a distinct entries[i], so no lock is needed.
-func (r *backupRun) fanOut(ctx context.Context, repos []source.Repo, authHeader string, ret dest.Retention) []RepoEntry {
+func (r *backupRun) fanOut(ctx context.Context, repos []source.Repo, ret dest.Retention) []RepoEntry {
 	limit := r.cfg.Backup.Concurrency
 	if limit < 1 {
 		limit = 1
@@ -242,7 +245,7 @@ func (r *backupRun) fanOut(ctx context.Context, repos []source.Repo, authHeader 
 		go func(i int) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			entries[i] = r.backupOne(ctx, repos[i], authHeader, ret)
+			entries[i] = r.backupOne(ctx, repos[i], ret)
 		}(i)
 	}
 	wg.Wait()
@@ -250,7 +253,7 @@ func (r *backupRun) fanOut(ctx context.Context, repos []source.Repo, authHeader 
 }
 
 // backupOne adds resume-skip and logging around backupRepo.
-func (r *backupRun) backupOne(ctx context.Context, repo source.Repo, authHeader string, ret dest.Retention) RepoEntry {
+func (r *backupRun) backupOne(ctx context.Context, repo source.Repo, ret dest.Retention) RepoEntry {
 	if r.cfg.Backup.Resume && r.alreadyBackedUp(ctx, repo) {
 		r.log.Info("repo skipped (already backed up)", "repo", repo.Slug())
 		return RepoEntry{Slug: repo.Slug(), Status: StatusSkipped, Reason: ReasonResume}
@@ -264,7 +267,7 @@ func (r *backupRun) backupOne(ctx context.Context, repo source.Repo, authHeader 
 	// The refs are carried into backupRepo rather than fetched twice: what gets recorded in
 	// the manifest must be the state that was compared, or a repository that changed between
 	// the two calls would record refs for a copy that does not contain them.
-	current := r.currentRefs(ctx, repo, authHeader)
+	current := r.currentRefs(ctx, repo)
 	if prev, ok := r.previous[repo.Slug()]; ok {
 		d := decideUnchanged(prev.refs, current, prev.copiedAt, r.now(), r.retentionWindow())
 		if d.skip {
@@ -289,7 +292,7 @@ func (r *backupRun) backupOne(ctx context.Context, repo source.Repo, authHeader 
 		}
 	}
 
-	entry := r.backupRepo(ctx, repo, authHeader, ret)
+	entry := r.backupRepo(ctx, repo, ret)
 	// Recorded only on a copy that succeeded. A failed run's refs describe a repository
 	// nothing was written for, and trusting them next time would skip the retry.
 	if entry.Status == StatusSuccess && len(current) > 0 {
@@ -329,7 +332,7 @@ func (r *backupRun) retention() dest.Retention {
 }
 
 // backupRepo clones, bundles, checksums, and uploads one repo's artifacts immutably.
-func (r *backupRun) backupRepo(ctx context.Context, repo source.Repo, authHeader string, ret dest.Retention) RepoEntry {
+func (r *backupRun) backupRepo(ctx context.Context, repo source.Repo, ret dest.Retention) RepoEntry {
 	entry := RepoEntry{Slug: repo.Slug(), Status: StatusSuccess}
 	fail := func(err error) RepoEntry {
 		entry.Status = StatusFailed
@@ -352,7 +355,13 @@ func (r *backupRun) backupRepo(ctx context.Context, repo source.Repo, authHeader
 	}
 	if err := retry(ctx, 3, time.Second, func() error {
 		_ = os.RemoveAll(mirror) // clear any partial clone before retrying
-		return r.git.CloneMirror(ctx, cloneURL, mirror, gitexec.Options{AuthHeader: authHeader})
+		// Inside the retry, so an attempt made after the token was replaced uses the
+		// replacement rather than the credential that just failed.
+		auth, err := gitAuthHeader(ctx, r.src)
+		if err != nil {
+			return fmt.Errorf("source auth: %w", err)
+		}
+		return r.git.CloneMirror(ctx, cloneURL, mirror, gitexec.Options{AuthHeader: auth})
 	}); err != nil {
 		return fail(err)
 	}
@@ -421,7 +430,11 @@ func (r *backupRun) backupRepo(ctx context.Context, repo source.Repo, authHeader
 	// LFS objects (optional): fetch and store as a separate immutable tar artifact.
 	// Nothing to fetch without refs: LFS objects are pointed at by commits.
 	if hasRefs && r.cfg.Backup.LFS && gitexec.LFSAvailable() {
-		if err := r.git.LFSFetchAll(ctx, mirror, cloneURL, gitexec.Options{AuthHeader: authHeader}); err != nil {
+		auth, err := gitAuthHeader(ctx, r.src)
+		if err != nil {
+			return fail(fmt.Errorf("lfs fetch: source auth: %w", err))
+		}
+		if err := r.git.LFSFetchAll(ctx, mirror, cloneURL, gitexec.Options{AuthHeader: auth}); err != nil {
 			return fail(fmt.Errorf("lfs fetch: %w", err))
 		}
 		lfsDir := filepath.Join(mirror, "lfs")
@@ -525,6 +538,9 @@ func artifact(kind string, res dest.PutResult, sha string) ArtifactInfo {
 	return ArtifactInfo{Kind: kind, Key: res.Key, Size: res.Size, SHA256: sha, RetainUntil: res.RetainUntil}
 }
 
+// gitAuthHeader asks the source for the header one git command sends, or "" for a source that
+// has no credential. It is called immediately before each git network command, never once for
+// the run; see source.GitAuther.
 func gitAuthHeader(ctx context.Context, src source.Source) (string, error) {
 	if ga, ok := src.(source.GitAuther); ok {
 		return ga.GitAuthHeader(ctx)

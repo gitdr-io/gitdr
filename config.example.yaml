@@ -10,10 +10,11 @@ source:
   repo: "octo-org/octo-repo"   # single repo selector; empty = all accessible (filtered)
   include: []
   exclude: []
-  github:
+  github:                      # the App (appID, installationID and its key) or tokenPath, never both
     appID: 0
     installationID: 0
     privateKeyPath: ""         # or set GITDR_GITHUB_APP_PRIVATE_KEY
+    tokenPath: ""              # or a file holding an installation token, re-read on every use (SPEC §3)
   gitlab: {}                   # token is a secret: set GITDR_GITLAB_TOKEN (read_api, read_repository)
 
 destination:

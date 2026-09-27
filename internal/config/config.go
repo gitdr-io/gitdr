@@ -4,6 +4,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
@@ -42,13 +43,19 @@ type GitLabConfig struct {
 	Token redact.Secret `yaml:"-"`
 }
 
-// GitHubConfig holds GitHub App installation credentials. The private key itself is
-// supplied via env (GITDR_GITHUB_APP_PRIVATE_KEY) or a file at PrivateKeyPath.
+// GitHubConfig holds the GitHub credential, which is one of two things: a GitHub App (appID,
+// installationID and its private key), or a file holding an installation token somebody else
+// minted. The private key is supplied via env (GITDR_GITHUB_APP_PRIVATE_KEY) or a file at
+// PrivateKeyPath.
 type GitHubConfig struct {
 	AppID          int64         `yaml:"appID"`
 	InstallationID int64         `yaml:"installationID"`
 	PrivateKeyPath string        `yaml:"privateKeyPath"`
 	PrivateKey     redact.Secret `yaml:"-"` // injected from env only; never from YAML
+	// TokenPath names a file holding an installation token, used instead of the App key. It
+	// is a path, not a secret: the file is read by the source before every request and never
+	// here, so a caller can replace it during a run. SPEC §3, "GitHub token file".
+	TokenPath string `yaml:"tokenPath"`
 }
 
 // DestinationConfig configures the storage destination.
@@ -177,6 +184,7 @@ func applyEnvOverrides(c *Config) {
 	envInt64(&c.Source.GitHub.InstallationID, "SOURCE_GITHUB_INSTALLATIONID")
 	envStr(&c.Source.GitHub.PrivateKeyPath, "SOURCE_GITHUB_PRIVATEKEYPATH")
 	envSecret(&c.Source.GitHub.PrivateKey, "GITHUB_APP_PRIVATE_KEY")
+	envStr(&c.Source.GitHub.TokenPath, "SOURCE_GITHUB_TOKENPATH")
 	envSecret(&c.Source.GitLab.Token, "GITLAB_TOKEN")
 
 	envStr(&c.Destination.Type, "DESTINATION_TYPE")
@@ -213,7 +221,9 @@ func applyEnvOverrides(c *Config) {
 }
 
 // Validate checks structural validity. Credential presence is checked by the source
-// and destination constructors at the point of use.
+// and destination constructors at the point of use, and Validate opens no file: verify,
+// restore and drill call it and never build a source, so they never touch the GitHub token
+// file.
 func (c *Config) Validate() error {
 	switch c.Source.Type {
 	case "github", "gitlab":
@@ -247,6 +257,42 @@ func (c *Config) Validate() error {
 	return nil
 }
 
+// The two ways a GitHub run is refused before it starts. Both name source.github.tokenPath, as
+// every error about the token file does.
+const (
+	errGitHubBothCredentials = "source.github: both a token file (source.github.tokenPath) and an App private key " +
+		"(GITDR_GITHUB_APP_PRIVATE_KEY or source.github.privateKeyPath) are set; set exactly one"
+	errGitHubNoCredential = "no GitHub App private key: set GITDR_GITHUB_APP_PRIVATE_KEY or source.github.privateKeyPath, " +
+		"or set source.github.tokenPath to a file holding an installation token"
+)
+
+// GitHubTokenFile says which credential a GitHub run uses: the token file's path when
+// source.github.tokenPath is set, and "" when an App private key is. Both, or neither, is an
+// error.
+//
+// Both is refused rather than resolved by precedence. The token file exists so that a run never
+// holds the App key, which can mint a token for every installation of the App; a run handed both
+// would hold it anyway, and quietly preferring one would hide that.
+//
+// It reads nothing, and nothing Validate does touches the file either, so verify, restore and
+// drill run without it. With a token file, appID and installationID are ignored rather than
+// refused: the token already belongs to one installation.
+func (c *Config) GitHubTokenFile() (string, error) {
+	tokenPath := strings.TrimSpace(c.Source.GitHub.TokenPath)
+	appKey := strings.TrimSpace(c.Source.GitHub.PrivateKey.Reveal()) != "" ||
+		strings.TrimSpace(c.Source.GitHub.PrivateKeyPath) != ""
+	switch {
+	case tokenPath != "" && appKey:
+		return "", errors.New(errGitHubBothCredentials)
+	case tokenPath != "":
+		return tokenPath, nil
+	case appKey:
+		return "", nil
+	default:
+		return "", errors.New(errGitHubNoCredential)
+	}
+}
+
 // ResolveGitHubPrivateKey returns the GitHub App private key PEM from env (preferred)
 // or the configured file path.
 func (c *Config) ResolveGitHubPrivateKey() ([]byte, error) {
@@ -260,7 +306,7 @@ func (c *Config) ResolveGitHubPrivateKey() ([]byte, error) {
 		}
 		return b, nil
 	}
-	return nil, fmt.Errorf("no GitHub App private key: set GITDR_GITHUB_APP_PRIVATE_KEY or source.github.privateKeyPath")
+	return nil, errors.New(errGitHubNoCredential)
 }
 
 // ResolveManifestSigningKey returns the manifest signing key from env (preferred) or

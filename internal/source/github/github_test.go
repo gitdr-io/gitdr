@@ -127,3 +127,27 @@ func TestHostFromURL(t *testing.T) {
 		t.Fatalf("host = %q", h)
 	}
 }
+
+// An empty 200 from GitHub is no answer, not an empty organisation. go-github leaves the list nil
+// for it, and ranging over that panicked.
+func TestListReposRefusesAnEmptyAnswer(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/access_tokens") {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(map[string]any{"token": "ghs_testtoken", "expires_at": time.Now().Add(time.Hour).UTC().Format(time.RFC3339)})
+			return
+		}
+		w.WriteHeader(http.StatusOK) // and no body at all
+	}))
+	defer srv.Close()
+
+	s, err := New(Options{BaseURL: srv.URL, AppID: 1, InstallationID: 123, PrivateKeyPEM: testKeyPEM(t)}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repos, err := s.ListRepos(context.Background(), source.Filter{})
+	if err == nil || !strings.Contains(err.Error(), "no list") {
+		t.Fatalf("ListRepos = %v, %v; want an error saying GitHub answered with no list", repos, err)
+	}
+}

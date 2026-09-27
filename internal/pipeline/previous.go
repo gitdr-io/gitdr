@@ -122,14 +122,21 @@ func (r *backupRun) loadPrevious(ctx context.Context, anchor source.Repo) map[st
 //
 // A failure is not fatal and not a skip: it returns nil, the comparison finds no evidence, and
 // the repository is copied in full. That is the same answer as "something changed", and it is
-// the right one — a source that will not answer is not a source that has stayed the same.
-func (r *backupRun) currentRefs(ctx context.Context, repo source.Repo, authHeader string) map[string]string {
+// the right one — a source that will not answer is not a source that has stayed the same. A
+// credential that cannot be read is one of those failures, and the clone that follows asks for
+// it again and fails the repository if it still cannot.
+func (r *backupRun) currentRefs(ctx context.Context, repo source.Repo) map[string]string {
 	cloneURL, err := r.src.CloneURL(ctx, repo)
 	if err != nil {
 		r.log.Debug("could not resolve the clone url; copying in full", "repo", repo.Slug(), "err", err)
 		return nil
 	}
-	refs, err := r.git.LsRemote(ctx, cloneURL, gitexec.Options{AuthHeader: authHeader})
+	auth, err := gitAuthHeader(ctx, r.src)
+	if err != nil {
+		r.log.Debug("could not get a git credential to list the source's refs; copying in full", "repo", repo.Slug(), "err", err)
+		return nil
+	}
+	refs, err := r.git.LsRemote(ctx, cloneURL, gitexec.Options{AuthHeader: auth})
 	if err != nil {
 		r.log.Debug("could not list the source's refs; copying in full", "repo", repo.Slug(), "err", err)
 		return nil

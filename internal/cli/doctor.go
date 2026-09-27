@@ -65,14 +65,9 @@ func runDoctor(ctx context.Context, args []string) int {
 
 	if src, err := buildSource(cfg, log); err != nil {
 		add("source", false, err.Error())
-	} else if ga, ok := src.(source.GitAuther); ok {
-		if _, err := ga.GitAuthHeader(ctx); err != nil {
-			add("source auth", false, err.Error())
-		} else {
-			add("source auth", true, "installation token minted")
-		}
 	} else {
-		add("source", true, "built")
+		c := checkSource(ctx, src)
+		add(c.Name, c.OK, c.Detail)
 	}
 
 	if dst, err := buildDest(ctx, cfg, log); err != nil {
@@ -134,6 +129,31 @@ func runDoctor(ctx context.Context, args []string) int {
 	}
 
 	return emitDoctor(common.output, checks)
+}
+
+// tokenChecker is a source whose token somebody else minted. Asking it for a header only reads
+// the token back, which proves nothing about whether GitHub will take it, so doctor has it make
+// a request instead.
+type tokenChecker interface {
+	UsesTokenFile() bool
+	CheckToken(ctx context.Context) error
+}
+
+// checkSource tests the credential of a source that was built.
+func checkSource(ctx context.Context, src source.Source) checkResult {
+	if tc, ok := src.(tokenChecker); ok && tc.UsesTokenFile() {
+		if err := tc.CheckToken(ctx); err != nil {
+			return checkResult{Name: "source auth", OK: false, Detail: err.Error()}
+		}
+		return checkResult{Name: "source auth", OK: true, Detail: "token file read and accepted by GitHub"}
+	}
+	if ga, ok := src.(source.GitAuther); ok {
+		if _, err := ga.GitAuthHeader(ctx); err != nil {
+			return checkResult{Name: "source auth", OK: false, Detail: err.Error()}
+		}
+		return checkResult{Name: "source auth", OK: true, Detail: "installation token minted"}
+	}
+	return checkResult{Name: "source", OK: true, Detail: "built"}
 }
 
 func emitDoctor(output string, checks []checkResult) int {

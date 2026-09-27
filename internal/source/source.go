@@ -51,6 +51,11 @@ type Source interface {
 // HTTPS. The pipeline injects the returned header into git via env, never argv, so the
 // token stays out of process listings. Sources without auth (e.g. local fixtures)
 // simply don't implement it.
+//
+// It is called once per git command, immediately before the command starts, so it must be
+// cheap: a run over a large organisation calls it thousands of times. Asking each time is what
+// lets a credential that changes during a run, a token file replaced or an App token renewed,
+// reach the next command instead of the next run.
 type GitAuther interface {
 	// GitAuthHeader returns a full HTTP header line, e.g. "Authorization: Basic ...".
 	GitAuthHeader(ctx context.Context) (string, error)

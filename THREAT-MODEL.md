@@ -111,6 +111,7 @@ Ratings: L/M/H Likelihood times Impact. "Residual" is what remains after the mit
 | I | Secrets in image, logs, or core dumps | No secrets baked in, env or mounted only, `redact.Secret`, no telemetry | M×H / med |
 | T | Signing key swapped to forge manifests | Operator-controlled provisioning, keep the key off-runner or in KMS | L×H / med |
 | E | A credential is over-scoped and reused | Source read-only, destination create/put-only, prefer keyless workload identity | M×H / low |
+| E | A run holds the GitHub App private key, which mints a token for every installation of the App, so one compromised run reaches every organisation that installed it | `source.github.tokenPath`: the caller mints a read-only token for the one installation and the run reads it from a file, so the key never enters the run | M×H / low with a token file |
 
 ### E4, flow: gitdr to object store, VerifyWorm/PutImmutable (TB3)
 | STRIDE | Threat | Mitigation | L×I / residual |

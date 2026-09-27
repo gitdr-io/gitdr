@@ -52,13 +52,44 @@ A single static Go binary, run as a one-shot job. Two pluggable interfaces.
 
 | Source | Endpoints | Auth |
 |---|---|---|
-| GitHub | GitHub.com and Enterprise Server (configurable base URL, `/api/v3`) | GitHub App installation token (preferred), or a token. Read-only: contents, metadata, issues, PRs, releases. |
+| GitHub | GitHub.com and Enterprise Server (configurable base URL, `/api/v3`) | GitHub App installation token. gitdr mints it from the App key, or reads it from a token file (below). Read-only: contents, metadata, issues, PRs, releases. |
 | GitLab | GitLab.com and self-managed (configurable base URL) | Project/group access token or OAuth, read-only scopes. |
 
 Metadata note. gitdr uses per-resource REST endpoints, which work with App-compatible
 short-lived tokens. It does not use the GitHub org Migrations API. That one needs a
 classic PAT with `repo` and `admin:org`, is a preview API with size limits and a 7-day
 archive expiry, and doesn't work with App tokens or fine-grained PATs.
+
+### GitHub token file
+
+`source.github.tokenPath` (`GITDR_SOURCE_GITHUB_TOKENPATH`) names a file holding a GitHub App
+installation token, and gitdr then works without the App's private key. It reads the file again
+before every API request and every git command and keeps no copy in between, so whoever writes
+the file can replace it during a run.
+
+It exists for a caller that runs backups for many organisations from one App, like a hosted
+scheduler. The App's private key can mint a token for every installation of the App, so a run
+holding it can reach every organisation that installed it. A run needs read access to one. The
+caller mints that token with read permissions, writes the file, and replaces it before the
+token's hour is up.
+
+- Set the token file or the App key, never both. With both set, `backup` and `doctor` refuse to
+  start. `appID` and `installationID` are ignored when the token file is set.
+- The file holds one installation token, and whitespace around it is ignored. Repositories are
+  listed with `GET /installation/repositories`, which accepts nothing else, so a personal access
+  token fails there.
+- Replace the file by writing a new one beside it and renaming it over the old one. A missing,
+  empty or unreadable file fails the request or git command that read it, and so that repository
+  and the run. An expired token does the same, since GitHub answers 401. Nothing falls back.
+- A git command reads the file once, when it starts. One that outlives its token, such as a very
+  long `git lfs fetch`, can fail, so replace the file well before the hour.
+- git receives the token as it always has, in an `http.extraHeader` passed through
+  `GIT_CONFIG_*` environment variables and scoped to the source host. It never appears on a
+  command line or in a URL. API requests carry it only over HTTPS to the configured API host.
+- Errors name the file and what is wrong with it, never its contents. `doctor` checks the token
+  with one request to GitHub. `verify`, `restore` and `drill` never read the file.
+
+The manifest and `--output json` are unchanged. *Added in v0.1.20.*
 
 ## 4. Destinations and WORM
 
