@@ -374,8 +374,11 @@ func TestScale4Big(t *testing.T) {
 			problems = append(problems, n+" is not in the manifest")
 		case e.Status != pipeline.StatusSuccess:
 			problems = append(problems, n+": "+e.Error)
-			if strings.Contains(e.Error, "EntityTooLarge") {
+			switch {
+			case strings.Contains(e.Error, "EntityTooLarge"):
 				finding = "single-put-limit"
+			case r.phase.OOMKills > 0 || r.phase.OOMKilled:
+				finding = "git-memory-unbounded"
 			}
 		}
 	}
@@ -384,6 +387,23 @@ func TestScale4Big(t *testing.T) {
 	}
 	sc.check(t, "every repository is stored, the ones past 5 GiB included", len(problems) == 0, sample(problems, 2), finding)
 	sc.note(t, "peak scratch %s, peak resident set %s", size(r.phase.PeakScratchBytes), size(r.phase.MaxRSSBytes))
+	if h.prof.Image != "" {
+		p := r.phase
+		sc.note(t, "%s", memoryNote(p))
+		sc.check(t, "nothing is killed for memory under a "+h.prof.MemoryLimit+" limit",
+			p.MemoryLimitBytes > 0 && p.OOMKills == 0 && !p.OOMKilled,
+			fmt.Sprintf("the cgroup's OOM killer killed %d processes; the container itself OOMKilled: %v", p.OOMKills, p.OOMKilled),
+			"git-memory-unbounded")
+		// Not memory.peak: it counts the page cache, which a run writing this much fills to the
+		// limit whatever git holds. What the processes hold is their anonymous memory and the file
+		// pages they map, and the bound is 3.5 GiB of a 4 GiB limit.
+		ceiling := p.MemoryLimitBytes / 8 * 7
+		sc.check(t, "the processes hold at most "+size(ceiling)+" at once",
+			p.MemoryLimitBytes > 0 && p.MaxResidentBytes <= ceiling,
+			fmt.Sprintf("anonymous memory and mapped file pages reached %s (anon %s, mapped %s)",
+				size(p.MaxResidentBytes), size(p.MaxAnonBytes), size(p.MaxFileMappedBytes)),
+			"git-memory-unbounded")
+	}
 }
 
 // 6. A rate limit.

@@ -16,13 +16,14 @@ make scale SCALE_REPOS=50                    # the quick profile
 make scale                                   # 2,500 repositories
 SCALE_BIG=1 make scale SCALE_RUN=TestScale4  # the 6 GiB pack and the 8 GiB of LFS
 make scale SCALE_RUN=TestScale3              # any one scenario
+make scale-image                             # scenario 4 in the image, under 4 GiB of memory
 make scale-down                              # removes a stack that a killed run left behind
 ```
 
 On a 14-core laptop the quick profile took under three minutes. 2,500 repositories took 30
 minutes, most of it in scenarios 1 and 8, which copy the organisation several times over, and
 scenario 4 took four. Without `SCALE_BIG` a few GiB of free disk is plenty. The big fixture adds
-14 GiB, and the engine's scratch space peaked at 16.5 GiB copying it.
+14 GiB, and the engine's scratch space peaked at about 19 GiB copying it.
 
 The summary at the end lists every check. A failed check names the known defect it shows. One that
 says it is not a known finding is news, so start there. The measures go to
@@ -65,8 +66,10 @@ repositories on every run.
   the only installation with a budget a run can spend, so each scenario measures one thing. The
   others record the requests they make: day 1 of 2,500 repositories makes about 20,000, where
   GitHub gives an installation 5,000 to 12,500 an hour.
-- `scale-big`, with `SCALE_BIG=1`: a 6 GiB pack of random data, and 8 GiB of LFS objects, an
-  eighth of them only on a pull request.
+- `scale-big`, with `SCALE_BIG=1`: a 6 GiB pack of random blobs of 96 and 48 MiB, under the 100
+  MiB GitHub allows a file; eight 48 MiB files in eight versions each, which the source holds as
+  chains of deltas; 8 GiB of LFS objects, an eighth of them only on a pull request; and two small
+  repositories.
 
 ## Scenarios
 
@@ -79,7 +82,7 @@ defect turns the check green.
 | 1 | Day 1, a rerun the same day, day 2 and day 3: no full copy of an unchanged repository | fails: `empty-repo-rerun`, `resume-trusts-objects` |
 | 2 | SIGTERM and SIGKILL mid-clone, mid-upload and after a bundle landed, then a rerun: no repository counted without a recorded copy | fails: `stopped-run-no-manifest`, `stop-waits-for-git`, `resume-trusts-objects` |
 | 3 | 100,000-ref repositories: the manifest's size, and no copies on an unchanged next day | fails: `manifest-read-cap` |
-| 4 | With `SCALE_BIG=1`, a 6 GiB pack and 8 GiB of LFS through AWS's 5 GiB limit on a single PUT | fails: `single-put-limit` |
+| 4 | With `SCALE_BIG=1`, a 6 GiB pack and 8 GiB of LFS through AWS's 5 GiB limit on a single PUT. In the image, under a memory limit: nothing killed, and at most 3.5 GiB of 4 resident | fails: `single-put-limit`, and in the image `git-memory-unbounded` |
 | 6 | A rate limit spent in the middle of a run is waited out | fails: `rate-limit-not-waited` |
 | 8 | An organisation run, a single-repository run, an organisation run: the third copies nothing | fails: `newest-manifest-only` |
 
@@ -105,6 +108,11 @@ The known defects:
 - `rate-limit-not-waited`: a GitHub rate limit fails the repositories that meet it.
 - `minio-tls-chunk`: over TLS no artifact or manifest over 16 MiB can be written to MinIO, because
   of the single chunk described above.
+- `git-memory-unbounded`: git runs with its default pack settings. It maps a pack a gibibyte at a
+  time with no practical limit, so `git pack-objects`, bundling the 6 GiB pack, keeps most of the
+  container's limit mapped. And `git index-pack` resolves deltas on half the CPUs it sees, holding
+  whole versions of a file on each: under a 1 GiB limit the OOM killer stops the clone of
+  `big-deltas`.
 
 ## Measures
 
@@ -118,9 +126,35 @@ For each engine run:
 - S3 requests and bytes by operation, the proxy's refusals, and open multipart uploads;
 - API, git and LFS requests by endpoint, and how often the rate-limit budget ran out;
 - for a run of the binary, the peak resident set of the engine or of any git process it waited
-  for.
+  for;
+- for a run of the image, what its cgroup says, below.
 
 The summary compares wall times with the previous report.
+
+## Under a memory limit
+
+`make scale-image` builds the image from this tree's Dockerfile and runs scenario 4 with the engine
+inside it, under a 4 GiB memory limit and no swap, the way a pod with a 4Gi limit runs it.
+`SCALE_MEMORY=1g` moves the limit, and `SCALE_IMAGE_RUN` picks the scenarios.
+
+The container's entrypoint is `cgroupwatch/`, built for Linux, with the engine as its child. It
+reads the container's cgroup every 100 ms and once more after the engine exits, and prints what it
+saw to the run's log.
+
+- `memory.peak` is the most the kernel charged the container. It counts the page cache, which the
+  kernel fills up to the limit and takes back before it kills anything. A run that writes more
+  than the limit to disk ends with `memory.peak` at the limit whatever git holds, so it is recorded
+  and nothing checks it.
+- Resident is the most anonymous memory and mapped file pages there were at once. That is what the
+  processes hold, and scenario 4 checks it against 3.5 GiB of 4.
+- The working set is `memory.current` less the inactive file pages, the figure `kubectl top` shows.
+- `oom_kill` comes from `memory.events`, beside whether Docker saw the container OOMKilled.
+- Each process gets its own peak resident set, `VmHWM`, with its anonymous and file parts.
+
+The engine reaches the stack's proxy over the compose network, and the fake forge at
+`host.docker.internal`. Docker Desktop forwards that name to the host's loopback. On Linux it is
+the bridge's gateway, so there the forge listens on every interface while the image runs. The
+engine's scratch is a Docker volume, owned by the image's user, 65532.
 
 ## Settings
 
@@ -137,17 +171,18 @@ These are environment variables, and all of them are optional.
 | `SCALE_S3_RATE` | 8000000 | the proxy's throttle in bytes a second, 0 for none |
 | `SCALE_RECHUNK_BYTES` | 8388608 | the chunks the proxy splits a single-chunk body into; 0 sends it to MinIO as it came |
 | `SCALE_CONCURRENCY` | 4 | the engine's `backup.concurrency` |
+| `SCALE_IMAGE`, `SCALE_MEMORY` | none, 4g | the image the engine runs in, and its memory limit; `make scale-image` sets the image |
 | `SCALE_KEEP` | off | 1 leaves the stack and the fixtures in place |
 | `SCALE_RESULTS_DIR` | `scale-results/` | where the report and the logs go |
 
-The proxy and the fake forge check themselves without Docker, with
-`go test -tags scale ./scale/s3limits` and `go test -tags scale -run Forge ./scale`.
+The proxy, cgroupwatch, the fake forge and the delta fixture check themselves without Docker, with
+`go test -tags scale ./scale/s3limits ./scale/cgroupwatch` and
+`go test -tags scale -run 'Forge|DeltaFixture' ./scale`.
 
 ## Not built yet
 
-- `make scale-image`, the second phase: the released image under a 4 GiB memory cgroup with its
-  `memory.peak` and `oom_kill`, a scratch budget below the free disk, and stops at named log
-  events.
+- In the image: a scratch budget below the free disk, which waits for `backup.scratchBytes`, and
+  stops at named log events.
 - Scenario 5, an LFS fetch that outlives its token, and scenario 7, two writers on a store without
   conditional writes. Scenario 9 is not part of this repository.
 - The rest of the kill matrix: mid-LFS, mid-part, before the receipt and during the manifest.

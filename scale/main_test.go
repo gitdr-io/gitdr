@@ -66,10 +66,13 @@ type profile struct {
 	BigLFSBytes   int64  `json:"bigLfsBytes"`
 	S3Rate        int64  `json:"s3RateBytesPerSecond"`
 	RechunkBytes  int64  `json:"rechunkBytes"`
-	Concurrency   int    `json:"concurrency"`
-	Keep          bool   `json:"keep"`
-	rateWindow    time.Duration
-	resultsDir    string
+	// Image is the image a run of the binary uses instead (make scale-image), under MemoryLimit.
+	Image       string `json:"image,omitempty"`
+	MemoryLimit string `json:"memoryLimit,omitempty"`
+	Concurrency int    `json:"concurrency"`
+	Keep        bool   `json:"keep"`
+	rateWindow  time.Duration
+	resultsDir  string
 }
 
 func loadProfile(moduleRoot string) (profile, error) {
@@ -86,6 +89,8 @@ func loadProfile(moduleRoot string) (profile, error) {
 		BigLFSBytes:   int64(envInt("SCALE_BIG_LFS_BYTES", 8<<30)),
 		S3Rate:        int64(envInt("SCALE_S3_RATE", 8_000_000)),
 		RechunkBytes:  int64(envInt("SCALE_RECHUNK_BYTES", 8<<20)),
+		Image:         os.Getenv("SCALE_IMAGE"),
+		MemoryLimit:   envStr("SCALE_MEMORY", "4g"),
 		Concurrency:   envInt("SCALE_CONCURRENCY", 4),
 		Keep:          os.Getenv("SCALE_KEEP") == "1",
 		resultsDir:    os.Getenv("SCALE_RESULTS_DIR"),

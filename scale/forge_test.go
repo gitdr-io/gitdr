@@ -26,6 +26,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -191,11 +192,18 @@ func startForge(h *harness) (*forge, error) {
 	mux.HandleFunc("POST /{owner}/{repo}/info/lfs/objects/batch", f.lfsBatch)
 	mux.HandleFunc("GET /_lfs/{owner}/{repo}/objects/{oid}", f.lfsObject)
 
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	// Loopback, except where the image's container has to reach it on Linux: there
+	// host.docker.internal is the bridge's gateway, which a loopback listener does not answer.
+	// Docker Desktop forwards host.docker.internal to the Mac's loopback.
+	listen := "127.0.0.1:0"
+	if h.prof.Image != "" && runtime.GOOS == "linux" {
+		listen = "0.0.0.0:0"
+	}
+	ln, err := net.Listen("tcp", listen)
 	if err != nil {
 		return nil, err
 	}
-	f.base = "http://" + ln.Addr().String()
+	f.base = "http://127.0.0.1:" + strconv.Itoa(ln.Addr().(*net.TCPAddr).Port)
 	f.srv = &http.Server{Handler: mux, ReadHeaderTimeout: 30 * time.Second}
 	go func() { _ = f.srv.Serve(ln) }()
 	fmt.Fprintf(os.Stderr, "scale: fake forge at %s\n", f.base)

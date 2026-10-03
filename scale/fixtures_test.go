@@ -200,16 +200,27 @@ func (h *harness) seedRefs(f *forge) (*org, error) {
 	return o, nil
 }
 
-// seedBig is a repository whose pack is BigPackBytes of random data, and one with BigLFSBytes of
-// LFS objects, an eighth of them reachable only from a pull request.
+// seedBig is a repository whose pack is BigPackBytes of random data, one whose large files the
+// source sends as chains of deltas, one with BigLFSBytes of LFS objects, an eighth of them
+// reachable only from a pull request, and two small ones, which a run has in flight beside them.
 func (h *harness) seedBig(f *forge) (*org, error) {
-	o := &org{owner: "scale-big", install: 4, names: []string{"big-pack", "lfs-heavy"}}
+	o := &org{owner: "scale-big", install: 4, names: []string{"big-pack", "big-deltas", "lfs-heavy", "small-1", "small-2"}}
+	for i, name := range o.names[3:] {
+		dir := f.repoDir(o.owner, name)
+		if err := initBare(dir); err != nil {
+			return nil, err
+		}
+		if err := fastImport(dir, bytes.NewReader(smallStream(name, i+1))); err != nil {
+			return nil, err
+		}
+		f.addRepo(o.owner, name, 12, plainMeta())
+	}
 	dir := f.repoDir(o.owner, "big-pack")
 	if err := initBare(dir); err != nil {
 		return nil, err
 	}
-	// Above the threshold git neither deltas nor compresses, and a random pack would gain
-	// nothing from either.
+	// Above the threshold the forge's git tries no deltas, which random data never gains from,
+	// so serving the pack costs the harness no delta search of its own.
 	if err := gitIn(dir, "config", "core.bigFileThreshold", "1m"); err != nil {
 		return nil, err
 	}
@@ -220,6 +231,12 @@ func (h *harness) seedBig(f *forge) (*org, error) {
 	}
 	f.addRepo(o.owner, "big-pack", h.prof.BigPackBytes>>10, plainMeta())
 
+	const deltaFiles, deltaVersions, deltaFileSize = 8, 8, 48 << 20
+	if err := importDeltas(f.repoDir(o.owner, "big-deltas"), deltaFiles, deltaVersions, deltaFileSize); err != nil {
+		return nil, err
+	}
+	f.addRepo(o.owner, "big-deltas", deltaFiles*deltaFileSize>>10, plainMeta())
+
 	const lfsObject = 128 << 20
 	count := int((h.prof.BigLFSBytes + lfsObject - 1) / lfsObject)
 	if err := h.seedLFS(f, o.owner, "lfs-heavy", count, lfsObject); err != nil {
@@ -229,16 +246,22 @@ func (h *harness) seedBig(f *forge) (*org, error) {
 	return o, nil
 }
 
-// bigPackStream writes a fast-import stream of total bytes of random blobs, 768 MiB at most each,
-// and one commit holding them. It is generated as it is read: it never sits in memory.
+// bigPackStream writes a fast-import stream of total bytes of random blobs and one commit holding
+// them. It is generated as it is read: it never sits in memory.
+//
+// The blobs are 96 MiB and 48 MiB in turn, the files a repository on GitHub can have, where 100
+// MiB is the limit on one. They are also the ones that cost a copy memory: git's delta search
+// takes every blob under core.bigFileThreshold, 512 MiB by default, and holds a window of them,
+// and their indexes, at once.
 func bigPackStream(w io.Writer, total int64) error {
-	const blobSize = 768 << 20
+	sizes := [...]int64{96 << 20, 48 << 20}
 	// A bufio.Writer keeps its first error, so the one Flush returns covers every write before it.
 	bw := bufio.NewWriterSize(w, 1<<20)
 	files := map[string]int{}
 	mark := 0
-	for left := total; left > 0; left -= blobSize {
-		n := min(left, blobSize)
+	for left := total; left > 0; {
+		n := min(left, sizes[mark%len(sizes)])
+		left -= n
 		mark++
 		_, _ = fmt.Fprintf(bw, "blob\nmark :%d\ndata %d\n", mark, n)
 		if _, err := io.CopyN(bw, detStream(fmt.Sprintf("big-pack/%d", mark)), n); err != nil {
@@ -251,6 +274,92 @@ func bigPackStream(w io.Writer, total int64) error {
 	fi.commit("refs/heads/main", fixtureEpoch, "a pack past five gibibytes", "", files)
 	_, _ = bw.Write(fi.Bytes())
 	return bw.Flush()
+}
+
+// importDeltas makes dir a bare repository holding deltaStream's files.
+func importDeltas(dir string, files, versions, size int) error {
+	if err := initBare(dir); err != nil {
+		return err
+	}
+	// Up to fastimport.unpackLimit objects, 100 by default, fast-import unpacks what it wrote into
+	// loose objects, which carry no deltas.
+	if err := gitIn(dir, "config", "fastimport.unpackLimit", "0"); err != nil {
+		return err
+	}
+	pr, pw := io.Pipe()
+	go func() { _ = pw.CloseWithError(deltaStream(pw, files, versions, size)) }()
+	return fastImport(dir, pr)
+}
+
+// deltaStream writes a fast-import stream of files files of size bytes, each in versions versions
+// a few KiB apart, and a commit for each version. fast-import stores a blob as a delta of the one
+// written just before it, so the versions of a file, written one after another, become a chain of
+// deltas. A clone resolves the chains side by side, a thread to a chain, and each thread holds
+// whole versions while it does: the memory git's thread count multiplies.
+func deltaStream(w io.Writer, files, versions, size int) error {
+	bw := bufio.NewWriterSize(w, 1<<20)
+	marks := make([][]int, versions)
+	for v := range marks {
+		marks[v] = make([]int, files)
+	}
+	mark := 0
+	for f := range files {
+		data := detBytes(fmt.Sprintf("big-deltas/%d", f), size)
+		for v := range versions {
+			// Each version after the first rewrites 512 bytes at eight places.
+			for k := range 8 {
+				if v > 0 {
+					seed := fmt.Sprintf("big-deltas/%d/%d/%d", f, v, k)
+					copy(data[detUint(seed)%uint64(size-512):], detBytes(seed, 512))
+				}
+			}
+			mark++
+			marks[v][f] = mark
+			_, _ = fmt.Fprintf(bw, "blob\nmark :%d\ndata %d\n", mark, size)
+			_, _ = bw.Write(data)
+			_, _ = bw.WriteString("\n")
+		}
+	}
+	fi := fastImportStream{mark: mark}
+	from := ""
+	for v := range versions {
+		tree := map[string]int{}
+		for f := range files {
+			tree[fmt.Sprintf("assets/asset-%02d.bin", f)] = marks[v][f]
+		}
+		c := fi.commit("refs/heads/main", fixtureEpoch+int64(v)*86400, fmt.Sprintf("assets, version %d", v+1), from, tree)
+		from = fmt.Sprintf(":%d", c)
+	}
+	_, _ = bw.Write(fi.Bytes())
+	return bw.Flush()
+}
+
+// The big-deltas repository is worth its time only if the source holds chains of deltas for a
+// clone to resolve. Needs no Docker: `go test -tags scale -run DeltaFixture ./scale`.
+func TestDeltaFixtureIsChainsOfDeltas(t *testing.T) {
+	const files, versions = 2, 4
+	dir := filepath.Join(t.TempDir(), "deltas.git")
+	if err := importDeltas(dir, files, versions, 1<<20); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("git", "cat-file", "--batch-all-objects", "--batch-check=%(objecttype) %(deltabase)")
+	cmd.Dir = dir
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	blobs, deltas := 0, 0
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if typ, base, _ := strings.Cut(line, " "); typ == "blob" {
+			blobs++
+			if strings.Trim(base, "0") != "" {
+				deltas++
+			}
+		}
+	}
+	if blobs != files*versions || deltas != files*(versions-1) {
+		t.Errorf("%d blobs, %d of them deltas; want %d and %d", blobs, deltas, files*versions, files*(versions-1))
+	}
 }
 
 // seedRate is RateRepos tiny repositories under an installation whose budget the scenario sets.

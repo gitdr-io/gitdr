@@ -640,6 +640,9 @@ func TestAStalledTransferIsAborted(t *testing.T) {
 // Every git process starts in command(), which is what makes the limits and the scoped header
 // something no command can be started without. A second exec.Command anywhere in the tree would
 // be a second way to start one, with whatever environment its author remembered.
+//
+// Tests are left out, and so is code built only under the scale tag, the scale harness's tools,
+// which never reach the binary: cgroupwatch starts the engine itself inside a container.
 func TestGitIsStartedInOnePlace(t *testing.T) {
 	var sites []string
 	root := filepath.Join("..", "..")
@@ -660,6 +663,9 @@ func TestGitIsStartedInOnePlace(t *testing.T) {
 		b, err := os.ReadFile(path)
 		if err != nil {
 			return err
+		}
+		if strings.HasPrefix(string(b), "//go:build scale\n") {
+			return nil
 		}
 		rel, err := filepath.Rel(root, path)
 		if err != nil {

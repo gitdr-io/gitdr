@@ -104,15 +104,20 @@ SCALE_REPOS   ?= 2500
 SCALE_TIMEOUT ?= 6h
 SCALE_RUN     ?= .
 scale:
-	$(GO) test -tags scale -count=1 ./scale/s3limits
+	$(GO) test -tags scale -count=1 ./scale/s3limits ./scale/cgroupwatch
 	SCALE_REPOS=$(SCALE_REPOS) SCALE_RESULTS_DIR=$(CURDIR)/scale-results SCALE_GO=$(GO) \
 	  $(GO) test -tags scale -count=1 -timeout $(SCALE_TIMEOUT) -run '$(SCALE_RUN)' -v ./scale
 
-# Phase 2 of the harness, not built yet: the released image as a process under a 4 GiB memory
-# cgroup, stopped with SIGTERM and SIGKILL at named log events. See scale/README.md.
+# Phase 2: the image this Dockerfile builds runs the big scenario as a container under a 4 GiB
+# memory limit, a pod's, and the summary reads the container's cgroup: memory.peak, what the
+# processes hold, the working set and oom kills. SCALE_MEMORY moves the limit. See scale/README.md.
+SCALE_IMAGE_TAG ?= gitdr-scale:local
+SCALE_IMAGE_RUN ?= TestScale4
 scale-image:
-	@echo 'scale-image is phase 2 of the scale harness and is not built yet; see scale/README.md' >&2
-	@exit 2
+	docker build --build-arg VERSION=$(VERSION) -t $(SCALE_IMAGE_TAG) .
+	$(GO) test -tags scale -count=1 ./scale/s3limits ./scale/cgroupwatch
+	SCALE_IMAGE=$(SCALE_IMAGE_TAG) SCALE_BIG=1 SCALE_REPOS=$(SCALE_REPOS) SCALE_RESULTS_DIR=$(CURDIR)/scale-results SCALE_GO=$(GO) \
+	  $(GO) test -tags scale -count=1 -timeout $(SCALE_TIMEOUT) -run '$(SCALE_IMAGE_RUN)' -v ./scale
 
 # Takes down any stack a scale run left behind: one that was killed, or run with SCALE_KEEP=1.
 scale-down:

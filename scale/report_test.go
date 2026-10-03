@@ -56,6 +56,10 @@ var findings = map[string]finding{
 		Title: "over TLS the AWS SDK sends a body of known length as one aws-chunked chunk, and MinIO refuses a chunk over 16 MiB, so no artifact or manifest over 16 MiB can be written to MinIO over TLS",
 		Where: "internal/dest/s3/s3.go: PutImmutable asks for a CRC32, which the SDK sends as a trailer",
 	},
+	"git-memory-unbounded": {
+		Title: "git runs with its default pack and mmap settings, so a big repository can need more memory than the container has",
+		Where: "internal/gitexec/gitexec.go: commandEnv sets no pack or mmap limit",
+	},
 	"single-put-limit": {
 		Title: "every artifact is one PutObject, which AWS refuses over 5 GiB",
 		Where: "internal/dest/s3/s3.go: PutImmutable",
@@ -100,6 +104,22 @@ type phase struct {
 	// as wait4 reports it. Only a run of the gitdr binary has one; an in-process run shares the
 	// test's own memory.
 	MaxRSSBytes int64 `json:"maxRSSBytes,omitempty"`
+
+	// A run of the image under a memory limit (make scale-image), from its cgroup. memory.peak
+	// counts page cache, which the kernel takes back before it kills anything; anonymous memory is
+	// what a process cannot give back, and oom kills are the limit acting. Resident is anonymous
+	// memory and mapped file pages at once, what the processes hold; the working set is the
+	// kubelet's figure, memory.current less the inactive file pages.
+	MemoryLimitBytes   int64        `json:"memoryLimitBytes,omitempty"`
+	MemoryPeakBytes    int64        `json:"memoryPeakBytes,omitempty"`
+	MaxResidentBytes   int64        `json:"maxResidentBytes,omitempty"`
+	MaxWorkingSetBytes int64        `json:"maxWorkingSetBytes,omitempty"`
+	MaxAnonBytes       int64        `json:"maxAnonBytes,omitempty"`
+	MaxFileBytes       int64        `json:"maxFileBytes,omitempty"`
+	MaxFileMappedBytes int64        `json:"maxFileMappedBytes,omitempty"`
+	OOMKills           int64        `json:"oomKills,omitempty"`
+	OOMKilled          bool         `json:"oomKilled,omitempty"`
+	Processes          []procMemory `json:"processes,omitempty"`
 
 	S3Requests    map[string]int64 `json:"s3Requests"`
 	S3Refused     map[string]int64 `json:"s3Refused,omitempty"`
@@ -292,6 +312,9 @@ func (h *harness) printSummary(w io.Writer, prev *report) {
 			}
 			fmt.Fprintf(&b, "      %-38s %7.1fs%s  copied %d, skipped %d, failed %d, recopied %d, manifest %s, scratch peak %s\n",
 				p.Name, p.WallSeconds, cmp, p.Copied, p.Skipped, p.Failed, p.Recopied, size(p.ManifestBytes), size(p.PeakScratchBytes))
+			if p.MemoryLimitBytes > 0 {
+				fmt.Fprintf(&b, "      %-38s %s\n", "", memoryNote(p))
+			}
 		}
 		for _, c := range sc.Checks {
 			mark := "ok  "

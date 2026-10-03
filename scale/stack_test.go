@@ -48,6 +48,7 @@ type stack struct {
 	admin   *http.Client
 	user    string
 	pass    string
+	binDir  string // linux binaries for the containers: s3limits, and cgroupwatch for the image
 }
 
 func startStack(h *harness) (*stack, error) {
@@ -82,8 +83,14 @@ func startStack(h *harness) (*stack, error) {
 	}
 
 	binDir := filepath.Join(h.root, "linux-bin")
+	s.binDir = binDir
 	if err := h.goBuild(filepath.Join(binDir, "s3limits"), "linux", arch, "./scale/s3limits", "-tags", "scale"); err != nil {
 		return nil, err
+	}
+	if h.prof.Image != "" {
+		if err := h.goBuild(filepath.Join(binDir, "cgroupwatch"), "linux", arch, "./scale/cgroupwatch", "-tags", "scale"); err != nil {
+			return nil, err
+		}
 	}
 
 	s.env = append(slices.Clone(h.origEnv),

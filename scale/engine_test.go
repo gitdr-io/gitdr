@@ -114,6 +114,9 @@ func slugify(s string) string {
 func (h *harness) backup(t *testing.T, sc *scenario, spec runSpec) *runResult {
 	t.Helper()
 	if spec.process {
+		if h.prof.Image != "" {
+			return h.startContainer(t, sc, spec).wait(t, spec.timeout)
+		}
 		return h.startProcess(t, sc, spec).wait(t, spec.timeout)
 	}
 	return h.runInProcess(t, sc, spec)
@@ -183,6 +186,9 @@ type engineProc struct {
 	start   time.Time
 	done    chan struct{}
 	signal  string
+	// A run of the image (make scale-image): the container and its scratch volume.
+	h                 *harness
+	container, volume string
 }
 
 func (h *harness) startProcess(t *testing.T, sc *scenario, spec runSpec) *engineProc {
@@ -228,6 +234,11 @@ func (h *harness) startProcess(t *testing.T, sc *scenario, spec runSpec) *engine
 // stop sends sig to the engine, and to its whole process group for SIGKILL.
 func (p *engineProc) stop(sig syscall.Signal) {
 	p.signal = sig.String()
+	if p.container != "" {
+		// cgroupwatch passes SIGTERM on to the engine; SIGKILL ends the container, all of it.
+		_, _ = p.h.docker("kill", "--signal", dockerSignal(sig), p.container)
+		return
+	}
 	if sig == syscall.SIGKILL {
 		_ = syscall.Kill(-p.cmd.Process.Pid, syscall.SIGKILL)
 		return
@@ -249,6 +260,9 @@ func (p *engineProc) wait(t *testing.T, limit time.Duration) *runResult {
 	t.Helper()
 	if !p.exited(cmp(limit, 3*time.Hour)) {
 		t.Errorf("harness: gitdr was still running after %s; killed", cmp(limit, 3*time.Hour))
+		if p.container != "" {
+			_, _ = p.h.docker("kill", p.container)
+		}
 		_ = syscall.Kill(-p.cmd.Process.Pid, syscall.SIGKILL)
 		<-p.done
 	}
@@ -274,7 +288,10 @@ func (p *engineProc) wait(t *testing.T, limit time.Duration) *runResult {
 	}
 	ph := p.measure.finish(t, r, wall)
 	ph.Name, ph.Mode, ph.LogFile, ph.Signal = p.spec.name, "process", p.logPath, p.signal
-	if ru, ok := p.cmd.ProcessState.SysUsage().(*syscall.Rusage); ok {
+	if p.container != "" {
+		ph.Mode = "image"
+		p.finishContainer(t, ph)
+	} else if ru, ok := p.cmd.ProcessState.SysUsage().(*syscall.Rusage); ok {
 		ph.MaxRSSBytes = ru.Maxrss
 		if runtime.GOOS == "linux" {
 			ph.MaxRSSBytes *= 1024 // kilobytes there, bytes on darwin
@@ -284,6 +301,19 @@ func (p *engineProc) wait(t *testing.T, limit time.Duration) *runResult {
 	p.sc.addPhase(ph)
 	t.Logf("%s: %s", p.spec.name, describe(r))
 	return r
+}
+
+// dockerSignal is a signal's name as docker kill takes it: TERM, where sig.String() says
+// "terminated".
+func dockerSignal(sig syscall.Signal) string {
+	switch sig {
+	case syscall.SIGKILL:
+		return "KILL"
+	case syscall.SIGINT:
+		return "INT"
+	default:
+		return "TERM"
+	}
 }
 
 func signalNote(sig string) string {
