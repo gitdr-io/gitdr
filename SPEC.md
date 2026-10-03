@@ -29,24 +29,34 @@ A single static Go binary, run as a one-shot job. Two pluggable interfaces.
 1. Resolve source auth, then enumerate repositories (apply include/exclude filters).
 2. WORM check. Verify destination immutability. Warn and proceed if it isn't confirmed,
    or abort when `worm.require` is set.
-3. Fan out across repos with bounded concurrency.
-   - `git clone --mirror`
-   - `git lfs fetch --all`
-   - metadata to JSON (issues, PRs/MRs, comments, labels, milestones, wikis, releases)
-   - bundle/tar, then SHA-256 checksum
-   - `PutImmutable` at a deterministic, dated key
+3. Fan out across repos with bounded concurrency. Each repository in two steps, and nothing is
+   written until the first one has finished.
+   - Read and prepare, writing nothing: metadata to JSON (issues, PRs/MRs, comments, labels,
+     milestones, wikis, releases), `git clone --mirror`, `git lfs fetch --all`, the LFS objects
+     into a tar, each removed once it is in it, `git bundle create`, then the mirror removed,
+     encryption when it is on, and the SHA-256 of every artifact.
+   - Upload with `PutImmutable` at deterministic, dated keys, largest first, and the `.sha256`
+     sidecar last.
 4. Write a signed run-manifest (per-repo status, checksums, versions, timing).
 5. Emit structured logs and metrics. Exit non-zero on any failure.
 
-In step 3 the metadata is fetched before anything of the repository is written. A failure likely
-to pass, a rate limit gitdr could not wait out or a server error that outlasted its retries, fails
-the repository with nothing stored for it, and the next run tries again. Any other metadata
-failure, a permission the credential lacks for example, would fail every run the same way, so the
-bundle and its checksum are stored anyway and the repository then fails on its metadata. Up to
-v0.1.20 the metadata was fetched after the bundle was stored, so a rate limit left a bundle under
-object lock with no metadata beside it, and no checksum either. Only the GitHub source marks a
-failure as likely to pass, so on GitLab every metadata failure stores the code first.
-*Changed in v0.1.21.*
+A failure while reading and preparing leaves nothing under the date, so the same day's rerun
+copies the repository cleanly. A failure among the uploads leaves part of a copy, whose keys are
+create-only, and the same day's rerun fails the repository by name (§11); the next copy is made
+the next UTC day. The sidecar goes last because a restore without the public key goes by it, and
+a sidecar must not stand beside a partial copy. Up to v0.1.20 the bundle, the metadata and the
+checksum were uploaded before the LFS objects were fetched, so an LFS failure, a token that
+expired during the fetch for example, always left a partial copy. *Changed in v0.1.21.*
+
+The metadata is fetched first, before the clone, so a wait for a rate limit holds no scratch
+space. A failure likely to pass, a rate limit gitdr could not wait out or a server error that
+outlasted its retries, fails the repository with nothing stored for it, and the next run tries
+again. Any other metadata failure, a permission the credential lacks for example, would fail
+every run the same way, so the code is stored anyway, the bundle, the LFS archive and the
+checksum, and the repository then fails on its metadata. Up to v0.1.20 the metadata was fetched
+after the bundle was stored, so a rate limit left a bundle under object lock with no metadata
+beside it, and no checksum either. Only the GitHub source marks a failure as likely to pass, so on
+GitLab every metadata failure stores the code first. *Changed in v0.1.21.*
 
 ### Object key layout
 

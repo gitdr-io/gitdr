@@ -250,7 +250,7 @@ func (c *stoppedClock) set(at time.Time) {
 }
 
 // midnightSource moves the clock past midnight while the backup of a repository is under way:
-// after its bundle is dated and before the run finishes.
+// after the run's date is fixed and before the run finishes.
 type midnightSource struct {
 	*fixtureSource
 	clock *stoppedClock

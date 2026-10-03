@@ -5,6 +5,7 @@ package pipeline
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/ed25519"
 	"encoding/base64"
@@ -14,6 +15,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -522,6 +524,18 @@ func (r *backupRun) retention() dest.Retention {
 }
 
 // backupRepo clones, bundles, checksums, and uploads one repo's artifacts immutably.
+//
+// In two steps, and the order is the point. First everything that reads the source or can fail
+// locally: the metadata, the clone, the LFS objects, the archive, the bundle, the encryption and
+// the checksums. Nothing is written to the destination until all of that has succeeded, so a
+// failure in it leaves nothing under the date, and the same day's rerun copies the repository
+// cleanly. Then the uploads, largest first, and the checksum sidecar last, so a restore that goes
+// by the sidecar never finds one beside a partial copy.
+//
+// A failure among the uploads spends the date: the keys already written are create-only, and the
+// same day's rerun fails the repository by name (resumed). Up to v0.1.20 the bundle, the metadata
+// and the checksum were stored before the LFS objects were even fetched, so an LFS failure always
+// left a partial copy.
 func (r *backupRun) backupRepo(ctx context.Context, repo source.Repo, ret dest.Retention) RepoEntry {
 	entry := RepoEntry{Slug: repo.Slug(), Status: StatusSuccess}
 	fail := func(err error) RepoEntry {
@@ -539,11 +553,25 @@ func (r *backupRun) backupRepo(ctx context.Context, repo source.Repo, ret dest.R
 
 	mirror := filepath.Join(tmp, repo.Name+".git")
 	bundlePath := filepath.Join(tmp, repo.Name+".bundle")
+	prefix := path.Join(repo.Host, repo.Owner, repo.Name, r.date)
+	key := func(suffix string) string { return path.Join(prefix, repo.Name+suffix) }
 
 	cloneURL, err := r.src.CloneURL(ctx, repo)
 	if err != nil {
 		return fail(fmt.Errorf("clone url: %w", err))
 	}
+
+	// The metadata first, before the clone, so a wait for a rate limit holds no scratch space.
+	// What a failure costs depends on whether it is likely to pass. A transient one, a rate limit
+	// that could not be waited out or a server error that outlasted its retries, fails the
+	// repository here with nothing stored: the next run will probably get through. Any other
+	// failure, a permission missing say, would fail every run the same way, so the code is stored
+	// regardless and the repository fails on its metadata after the uploads.
+	meta, metaErr := r.src.FetchMetadata(ctx, repo)
+	if metaErr != nil && (errors.Is(metaErr, source.ErrTransient) || ctx.Err() != nil) {
+		return fail(fmt.Errorf("metadata: %w", metaErr))
+	}
+
 	if err := retry(ctx, 3, time.Second, func() error {
 		_ = os.RemoveAll(mirror) // clear any partial clone before retrying
 		// Inside the retry, so an attempt made after the token was replaced uses the
@@ -562,78 +590,21 @@ func (r *backupRun) backupRepo(ctx context.Context, repo source.Repo, ret dest.R
 	// nothing has actually been lost: there are no commits to lose.
 	//
 	// Recorded in the manifest as skipped-with-a-reason rather than passed over silently. The
-	// repository was seen, and the run is auditable about what it did with it.
+	// repository was seen, and the run is auditable about what it did with it. A repository with
+	// no code can still carry issues, labels and milestones, so its metadata is still stored.
 	hasRefs, err := r.git.HasRefs(ctx, mirror)
 	if err != nil {
 		return fail(fmt.Errorf("check refs: %w", err))
 	}
-
-	prefix := path.Join(repo.Host, repo.Owner, repo.Name, r.date)
-
-	// The metadata is fetched before anything is written, and what a failure costs depends on
-	// whether it is likely to pass. A transient one, a rate limit that could not be waited out or
-	// a server error that outlasted its retries, fails the repository here with nothing stored:
-	// the next run will probably get through, and nothing written to the destination can be taken
-	// back. Any other failure, a permission missing say, would fail every run the same way, so the
-	// code is stored regardless, bundle and checksum, and the repository fails on its metadata
-	// after that, as it did before v0.1.21.
-	meta, metaErr := r.src.FetchMetadata(ctx, repo)
-	if metaErr != nil && (errors.Is(metaErr, source.ErrTransient) || ctx.Err() != nil) {
-		return fail(fmt.Errorf("metadata: %w", metaErr))
-	}
-
-	// No commits, so no bundle — but the metadata is still stored below. A repository with no
-	// code can still carry issues, labels and milestones, and dropping those because nobody
-	// pushed a commit would be a silent loss of exactly the kind this tool exists to prevent.
 	if !hasRefs {
 		r.log.Info("repo has no commits; storing metadata only", "repo", repo.Slug())
 		entry.Status = StatusSkipped
 		entry.Reason = ReasonEmpty
-	} else {
-		if err := r.git.BundleAll(ctx, mirror, bundlePath); err != nil {
-			return fail(err)
-		}
 	}
 
-	// bundle (git data); the stored SHA covers the on-disk object (ciphertext if encrypted).
-	// Skipped entirely for a repository with no commits: there is no bundle, and so no sha256
-	// sidecar either, since that file describes the bundle.
-	var bundleSHA string
-	if hasRefs {
-		bres, sha, err := r.putFile(ctx, path.Join(prefix, repo.Name+".bundle"), bundlePath, ret)
-		if err != nil {
-			return fail(err)
-		}
-		bundleSHA = sha
-		entry.Artifacts = append(entry.Artifacts, artifact("bundle", bres, bundleSHA))
-	}
-
-	// per-resource metadata, fetched above
-	if metaErr == nil {
-		mres, metaSHA, err := r.putBytes(ctx, path.Join(prefix, repo.Name+".meta.json"), meta, ret)
-		if err != nil {
-			return fail(err)
-		}
-		entry.Artifacts = append(entry.Artifacts, artifact("meta", mres, metaSHA))
-	}
-
-	// sha256 sidecar (sha256sum format) over the stored bundle object
-	if hasRefs {
-		shaLine := fmt.Sprintf("%s  %s\n", bundleSHA, repo.Name+".bundle")
-		sres, shaSHA, err := r.putBytes(ctx, path.Join(prefix, repo.Name+".sha256"), []byte(shaLine), ret)
-		if err != nil {
-			return fail(err)
-		}
-		entry.Artifacts = append(entry.Artifacts, artifact("sha256", sres, shaSHA))
-	}
-
-	// The code is stored, and the repository fails on the metadata it could not have.
-	if metaErr != nil {
-		return fail(fmt.Errorf("metadata: %w", metaErr))
-	}
-
-	// LFS objects (optional): fetch and store as a separate immutable tar artifact.
-	// Nothing to fetch without refs: LFS objects are pointed at by commits.
+	var files []*stagedArtifact
+	// LFS objects, fetched while the source is being read and archived before anything is
+	// written. Nothing to fetch without refs: LFS objects are pointed at by commits.
 	if hasRefs && r.cfg.Backup.LFS && gitexec.LFSAvailable() {
 		auth, err := gitAuthHeader(ctx, r.src)
 		if err != nil {
@@ -642,21 +613,139 @@ func (r *backupRun) backupRepo(ctx context.Context, repo source.Repo, ret dest.R
 		if err := r.git.LFSFetchAll(ctx, mirror, cloneURL, gitexec.Options{AuthHeader: auth}); err != nil {
 			return fail(fmt.Errorf("lfs fetch: %w", err))
 		}
-		lfsDir := filepath.Join(mirror, "lfs")
-		if dirHasFiles(lfsDir) {
+		if lfsDir := filepath.Join(mirror, "lfs"); dirHasFiles(lfsDir) {
 			lfsTar := filepath.Join(tmp, repo.Name+".lfs.tar")
-			if err := writeTarFile(lfsDir, lfsTar); err != nil {
+			if err := archiveLFS(lfsDir, lfsTar); err != nil {
 				return fail(err)
 			}
-			lres, lfsSHA, err := r.putFile(ctx, path.Join(prefix, repo.Name+".lfs.tar"), lfsTar, ret)
-			if err != nil {
-				return fail(err)
-			}
-			entry.Artifacts = append(entry.Artifacts, artifact("lfs", lres, lfsSHA))
+			files = append(files, &stagedArtifact{kind: "lfs", key: key(".lfs.tar"), path: lfsTar})
 		}
 	}
+	if hasRefs {
+		if err := r.git.BundleAll(ctx, mirror, bundlePath); err != nil {
+			return fail(err)
+		}
+		files = append(files, &stagedArtifact{kind: "bundle", key: key(".bundle"), path: bundlePath})
+	}
+	// The bundle holds everything the mirror did, and the scratch space is needed for what follows.
+	if err := os.RemoveAll(mirror); err != nil {
+		return fail(fmt.Errorf("remove the mirror: %w", err))
+	}
 
+	// Encrypted, when that is on, and checksummed: the stored checksum covers the stored object,
+	// ciphertext when encrypted.
+	for _, f := range files {
+		if err := r.stageFile(f); err != nil {
+			return fail(err)
+		}
+	}
+	staged := files
+	if metaErr == nil {
+		m, err := r.stageBytes("meta", key(".meta.json"), meta)
+		if err != nil {
+			return fail(err)
+		}
+		staged = append(staged, m)
+	}
+	// Largest first. The longest upload is the likeliest to fail, and it then fails with the least
+	// written beside it.
+	slices.SortStableFunc(staged, func(a, b *stagedArtifact) int { return cmp.Compare(b.size, a.size) })
+	// The sha256 sidecar (sha256sum format) over the stored bundle object, and only for a bundle.
+	if hasRefs {
+		var bundleSHA string
+		for _, a := range files {
+			if a.kind == "bundle" {
+				bundleSHA = a.sha
+			}
+		}
+		line := fmt.Sprintf("%s  %s\n", bundleSHA, repo.Name+".bundle")
+		s, err := r.stageBytes("sha256", key(".sha256"), []byte(line))
+		if err != nil {
+			return fail(err)
+		}
+		staged = append(staged, s)
+	}
+
+	// Every upload in that order, and the sidecar last.
+	written := map[string]ArtifactInfo{}
+	record := func() {
+		for _, kind := range []string{"bundle", "meta", "sha256", "lfs"} {
+			if a, ok := written[kind]; ok {
+				entry.Artifacts = append(entry.Artifacts, a)
+			}
+		}
+	}
+	for _, a := range staged {
+		res, err := r.putStaged(ctx, a, ret)
+		if err != nil {
+			record() // a failed entry still lists what it wrote
+			return fail(err)
+		}
+		written[a.kind] = artifact(a.kind, res, a.sha)
+	}
+	record()
+
+	// The code is stored, and the repository fails on the metadata it could not have.
+	if metaErr != nil {
+		return fail(fmt.Errorf("metadata: %w", metaErr))
+	}
 	return entry
+}
+
+// stagedArtifact is one artifact ready to upload: its stored bytes, on disk or in memory, with
+// their size and SHA-256.
+type stagedArtifact struct {
+	kind, key string
+	path      string // the stored file; empty for one held in data
+	data      []byte
+	size      int64
+	sha       string
+}
+
+// stageFile encrypts a's file when encryption is on, and checksums what will be stored. The
+// plaintext is removed once the ciphertext exists, as the scratch disk holds one of them at a
+// time.
+func (r *backupRun) stageFile(a *stagedArtifact) error {
+	if r.encKey != nil {
+		enc := a.path + ".enc"
+		if err := crypto.EncryptFile(a.path, enc, r.encKey); err != nil {
+			return fmt.Errorf("encrypt: %w", err)
+		}
+		_ = os.Remove(a.path)
+		a.path = enc
+	}
+	sha, size, err := crypto.SHA256File(a.path)
+	if err != nil {
+		return err
+	}
+	a.sha, a.size = sha, size
+	return nil
+}
+
+// stageBytes is stageFile for an artifact held in memory.
+func (r *backupRun) stageBytes(kind, key string, plain []byte) (*stagedArtifact, error) {
+	stored := plain
+	if r.encKey != nil {
+		var buf bytes.Buffer
+		if err := crypto.Encrypt(&buf, bytes.NewReader(plain), r.encKey); err != nil {
+			return nil, fmt.Errorf("encrypt: %w", err)
+		}
+		stored = buf.Bytes()
+	}
+	return &stagedArtifact{kind: kind, key: key, data: stored, size: int64(len(stored)), sha: crypto.SHA256Bytes(stored)}, nil
+}
+
+// putStaged uploads one staged artifact, create-only.
+func (r *backupRun) putStaged(ctx context.Context, a *stagedArtifact, ret dest.Retention) (dest.PutResult, error) {
+	if a.path == "" {
+		return r.dst.PutImmutable(ctx, a.key, bytes.NewReader(a.data), a.size, ret)
+	}
+	f, err := os.Open(a.path)
+	if err != nil {
+		return dest.PutResult{}, err
+	}
+	defer func() { _ = f.Close() }()
+	return r.dst.PutImmutable(ctx, a.key, f, a.size, ret)
 }
 
 // uploadManifest signs the canonical manifest and stores it with a detached .sig in dir, named
@@ -700,44 +789,6 @@ func retry(ctx context.Context, attempts int, base time.Duration, fn func() erro
 		}
 	}
 	return err
-}
-
-// putFile encrypts plainPath (when enabled), then SHAs and uploads the stored object,
-// returning the put result and the SHA-256 of the stored bytes.
-func (r *backupRun) putFile(ctx context.Context, key, plainPath string, ret dest.Retention) (dest.PutResult, string, error) {
-	storedPath := plainPath
-	if r.encKey != nil {
-		storedPath = plainPath + ".enc"
-		if err := crypto.EncryptFile(plainPath, storedPath, r.encKey); err != nil {
-			return dest.PutResult{}, "", fmt.Errorf("encrypt: %w", err)
-		}
-		defer func() { _ = os.Remove(storedPath) }()
-	}
-	sha, size, err := crypto.SHA256File(storedPath)
-	if err != nil {
-		return dest.PutResult{}, "", err
-	}
-	f, err := os.Open(storedPath)
-	if err != nil {
-		return dest.PutResult{}, "", err
-	}
-	res, err := r.dst.PutImmutable(ctx, key, f, size, ret)
-	_ = f.Close()
-	return res, sha, err
-}
-
-// putBytes encrypts plain (when enabled), then SHAs and uploads the stored object.
-func (r *backupRun) putBytes(ctx context.Context, key string, plain []byte, ret dest.Retention) (dest.PutResult, string, error) {
-	stored := plain
-	if r.encKey != nil {
-		var buf bytes.Buffer
-		if err := crypto.Encrypt(&buf, bytes.NewReader(plain), r.encKey); err != nil {
-			return dest.PutResult{}, "", fmt.Errorf("encrypt: %w", err)
-		}
-		stored = buf.Bytes()
-	}
-	res, err := r.dst.PutImmutable(ctx, key, bytes.NewReader(stored), int64(len(stored)), ret)
-	return res, crypto.SHA256Bytes(stored), err
 }
 
 func artifact(kind string, res dest.PutResult, sha string) ArtifactInfo {

@@ -146,6 +146,10 @@ func hideLFSObjects(t *testing.T, repoDir string) (restore func()) {
 // the rerun reported the repository as already backed up, exited 0, and the repository counted
 // as protected with half a copy. A rerun cannot finish that copy either, because its keys are
 // create-only, so the next copy is the next day's.
+//
+// Since every read of the source comes before the first write, an LFS fetch that fails writes
+// nothing at all (TestEverySourceReadHappensBeforeTheFirstWrite). An LFS repository can still be
+// left half copied by an upload that fails, which is the case here.
 func TestASameDayRerunFailsAnIncompleteCopyByName(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -155,12 +159,14 @@ func TestASameDayRerunFailsAnIncompleteCopyByName(t *testing.T) {
 		left  []string // what the first run leaves under the date
 	}{
 		{
-			name: "its lfs objects could not be fetched",
+			// The archive is the largest artifact, so it is written first, and the bundle after it.
+			name: "its bundle was refused after its lfs archive landed",
 			lfs:  true,
-			fault: func(t *testing.T, _ *memDest, _ *failingMetadata, repoDir string) func() {
-				return hideLFSObjects(t, repoDir)
+			fault: func(_ *testing.T, md *memDest, _ *failingMetadata, _ string) func() {
+				md.refuse = "hello.bundle"
+				return func() { md.refuse = "" }
 			},
-			left: []string{"hello.bundle", "hello.meta.json", "hello.sha256"},
+			left: []string{"hello.lfs.tar"},
 		},
 		{
 			name: "its metadata could not be fetched",

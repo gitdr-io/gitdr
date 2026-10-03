@@ -11,7 +11,17 @@ import (
 )
 
 // writeTarFile tars srcDir's contents (paths relative to srcDir) into dstFile.
-func writeTarFile(srcDir, dstFile string) error {
+func writeTarFile(srcDir, dstFile string) error { return writeTar(srcDir, dstFile, false) }
+
+// moveIntoTar is writeTarFile that removes each file from srcDir once it is in the archive, so
+// the LFS objects and their archive are never both on the scratch disk whole.
+func moveIntoTar(srcDir, dstFile string) error { return writeTar(srcDir, dstFile, true) }
+
+// archiveLFS is how a backup archives a repository's LFS objects: moveIntoTar. A test replaces it
+// to fail the archive, which no fixture can make fail on its own (export_test.go).
+var archiveLFS = moveIntoTar
+
+func writeTar(srcDir, dstFile string, removeEach bool) error {
 	f, err := os.Create(dstFile)
 	if err != nil {
 		return fmt.Errorf("tar create %q: %w", dstFile, err)
@@ -54,9 +64,14 @@ func writeTarFile(srcDir, dstFile string) error {
 		if err != nil {
 			return err
 		}
-		defer func() { _ = src.Close() }()
 		_, err = io.Copy(tw, src)
-		return err
+		if cerr := src.Close(); err == nil {
+			err = cerr
+		}
+		if err != nil || !removeEach {
+			return err
+		}
+		return os.Remove(path)
 	})
 	closeErr := tw.Close()
 	if fErr := f.Close(); closeErr == nil {
