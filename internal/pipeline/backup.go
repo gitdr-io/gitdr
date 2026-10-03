@@ -77,6 +77,10 @@ type backupRun struct {
 	requireWORM bool
 	deadline    time.Time       // when the work stops; zero for none
 	wormStatus  dest.WormStatus // captured by wormCheck, recorded in the manifest
+	// date is the UTC date the run started, YYYY-MM-DD, and every copy the run makes is filed
+	// under it. Read once: read again for each repository, a run that crossed midnight filed the
+	// repositories it reached before midnight under one date and the rest under the next.
+	date string
 	// What the last successful run recorded, by repository slug. Read once per run; empty
 	// when there was no previous run or its manifest could not be read, in which case every
 	// repository is copied in full. See previous.go.
@@ -85,6 +89,7 @@ type backupRun struct {
 
 func (r *backupRun) run(ctx context.Context) (*BackupResult, error) {
 	started := r.now().UTC()
+	r.date = started.Format("2006-01-02")
 
 	// The work stops at the deadline, and the manifest does not. It is written after the work
 	// with the run's own context, so a run that ran out of time still records what it did and the
@@ -330,7 +335,7 @@ func (r *backupRun) backupOne(ctx context.Context, repo source.Repo, ret dest.Re
 // Both are recognised the same way. Looking for the bundle only sent an empty repository round
 // again on a rerun, and its second metadata write failed on the key the first run had created.
 func (r *backupRun) alreadyBackedUp(ctx context.Context, repo source.Repo) bool {
-	dir := path.Join(repo.Host, repo.Owner, repo.Name, r.now().UTC().Format("2006-01-02"))
+	dir := path.Join(repo.Host, repo.Owner, repo.Name, r.date)
 	objs, err := r.dst.List(ctx, path.Join(dir, repo.Name+"."))
 	if err != nil {
 		return false
@@ -406,8 +411,7 @@ func (r *backupRun) backupRepo(ctx context.Context, repo source.Repo, ret dest.R
 		return fail(fmt.Errorf("check refs: %w", err))
 	}
 
-	date := r.now().UTC().Format("2006-01-02")
-	prefix := path.Join(repo.Host, repo.Owner, repo.Name, date)
+	prefix := path.Join(repo.Host, repo.Owner, repo.Name, r.date)
 
 	// The metadata is fetched before anything is written, and what a failure costs depends on
 	// whether it is likely to pass. A transient one, a rate limit that could not be waited out or

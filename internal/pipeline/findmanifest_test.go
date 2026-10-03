@@ -284,6 +284,82 @@ func TestARunThatCrossesMidnightIsFoundFromTheDateOfTheCopy(t *testing.T) {
 	}
 }
 
+// midnightBetween moves the clock past midnight when the run first asks about the repository
+// named second. With one repository at a time, that is after the first one's copy has finished.
+type midnightBetween struct {
+	*fixtureSource
+	clock  *stoppedClock
+	second string
+	after  time.Time
+}
+
+func (s *midnightBetween) CloneURL(ctx context.Context, r source.Repo) (string, error) {
+	if r.Name == s.second {
+		s.clock.set(s.after)
+	}
+	return s.fixtureSource.CloneURL(ctx, r)
+}
+
+// A run files every copy under the date it started, whatever the clock says when it reaches each
+// repository, and each copy's copiedAt is when that repository finished.
+//
+// The date was read again for each repository, so a run that crossed midnight UTC filed the
+// repositories it reached before midnight under one date and the rest under the next. A same-day
+// rerun then looked for half of them under the wrong date.
+func TestARunFilesEveryCopyUnderTheDateItStarted(t *testing.T) {
+	t.Chdir(t.TempDir())
+	ctx := context.Background()
+	md := newMemDest(true)
+	pub, signer := drillKeys(t)
+
+	started := time.Date(2026, 6, 13, 23, 59, 50, 0, time.UTC)
+	midnight := time.Date(2026, 6, 14, 0, 0, 5, 0, time.UTC)
+	clock := &stoppedClock{at: started}
+	src := &midnightBetween{
+		fixtureSource: &fixtureSource{repos: slugRepos("github.com", initFixtureRepo(t), "octo/before", "octo/after")},
+		clock:         clock, second: "after", after: midnight,
+	}
+	cfg := testConfig()
+	cfg.Source.Repo = ""
+	cfg.Backup.Concurrency = 1
+	res, err := pipeline.Backup(ctx, pipeline.BackupDeps{
+		Config: cfg, Source: src, Dest: md, Git: gitexec.New(nil),
+		SigningKey: signer, ToolVersion: "test", Now: clock.now,
+	})
+	if err != nil {
+		t.Fatalf("backup: %v", err)
+	}
+	// The second repository was reached after midnight, or this test proves nothing.
+	if !res.Manifest.FinishedAt.Equal(midnight) {
+		t.Fatalf("the run finished at %s, want %s: the clock never crossed midnight", res.Manifest.FinishedAt, midnight)
+	}
+
+	finished := map[string]time.Time{"octo/before": started, "octo/after": midnight}
+	for _, e := range res.Manifest.Repos {
+		name := strings.TrimPrefix(e.Slug, "octo/")
+		want := "github.com/" + e.Slug + "/2026-06-13/" + name + ".bundle"
+		var got string
+		for _, a := range e.Artifacts {
+			if a.Kind == "bundle" {
+				got = a.Key
+			}
+		}
+		if got != want {
+			t.Errorf("%s: bundle stored at %q, want %q, under the date the run started", e.Slug, got, want)
+		}
+		if e.CopiedAt == nil || !e.CopiedAt.Equal(finished[e.Slug]) {
+			t.Errorf("%s: copiedAt %v, want %s, when this repository's copy finished", e.Slug, e.CopiedAt, finished[e.Slug])
+		}
+
+		if _, err := pipeline.Restore(ctx, restoreDeps(md, pub), pipeline.RestoreRequest{
+			Host: "github.com", Owner: "octo", Name: name, Date: "2026-06-13",
+			OutDir: filepath.Join(t.TempDir(), name),
+		}); err != nil {
+			t.Errorf("%s: restore by the date the run started: %v", e.Slug, err)
+		}
+	}
+}
+
 // restore -manifest: the key backup printed, and -repo to pick the repository in it.
 func TestRestoreFromANamedManifest(t *testing.T) {
 	t.Chdir(t.TempDir())

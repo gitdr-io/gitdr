@@ -134,7 +134,8 @@ type RepoEntry struct {
 	Refs []RefEntry `json:"refs,omitempty"`
 	// When the artifacts this entry relies on were actually written.
 	//
-	// For a copy that was made this run it is this run's finish time. For a repository that
+	// For a copy that was made this run it is when that repository finished, once its last
+	// artifact was stored: its own finish time, not the run's. For a repository that
 	// was skipped as unchanged it is carried forward from the run that made the copy, which
 	// is the whole point: without it, each skip would reset the age of the copy and the
 	// refresh bound in unchanged.go would never fire, so a repository that never changes

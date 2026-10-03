@@ -66,6 +66,11 @@ first, which could change from one run to the next. The first such run after upg
 find the previous manifest, and then copies every repository once instead of skipping the
 unchanged ones. *Changed in v0.1.20.*
 
+`{ISO8601-date}` is the UTC date the run started, read once, so every copy a run makes is filed
+under the same date however long the run takes. Up to v0.1.20 the date was read again for each
+repository, and a run that crossed midnight UTC filed the repositories it reached after midnight
+under the next date, where a restore by the run's date did not look. *Changed in v0.1.21.*
+
 ## 3. Sources
 
 | Source | Endpoints | Auth |
@@ -682,10 +687,14 @@ request, and `destination.wormVerdict` as the only statement about whether it sa
   This is what lets `gitdr drill` check the second join — that the bundle declares the history
   the source actually had — rather than only that a bundle restores to its own header.
 - `copiedAt` — when the artifacts this entry relies on were written. For a copy made this run
-  it is this run's finish time; for a repository skipped as unchanged it is **carried forward**
-  from the run that made the copy. Without it each skip would reset the age of the copy, the
-  refresh bound would never fire, and a repository that never changes would be skipped past its
-  object lock's expiry and end up with nothing.
+  it is when that repository's copy finished, once its last artifact was stored, so it is
+  earlier than the run's `finishedAt` for every repository but the last one; for a repository
+  skipped as unchanged it is **carried forward** from the run that made the copy. Without it
+  each skip would reset the age of the copy, the refresh bound would never fire, and a
+  repository that never changes would be skipped past its object lock's expiry and end up with
+  nothing. Up to v0.1.20 this section said a copy's `copiedAt` was the run's finish time. The
+  engine has always written the repository's own finish time, so the sentence was wrong and the
+  field was not. *Corrected in v0.1.21.*
 
 Both are `omitempty`, so a v2 manifest re-read and re-signed produces identical bytes. The
 version moved anyway, because a consumer that needs `refs` has to be able to ask whether this
