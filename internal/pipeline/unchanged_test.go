@@ -3,6 +3,8 @@ package pipeline
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
@@ -11,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"gitdr.io/gitdr/internal/crypto"
 	"gitdr.io/gitdr/internal/dest"
 )
 
@@ -235,7 +238,7 @@ func TestAFailedEntryIsNotEvidenceEvenWhenItCarriesRefs(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	r := &backupRun{
+	r := &backupRun{pub: runPub,
 		dst: &stubDest{objs: map[string][]byte{
 			"github.com/octo/manifests/20260901T120000Z.manifest.json": raw,
 		}},
@@ -269,7 +272,7 @@ func TestAnUnreadablePreviousManifestMeansCopyEverything(t *testing.T) {
 	}
 	for name, objs := range cases {
 		t.Run(name, func(t *testing.T) {
-			r := &backupRun{dst: &stubDest{objs: objs}, log: slog.New(slog.DiscardHandler), now: func() time.Time { return now }}
+			r := &backupRun{pub: runPub, dst: &stubDest{objs: objs}, log: slog.New(slog.DiscardHandler), now: func() time.Time { return now }}
 			if got := r.loadPrevious(context.Background(), "github.com/octo/manifests", nil); len(got) != 0 {
 				t.Errorf("got %d entries, want none", len(got))
 			}
@@ -288,7 +291,7 @@ func TestTheNewestManifestWins(t *testing.T) {
 		})
 		return b
 	}
-	r := &backupRun{dst: &stubDest{objs: map[string][]byte{
+	r := &backupRun{pub: runPub, dst: &stubDest{objs: map[string][]byte{
 		"github.com/octo/manifests/20260101T000000Z.manifest.json": mk("old", time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)),
 		"github.com/octo/manifests/20260901T120000Z.manifest.json": mk("new", time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)),
 		"github.com/octo/manifests/20260501T000000Z.manifest.json": mk("mid", time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)),
@@ -330,7 +333,7 @@ func TestThePreviousCopyIsNotReliedOnForACopiedAtNoRunRecorded(t *testing.T) {
 		t.Fatal(err)
 	}
 	var logged bytes.Buffer
-	r := &backupRun{
+	r := &backupRun{pub: runPub,
 		dst: &stubDest{objs: map[string][]byte{"github.com/octo/manifests/20260901T120000Z.manifest.json": raw}},
 		log: slog.New(slog.NewTextHandler(&logged, nil)),
 		now: func() time.Time { return now },
@@ -349,7 +352,18 @@ func TestThePreviousCopyIsNotReliedOnForACopiedAtNoRunRecorded(t *testing.T) {
 	}
 }
 
+// runKey is the signing key of the runs these tests stand in for, and runPub its public half,
+// which the backupRun under test verifies their manifests with.
+var (
+	runKey = ed25519.NewKeyFromSeed(bytes.Repeat([]byte{7}, ed25519.SeedSize))
+	runPub = runKey.Public().(ed25519.PublicKey)
+)
+
 // stubDest is read-only: loadPrevious only ever lists and gets.
+//
+// It is the bucket of runs that sign with runKey: a manifest stored without a signature beside it
+// is served with runKey's. A test that wants a manifest the run cannot verify stores a .sig of its
+// own.
 type stubDest struct{ objs map[string][]byte }
 
 func (s *stubDest) VerifyWorm(context.Context) (dest.WormStatus, error) {
@@ -369,6 +383,11 @@ func (s *stubDest) List(_ context.Context, prefix string) ([]dest.Object, error)
 }
 func (s *stubDest) Get(_ context.Context, key string) (io.ReadCloser, error) {
 	b, ok := s.objs[key]
+	if manifest, isSig := strings.CutSuffix(key, ".sig"); !ok && isSig && strings.HasSuffix(manifest, manifestSuffix) {
+		if raw, stored := s.objs[manifest]; stored {
+			b, ok = []byte(base64.StdEncoding.EncodeToString(crypto.Sign(runKey, raw))), true
+		}
+	}
 	if !ok {
 		return nil, errors.New("no such key")
 	}

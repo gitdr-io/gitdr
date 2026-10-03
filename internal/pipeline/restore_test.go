@@ -321,7 +321,7 @@ func TestRestorePicksTheManifestThatRecordsTheBundle(t *testing.T) {
 	ctx := context.Background()
 	f := backupForRestore(t, false)
 
-	resumeRun := func(hour int, signer ed25519.PrivateKey) {
+	resumeRun := func(hour int, signer ed25519.PrivateKey, want string) {
 		t.Helper()
 		src := &fixtureSource{repos: []source.Repo{{
 			Host: "github.com", Owner: "octo", Name: f.name,
@@ -335,11 +335,11 @@ func TestRestorePicksTheManifestThatRecordsTheBundle(t *testing.T) {
 			SigningKey: signer, ToolVersion: "test",
 			Now: func() time.Time { return time.Date(2026, 6, 13, hour, 0, 0, 0, time.UTC) },
 		})
-		if err != nil {
-			t.Fatalf("resume backup: %v", err)
+		if res == nil || res.ManifestKey == "" {
+			t.Fatalf("resume backup wrote no manifest: %v", err)
 		}
-		if res.Manifest.Repos[0].Status != pipeline.StatusSkipped {
-			t.Fatalf("resume run status = %s, want skipped", res.Manifest.Repos[0].Status)
+		if got := res.Manifest.Repos[0]; got.Status != want {
+			t.Fatalf("resume run = %s %q %q, want %s", got.Status, got.Reason, got.Error, want)
 		}
 	}
 
@@ -348,8 +348,10 @@ func TestRestorePicksTheManifestThatRecordsTheBundle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resumeRun(13, sameSigner)
-	// 14:00, rotated key: newest of the three, and does not verify with f.pub.
+	resumeRun(13, sameSigner, pipeline.StatusSkipped)
+	// 14:00, rotated key: newest of the three, and does not verify with f.pub. That run cannot
+	// verify the manifests that record the copy either, so it fails the repository by name rather
+	// than skip it on evidence it cannot check, and still files its own manifest.
 	_, rotatedPEM, err := crypto.GenerateKeyPair()
 	if err != nil {
 		t.Fatal(err)
@@ -358,7 +360,7 @@ func TestRestorePicksTheManifestThatRecordsTheBundle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resumeRun(14, rotated)
+	resumeRun(14, rotated, pipeline.StatusFailed)
 
 	res, err := pipeline.Restore(ctx, pipeline.RestoreDeps{Dest: f.md, Git: gitexec.New(nil), PublicKey: f.pub}, pipeline.RestoreRequest{
 		Host: "github.com", Owner: "octo", Name: f.name, Date: "2026-06-13",

@@ -56,9 +56,13 @@ func Backup(ctx context.Context, d BackupDeps) (*BackupResult, error) {
 	if d.SigningKey == nil {
 		return nil, errors.New("backup: manifest signing key is required")
 	}
+	pub, ok := d.SigningKey.Public().(ed25519.PublicKey)
+	if !ok {
+		return nil, errors.New("backup: the manifest signing key has no Ed25519 public half")
+	}
 	r := &backupRun{
 		cfg: d.Config, src: d.Source, dst: d.Dest, git: d.Git,
-		signer: d.SigningKey, encKey: d.EncryptionKey, toolVersion: d.ToolVersion,
+		signer: d.SigningKey, pub: pub, encKey: d.EncryptionKey, toolVersion: d.ToolVersion,
 		log: orDefault(d.Logger), now: orNow(d.Now), requireWORM: d.RequireWORM,
 		deadline: d.Deadline,
 	}
@@ -66,11 +70,14 @@ func Backup(ctx context.Context, d BackupDeps) (*BackupResult, error) {
 }
 
 type backupRun struct {
-	cfg         *config.Config
-	src         source.Source
-	dst         dest.Destination
-	git         *gitexec.Git
-	signer      ed25519.PrivateKey
+	cfg    *config.Config
+	src    source.Source
+	dst    dest.Destination
+	git    *gitexec.Git
+	signer ed25519.PrivateKey
+	// pub is the signer's public half. Every previous manifest a skip relies on has to verify
+	// with it: the next run's comparison and a same-day rerun's search alike.
+	pub         ed25519.PublicKey
 	encKey      []byte
 	toolVersion string
 	log         *slog.Logger
@@ -141,7 +148,7 @@ func (r *backupRun) run(ctx context.Context) (*BackupResult, error) {
 		selected[repo.Slug()] = true
 	}
 	r.previous = r.loadPrevious(work, manifestDir(repos), selected)
-	r.copies = newCopySearch(r.dst, nil, r.log, func(slug string) bool { return selected[slug] })
+	r.copies = newCopySearch(r.dst, r.pub, r.log, func(slug string) bool { return selected[slug] })
 
 	entries := r.fanOut(work, repos, ret)
 	allOK := true

@@ -1,10 +1,12 @@
 package pipeline_test
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
+	"log/slog"
 	"path"
 	"strings"
 	"testing"
@@ -15,8 +17,9 @@ import (
 	"gitdr.io/gitdr/internal/pipeline"
 )
 
-// A skip trusts only evidence a run could have produced. The Vault record's gate 5, for the two
-// checks that need no signature: a copy's copiedAt, and the time the store wrote an object.
+// A skip trusts only evidence a run could have produced: the Vault record's gate 5. The manifest a
+// skip relies on verifies with the run's own key, the copiedAt it records is one a run could have
+// recorded, and the store wrote each object under a date on that date.
 
 // plantManifest stores a copy of the manifest at from, finished at finished and edited by edit,
 // under the name of that finish, signed with signer, as if the store had written it then. It
@@ -97,6 +100,73 @@ func TestASkipRefusesACopiedAtNoRunCouldHaveRecorded(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// A skip relies only on a manifest that verifies with the run's own key.
+//
+// The previous manifest was read without its signature, on the reasoning that a forged one could
+// only make gitdr skip a repository. But a skip relies on a copy: a forged manifest naming a copy
+// that was never made kept that repository uncopied, every run green, until the refresh. Here the
+// forger writes to the bucket and does not hold the signing key, which is what the create-only
+// credential and the key's separate custody are for.
+func TestASkipReliesOnlyOnAManifestTheRunCanVerify(t *testing.T) {
+	day1 := time.Date(2026, 6, 13, 9, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name string
+		at   time.Time // when the run that meets the forged manifest runs
+		// plant puts objects for octo/b under the date, as a same-day forgery needs.
+		plant bool
+		want  string // what that run must record for octo/b
+	}{
+		{"the next day, comparing refs", day1.AddDate(0, 0, 1), false, pipeline.StatusSuccess},
+		{"a same-day rerun", day1.Add(3 * time.Hour), true, pipeline.StatusFailed},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Chdir(t.TempDir())
+			md := newMemDest(true)
+			signer, forger := testSigner(t), testSigner(t)
+			repos := slugRepos("github.com", initFixtureRepo(t), "octo/a", "octo/b")
+			// Only octo/a is copied. Both come from the same fixture, so the copy of octo/a has
+			// exactly the refs octo/b advertises.
+			first := backupAt(t, md, signer, day1, repos[:1])
+
+			plantManifest(t, md, forger, first.ManifestKey, day1.Add(time.Hour), func(m *pipeline.Manifest) {
+				e := &m.Repos[0]
+				e.Slug = "octo/b"
+				for i := range e.Artifacts {
+					e.Artifacts[i].Key = strings.ReplaceAll(e.Artifacts[i].Key, "/a/2026-06-13/a.", "/b/2026-06-13/b.")
+				}
+			})
+			if tc.plant {
+				md.mu.Lock()
+				for _, name := range []string{"b.bundle", "b.meta.json", "b.sha256"} {
+					key := "github.com/octo/b/2026-06-13/" + name
+					md.objs[key], md.modified[key] = []byte("planted"), day1.Add(time.Hour)
+				}
+				md.mu.Unlock()
+			}
+
+			var logged bytes.Buffer
+			md.storeAt(tc.at)
+			res, err := pipeline.Backup(context.Background(), pipeline.BackupDeps{
+				Config: testConfig(), Source: &fixtureSource{repos: repos}, Dest: md, Git: gitexec.New(nil),
+				SigningKey: signer, ToolVersion: "test", Logger: slog.New(slog.NewTextHandler(&logged, nil)),
+				Now: func() time.Time { return tc.at },
+			})
+			var b pipeline.RepoEntry
+			for _, e := range res.Manifest.Repos {
+				if e.Slug == "octo/b" {
+					b = e
+				}
+			}
+			if b.Status != tc.want {
+				t.Fatalf("octo/b = %s %q %q (err %v), want %s: the run relied on a manifest its key does not sign", b.Status, b.Reason, b.Error, err, tc.want)
+			}
+			if !strings.Contains(logged.String(), "does not match its signature") {
+				t.Errorf("no warning says the forged manifest's signature does not hold:\n%s", logged.String())
+			}
+		})
 	}
 }
 

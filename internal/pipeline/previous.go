@@ -62,6 +62,20 @@ const maxPreviousManifests = 10
 // could not read its own bookkeeping would be a worse product than one that never had the
 // optimisation.
 func (r *backupRun) loadPrevious(ctx context.Context, dir string, selected map[string]bool) map[string]previousCopy {
+	// Every manifest read here has to verify with this run's own key before anything in it is
+	// believed.
+	//
+	// This used not to check, on the reasoning that a forged manifest could only make gitdr skip
+	// a repository, which writes nothing and removes nothing. But a skip relies on a copy, and a
+	// forged entry can name a copy that never existed: the repository is then not copied until
+	// the refresh, while every run reports it protected, and where a lifecycle rule deletes copies
+	// whose lock has ended, the copy the skip relied on can be gone as well. The cost of checking
+	// is one small read per manifest. A key rotated since a manifest was signed fails the check
+	// like a forgery, and costs one full copy of what that manifest recorded.
+	if r.pub == nil {
+		r.log.Warn("no key to verify the previous manifests with; every repository will be copied")
+		return nil
+	}
 	now := r.now()
 	objs, err := r.dst.List(ctx, dir+"/")
 	if err != nil {
@@ -69,17 +83,6 @@ func (r *backupRun) loadPrevious(ctx context.Context, dir string, selected map[s
 		return nil
 	}
 
-	// The manifest is signed, and this does not check the signature.
-	//
-	// That is deliberate and it is safe for exactly one reason: the worst an attacker who
-	// could forge this file achieves is making gitdr skip a repository, which withholds a new
-	// copy and cannot touch, alter or remove any copy that already exists — the destination
-	// has no delete and no overwrite. It is a denial of freshness, not of integrity, and it
-	// requires write access to a create-only bucket that gitdr itself refuses to overwrite.
-	//
-	// Verifying here would mean carrying the public half into the backup path and reading a
-	// second object per run to get the signature. `gitdr verify` checks it properly, on the
-	// path where the answer is load-bearing.
 	out := map[string]previousCopy{}
 	decided := map[string]bool{}
 	sizes := listedSizes(objs)
@@ -102,7 +105,7 @@ func (r *backupRun) loadPrevious(ctx context.Context, dir string, selected map[s
 		// What the skip needs of each entry, and only of the repositories still undecided: the
 		// rest of a large manifest is ref maps of repositories this run does not need.
 		var entries []RepoEntry
-		head, err := readManifestEntries(ctx, r.dst, nil, key, func(e RepoEntry) {
+		head, err := readManifestEntries(ctx, r.dst, r.pub, key, func(e RepoEntry) {
 			if decided[e.Slug] || (selected != nil && !selected[e.Slug]) {
 				return
 			}

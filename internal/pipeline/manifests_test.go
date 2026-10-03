@@ -216,7 +216,7 @@ func TestTheNextBackupReadsTheNewestManifestItCanTrust(t *testing.T) {
 				objs[k] = v
 			}
 			var logged bytes.Buffer
-			r := &backupRun{
+			r := &backupRun{pub: runPub,
 				dst: &stubDest{objs: objs}, log: slog.New(slog.NewTextHandler(&logged, nil)),
 				now: func() time.Time { return sept(2, 12) },
 			}
@@ -269,7 +269,7 @@ func previousManifests(t *testing.T, newest time.Time, runs ...map[string]string
 // newest one that has an entry for it. A failed entry decides too: its repository has no copy to
 // rely on, and an older copy of it is not believed over that.
 func TestThePreviousReadMergesTheRecentManifestsNewestFirst(t *testing.T) {
-	r := &backupRun{log: slog.New(slog.DiscardHandler), now: func() time.Time { return now }}
+	r := &backupRun{pub: runPub, log: slog.New(slog.DiscardHandler), now: func() time.Time { return now }}
 	r.dst = &stubDest{objs: previousManifests(t, now.Add(-time.Hour),
 		map[string]string{"octo/z": "z1", "octo/y": "y1", "octo/gone": "g1"},
 		map[string]string{"octo/y": "y2", "octo/x": "x2", "octo/gone": "failed"},
@@ -293,7 +293,7 @@ func TestThePreviousReadKeepsOnlyTheSelectedRepositories(t *testing.T) {
 		map[string]string{"octo/x": "x1", "octo/other": "o1"},
 		map[string]string{"octo/x": "x2", "octo/y": "y2"},
 	)}}
-	r := &backupRun{dst: counted, log: slog.New(slog.DiscardHandler), now: func() time.Time { return now }}
+	r := &backupRun{pub: runPub, dst: counted, log: slog.New(slog.DiscardHandler), now: func() time.Time { return now }}
 	got := r.loadPrevious(context.Background(), "github.com/octo/manifests", map[string]bool{"octo/x": true, "octo/y": true})
 	if len(got) != 2 || got["octo/x"].refs["refs/heads/main"] != "x2" || got["octo/y"].refs["refs/heads/main"] != "y2" {
 		t.Errorf("read %v, want octo/x and octo/y from the newest manifest", got)
@@ -313,7 +313,7 @@ func TestThePreviousReadIsBounded(t *testing.T) {
 		runs = append(runs, map[string]string{slug: "c"})
 		selected[slug] = true
 	}
-	r := &backupRun{
+	r := &backupRun{pub: runPub,
 		dst: &stubDest{objs: previousManifests(t, now.Add(-time.Hour), runs...)},
 		log: slog.New(slog.DiscardHandler), now: func() time.Time { return now },
 	}
@@ -340,14 +340,16 @@ func TestThePreviousReadIsBounded(t *testing.T) {
 	}
 }
 
-// countingStub counts the objects read out of a stubDest.
+// countingStub counts the manifests read out of a stubDest, their signatures aside.
 type countingStub struct {
 	stubDest
 	gets int
 }
 
 func (c *countingStub) Get(ctx context.Context, key string) (io.ReadCloser, error) {
-	c.gets++
+	if strings.HasSuffix(key, manifestSuffix) {
+		c.gets++
+	}
 	return c.stubDest.Get(ctx, key)
 }
 

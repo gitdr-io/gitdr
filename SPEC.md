@@ -506,6 +506,16 @@ with a few large repositories passes because `--mirror` brings every `refs/pull/
 logged it at debug and copied everything, and restore and drill refused the manifest, while
 `verify` read a manifest of any size. *Changed in v0.1.21.*
 
+**A skip relies only on a manifest the run can verify, from v0.1.21.** Every manifest the
+comparison reads, and every manifest a same-day rerun relies on, has to verify with the public
+half of the run's own signing key before anything in it is believed. One that does not is passed
+over with a warning. Up to v0.1.20 the comparison read the previous manifest without its
+signature, on the reasoning that a forged one could only make gitdr skip a repository. But a skip
+relies on a copy, and a forged entry could name a copy that was never made and keep the
+repository uncopied, every run green, until the refresh. A signing key rotated since a manifest
+was written fails the check as a forgery does: the next run copies what that manifest recorded,
+once, and a same-day rerun fails by name the repositories copied under the old key that day.
+
 Skipping is reported as `status: "skipped"` with a `reason`, the same shape already used for a
 repository with no commits — additive, and a consumer switching on `status` sees a value it
 already knows.
