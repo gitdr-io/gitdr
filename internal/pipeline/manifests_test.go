@@ -242,7 +242,8 @@ func TestTheNextBackupReadsTheNewestManifestItCanTrust(t *testing.T) {
 
 // previousManifests is one manifest per element, each finished an hour before the one after it,
 // the last at newest. Each names the repositories in its map, with the commit as their one ref; a
-// commit of "failed" records the repository as failed.
+// commit of "failed" records the repository as failed with part of a copy written, and "stopped"
+// as failed with nothing written.
 func previousManifests(t *testing.T, newest time.Time, runs ...map[string]string) map[string][]byte {
 	t.Helper()
 	objs := map[string][]byte{}
@@ -251,8 +252,12 @@ func previousManifests(t *testing.T, newest time.Time, runs ...map[string]string
 		m := Manifest{Schema: ManifestSchema, FinishedAt: finished}
 		for _, slug := range slices.Sorted(maps.Keys(run)) {
 			e := RepoEntry{Slug: slug, Status: StatusSuccess, Refs: []RefEntry{{Name: "refs/heads/main", Commit: run[slug]}}}
-			if run[slug] == "failed" {
-				e = RepoEntry{Slug: slug, Status: StatusFailed, Error: "it failed"}
+			switch run[slug] {
+			case "failed":
+				e = RepoEntry{Slug: slug, Status: StatusFailed, Error: "it failed",
+					Artifacts: []ArtifactInfo{{Kind: "bundle", Key: "github.com/" + slug + "/r.bundle", Size: 1, SHA256: "h"}}}
+			case "stopped":
+				e = RepoEntry{Slug: slug, Status: StatusFailed, Error: "stopped before it finished: terminated signal received"}
 			}
 			m.Repos = append(m.Repos, e)
 		}
@@ -266,24 +271,29 @@ func previousManifests(t *testing.T, newest time.Time, runs ...map[string]string
 }
 
 // The next run reads the recent manifests newest first, and each repository is decided by the
-// newest one that has an entry for it. A failed entry decides too: its repository has no copy to
-// rely on, and an older copy of it is not believed over that.
+// newest one that has an entry for it. A failed entry that lists artifacts decides too: part of a
+// copy was written, and an older copy is not believed over that. A failed entry that lists none
+// wrote nothing, a repository a stopped run never started for one, and the read passes over it to
+// an older manifest, as if the entry were not there.
 func TestThePreviousReadMergesTheRecentManifestsNewestFirst(t *testing.T) {
 	r := &backupRun{pub: runPub, log: slog.New(slog.DiscardHandler), now: func() time.Time { return now }}
 	r.dst = &stubDest{objs: previousManifests(t, now.Add(-time.Hour),
-		map[string]string{"octo/z": "z1", "octo/y": "y1", "octo/gone": "g1"},
-		map[string]string{"octo/y": "y2", "octo/x": "x2", "octo/gone": "failed"},
-		map[string]string{"octo/x": "x3"},
+		map[string]string{"octo/z": "z1", "octo/y": "y1", "octo/gone": "g1", "octo/never": "n1"},
+		map[string]string{"octo/y": "y2", "octo/x": "x2", "octo/gone": "failed", "octo/never": "stopped"},
+		map[string]string{"octo/x": "x3", "octo/never": "stopped"},
 	)}
 	got := r.loadPrevious(context.Background(), "github.com/octo/manifests",
-		map[string]bool{"octo/x": true, "octo/y": true, "octo/z": true, "octo/gone": true})
+		map[string]bool{"octo/x": true, "octo/y": true, "octo/z": true, "octo/gone": true, "octo/never": true})
 	for slug, want := range map[string]string{"octo/x": "x3", "octo/y": "y2", "octo/z": "z1"} {
 		if c := got[slug].refs["refs/heads/main"]; c != want {
 			t.Errorf("%s: read %q, want %q, the newest manifest's", slug, c, want)
 		}
 	}
 	if c, ok := got["octo/gone"]; ok {
-		t.Errorf("octo/gone failed in a newer run, and its older copy %v was read anyway", c.refs)
+		t.Errorf("octo/gone failed with part of a copy written in a newer run, and its older copy %v was read anyway", c.refs)
+	}
+	if c := got["octo/never"].refs["refs/heads/main"]; c != "n1" {
+		t.Errorf("octo/never: read %q, want n1: the two newer runs were stopped before they wrote anything of it, and the older copy is the one there is", c)
 	}
 }
 

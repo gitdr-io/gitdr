@@ -254,3 +254,60 @@ func TestARepositoryTheRunStopsWaitingForKeepsWhatItWrote(t *testing.T) {
 		t.Errorf("verify of the stopped run's manifest: %v, %d artifacts ok, want the bundle", err, v.ArtifactsOK)
 	}
 }
+
+// A stopped run costs no copy of the repositories it never started.
+//
+// The run records each of them as failed, and the next run let the newest manifest's entry decide
+// whatever it said, so a failed entry sent its repository to a full copy. But those entries wrote
+// nothing. The copy each repository had before the stop is intact, and nothing in it changed. A
+// failed entry with no artifacts is now passed over, and the copy before it decides.
+func TestAStopCostsNoCopyOfTheRepositoriesItNeverStarted(t *testing.T) {
+	t.Chdir(t.TempDir())
+	_, signer := drillKeys(t)
+	var repos []source.Repo
+	for _, name := range []string{"r1", "r2", "r3"} {
+		repos = append(repos, source.Repo{Host: "github.com", Owner: "octo", Name: name, CloneURL: initFixtureRepo(t), DefaultBranch: "main"})
+	}
+	md := newMemDest(true)
+	day1 := time.Date(2026, 6, 13, 9, 0, 0, 0, time.UTC)
+	for _, e := range backupAt(t, md, signer, day1, repos).Manifest.Repos {
+		if e.Status != pipeline.StatusSuccess {
+			t.Fatalf("day 1: %s = %s %q", e.Slug, e.Status, e.Error)
+		}
+	}
+
+	// Day 2: r1 has a new commit, and the run is stopped while r1 is in flight. r2 and r3, which
+	// have not changed, are never started.
+	commit(t, repos[0].CloneURL, "CHANGED", "x")
+	day2 := day1.AddDate(0, 0, 1)
+	md.storeAt(day2)
+	ctx, stop := context.WithCancelCause(context.Background())
+	defer stop(nil)
+	cfg := testConfig()
+	cfg.Source.Repo = ""
+	cfg.Backup.Concurrency = 1
+	stopped, err := pipeline.Backup(ctx, pipeline.BackupDeps{
+		Config: cfg, Source: &stoppingSource{fixtureSource: &fixtureSource{repos: repos}, at: "r1", stop: stop},
+		Dest: contextDest{md}, Git: gitexec.New(nil), SigningKey: signer, ToolVersion: "test",
+		Now: func() time.Time { return day2 },
+	})
+	if err == nil || stopped == nil || stopped.ManifestKey == "" {
+		t.Fatalf("day 2 is a stopped run with a manifest: %v", err)
+	}
+	for _, e := range stopped.Manifest.Repos {
+		if e.Status != pipeline.StatusFailed || len(e.Artifacts) != 0 {
+			t.Fatalf("day 2: %s = %s with %d artifacts, want failed with none", e.Slug, e.Status, len(e.Artifacts))
+		}
+	}
+
+	// Day 3: r1 is copied, since it changed and the stopped run copied nothing of it. r2 and r3 are
+	// as they were on day 1, and nothing was written for them since.
+	for _, e := range backupAt(t, md, signer, day1.AddDate(0, 0, 2), repos).Manifest.Repos {
+		switch {
+		case e.Slug == "octo/r1" && e.Status != pipeline.StatusSuccess:
+			t.Errorf("day 3: octo/r1 = %s %q, want copied: it changed on day 2", e.Status, e.Reason)
+		case e.Slug != "octo/r1" && (e.Status != pipeline.StatusSkipped || !strings.HasPrefix(e.Reason, "unchanged since 2026-06-13")):
+			t.Errorf("day 3: %s = %s %q, want skipped as unchanged since 2026-06-13: the stopped run never started it, and its day-1 copy is intact", e.Slug, e.Status, e.Reason)
+		}
+	}
+}

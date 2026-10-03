@@ -496,15 +496,20 @@ retention period, capped at thirty days. See `internal/pipeline/unchanged.go`.
 
 **Which runs the comparison reads, from v0.1.21.** The next run reads the recent manifests filed
 in its own manifests directory, newest first, and each repository is decided by the newest one
-that has an entry for it, whatever the entry says: after a failed entry the repository is copied,
-and an older copy of it is not believed over that. The read stops once every repository the run
-selected is decided, after ten manifests, or at the first manifest that finished longer ago than
-the refresh bound, whose copies would all be refreshed anyway. A manifest that cannot be read, or
-that the loader refuses, is passed over with a warning, and nothing in it is believed. Each
-manifest is decoded one repository at a time, keeping only the selected repositories' refs and
-`copiedAt`. Up to v0.1.20 only the newest manifest was read, so one run over a single
-repository, which files its manifest in the organisation's directory, made the organisation's
-next run copy every other repository in full. *Changed in v0.1.21.*
+that has an entry for it. After a `failed` entry that lists artifacts the repository is copied:
+part of a copy was written, and an older copy of it is not believed over that. A `failed` entry
+that lists no artifacts is passed over as if it were not there, and an older manifest decides:
+nothing was written for the repository, as for one a stopped run never started, so the entry says
+nothing about the copy it already has. The read stops once every repository the run selected is
+decided, after ten manifests, or at the first manifest that finished longer ago than the refresh
+bound, whose copies would all be refreshed anyway. A manifest that cannot be read, or that the
+loader refuses, is passed over with a warning, and nothing in it is believed. Each manifest is
+decoded one repository at a time, keeping only the selected repositories' refs and `copiedAt`. Up
+to v0.1.20 only the newest manifest was read, so one run over a single repository, which files its
+manifest in the organisation's directory, made the organisation's next run copy every other
+repository in full. *Changed in v0.1.21. Amended 2026-10-04, before v0.1.21 was tagged: a failed
+entry with no artifacts decided too, so a stopped run cost a full copy of every repository it
+never started.*
 
 **How large a manifest gitdr reads, from v0.1.21.** Every reader, the next run, a same-day rerun,
 `restore`, `drill` and `verify`, reads at most 128 MiB of a manifest, about 1.5 million refs. One

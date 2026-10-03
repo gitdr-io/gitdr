@@ -41,10 +41,15 @@ const maxPreviousManifests = 10
 // repository slug in selected, what the newest one that mentions it recorded. A nil selected
 // keeps every repository.
 //
-// Newest first, and a repository is decided by the newest manifest that has an entry for it,
-// whatever that entry says: a failed one means no copy to rely on and the repository is copied.
-// The read stops once every selected repository is decided, after maxPreviousManifests, or at the
+// Newest first, and a repository is decided by the newest manifest that has an entry for it. The
+// read stops once every selected repository is decided, after maxPreviousManifests, or at the
 // first manifest older than the refresh bound, whose copies would all be refreshed anyway.
+//
+// A failed entry that lists artifacts decides too: part of a copy was written, and the repository
+// is copied rather than an older copy believed over it. A failed entry that lists none is passed
+// over as if it were not there. Nothing was written for the repository, a stopped run that never
+// started it being the common case, so the entry says nothing about the copies there are. Deciding
+// on it cost a stopped run a full copy of every repository it never reached.
 //
 // It used to read the newest manifest alone. One run over a single repository, filed in the same
 // directory as the organisation's runs, then hid every other repository from the next run over
@@ -108,6 +113,9 @@ func (r *backupRun) loadPrevious(ctx context.Context, dir string, selected map[s
 		head, err := readManifestEntries(ctx, r.dst, r.pub, key, func(e RepoEntry) {
 			if decided[e.Slug] || (selected != nil && !selected[e.Slug]) {
 				return
+			}
+			if e.Status == StatusFailed && len(e.Artifacts) == 0 {
+				return // wrote nothing, so an older manifest decides
 			}
 			entries = append(entries, RepoEntry{Slug: e.Slug, Status: e.Status, Refs: e.Refs, CopiedAt: e.CopiedAt})
 		})
