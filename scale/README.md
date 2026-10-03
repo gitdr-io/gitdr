@@ -135,6 +135,7 @@ These are environment variables, and all of them are optional.
 | `SCALE_RATE_LIMIT`, `SCALE_RATE_WINDOW` | 40, 10s | the rate-limit budget |
 | `SCALE_BIG`, `SCALE_BIG_PACK_BYTES`, `SCALE_BIG_LFS_BYTES` | off, 6 GiB, 8 GiB | the big fixture |
 | `SCALE_S3_RATE` | 8000000 | the proxy's throttle in bytes a second, 0 for none |
+| `SCALE_RECHUNK_BYTES` | 8388608 | the chunks the proxy splits a single-chunk body into; 0 sends it to MinIO as it came |
 | `SCALE_CONCURRENCY` | 4 | the engine's `backup.concurrency` |
 | `SCALE_KEEP` | off | 1 leaves the stack and the fixtures in place |
 | `SCALE_RESULTS_DIR` | `scale-results/` | where the report and the logs go |

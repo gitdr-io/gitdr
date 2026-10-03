@@ -65,6 +65,7 @@ type profile struct {
 	BigPackBytes  int64  `json:"bigPackBytes"`
 	BigLFSBytes   int64  `json:"bigLfsBytes"`
 	S3Rate        int64  `json:"s3RateBytesPerSecond"`
+	RechunkBytes  int64  `json:"rechunkBytes"`
 	Concurrency   int    `json:"concurrency"`
 	Keep          bool   `json:"keep"`
 	rateWindow    time.Duration
@@ -84,6 +85,7 @@ func loadProfile(moduleRoot string) (profile, error) {
 		BigPackBytes:  int64(envInt("SCALE_BIG_PACK_BYTES", 6<<30)),
 		BigLFSBytes:   int64(envInt("SCALE_BIG_LFS_BYTES", 8<<30)),
 		S3Rate:        int64(envInt("SCALE_S3_RATE", 8_000_000)),
+		RechunkBytes:  int64(envInt("SCALE_RECHUNK_BYTES", 8<<20)),
 		Concurrency:   envInt("SCALE_CONCURRENCY", 4),
 		Keep:          os.Getenv("SCALE_KEEP") == "1",
 		resultsDir:    os.Getenv("SCALE_RESULTS_DIR"),

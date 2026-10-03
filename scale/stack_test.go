@@ -126,7 +126,13 @@ func startStack(h *harness) (*stack, error) {
 			return nil, err
 		}
 	}
-	fmt.Fprintf(os.Stderr, "scale: object store at %s (s3limits in front of MinIO)\n", s.s3URL)
+	// 0 sends a single-chunk body to MinIO as it came, to show what MinIO does with what the
+	// engine sends; see s3limits.
+	if _, err := s.setRechunk(h.prof.RechunkBytes); err != nil {
+		s.down()
+		return nil, fmt.Errorf("setting the proxy's re-chunking: %w", err)
+	}
+	fmt.Fprintf(os.Stderr, "scale: object store at %s (s3limits in front of MinIO, re-chunking at %d bytes)\n", s.s3URL, h.prof.RechunkBytes)
 	return s, nil
 }
 
