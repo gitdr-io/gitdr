@@ -108,6 +108,10 @@ func TestVerifyWormSaysImmutableOnlyOnALockedPolicy(t *testing.T) {
 		want     dest.WormVerdict
 		details  []string
 		wantErr  bool
+		// notInDetails is text Resource Manager sent that must not reach Details, which a
+		// signed manifest carries; refusal says Refusal holds the error it answered with.
+		notInDetails []string
+		refusal      bool
 	}{
 		{
 			name:     "version-level immutability alone, without Resource Manager",
@@ -188,6 +192,14 @@ func TestVerifyWormSaysImmutableOnlyOnALockedPolicy(t *testing.T) {
 			details:  []string{`"Frozen"`},
 		},
 		{
+			name:         "a state that is not shaped like one",
+			endpoint:     endpointSays(yes, no, no),
+			rm:           withPolicy("Frozen <b>until further notice</b>", ptr(int32(30)), false),
+			want:         dest.VerdictUnknown,
+			details:      []string{`"unnamed"`},
+			notInDetails: []string{"further notice"},
+		},
+		{
 			name:     "version-level immutability and no container policy",
 			endpoint: endpointSays(no, yes, no),
 			rm: &resourceManager{says: armstorage.BlobContainer{ContainerProperties: &armstorage.ContainerProperties{
@@ -227,6 +239,7 @@ func TestVerifyWormSaysImmutableOnlyOnALockedPolicy(t *testing.T) {
 			rm:       &resourceManager{err: &azcore.ResponseError{ErrorCode: "AuthorizationFailed", StatusCode: 403}},
 			want:     dest.VerdictUnknown,
 			details:  []string{"AuthorizationFailed"},
+			refusal:  true,
 		},
 		{
 			name:     "Resource Manager refuses without a code",
@@ -234,6 +247,16 @@ func TestVerifyWormSaysImmutableOnlyOnALockedPolicy(t *testing.T) {
 			rm:       &resourceManager{err: &azcore.ResponseError{StatusCode: 404}},
 			want:     dest.VerdictUnknown,
 			details:  []string{"HTTP 404"},
+			refusal:  true,
+		},
+		{
+			name:         "Resource Manager refuses with a code that is not shaped like one",
+			endpoint:     endpointSays(yes, no, no),
+			rm:           &resourceManager{err: &azcore.ResponseError{ErrorCode: "Denied; call +1 555 0100", StatusCode: 403}},
+			want:         dest.VerdictUnknown,
+			details:      []string{"Resource Manager answered unnamed"},
+			notInDetails: []string{"555"},
+			refusal:      true,
 		},
 		{
 			// No token, no network: the pipeline records unknown and logs the error, the same
@@ -271,6 +294,14 @@ func TestVerifyWormSaysImmutableOnlyOnALockedPolicy(t *testing.T) {
 				if !strings.Contains(st.Details, d) {
 					t.Errorf("details %q do not say %q", st.Details, d)
 				}
+			}
+			for _, d := range tc.notInDetails {
+				if strings.Contains(st.Details, d) {
+					t.Errorf("details %q carry %q, which Resource Manager wrote", st.Details, d)
+				}
+			}
+			if (st.Refusal != nil) != tc.refusal {
+				t.Errorf("Refusal = %v, want one: %v", st.Refusal, tc.refusal)
 			}
 			if tc.rm != nil && tc.rm.asked != "rg/acct/backups" {
 				t.Errorf("Resource Manager was asked about %q, want the container being written to (rg/acct/backups)", tc.rm.asked)

@@ -182,6 +182,30 @@ func (b *Backend) List(ctx context.Context, prefix string) ([]dest.Object, error
 	return out, nil
 }
 
+// ListPage lists at most limit objects under prefix from the first page of a listing (read-only),
+// and says whether the store reported more. A page that holds limit objects is one request. The
+// library asks again when a page comes back short of limit with a continuation token, an empty
+// page included, and nothing here can stop that loop.
+func (b *Backend) ListPage(ctx context.Context, prefix string, limit int) ([]dest.Object, bool, error) {
+	if limit < 1 {
+		return nil, false, fmt.Errorf("gcs: list %q: a page holds at least 1 object, not %d", prefix, limit)
+	}
+	q := &storage.Query{Prefix: prefix}
+	if err := q.SetAttrSelection([]string{"Name", "Size"}); err != nil {
+		return nil, false, fmt.Errorf("gcs: list %q: %w", prefix, err)
+	}
+	var page []*storage.ObjectAttrs
+	next, err := iterator.NewPager(b.bucket.Objects(ctx, q), limit, "").NextPage(&page)
+	if err != nil {
+		return nil, false, fmt.Errorf("gcs: list %q: %w", prefix, err)
+	}
+	objs := make([]dest.Object, 0, len(page))
+	for _, attrs := range page {
+		objs = append(objs, dest.Object{Key: attrs.Name, Size: attrs.Size})
+	}
+	return objs, next != "", nil
+}
+
 // Get opens key for reading (read-only). Caller closes the reader.
 func (b *Backend) Get(ctx context.Context, key string) (io.ReadCloser, error) {
 	rc, err := b.bucket.Object(key).NewReader(ctx)

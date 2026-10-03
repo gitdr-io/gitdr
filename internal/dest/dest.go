@@ -9,6 +9,7 @@ package dest
 import (
 	"context"
 	"io"
+	"regexp"
 	"time"
 )
 
@@ -84,7 +85,33 @@ type WormStatus struct {
 	// a state neither of them meant, and nothing outside a test ever read Enabled.
 	Verdict WormVerdict
 	Mode    string // observed default mode, if any (e.g. "COMPLIANCE")
-	Details string // human-readable detail for logs and `gitdr doctor`
+	// Details is a sentence for logs, the manifest and `gitdr doctor`. gitdr writes it: a token
+	// the store sent, such as an error code, goes in only through ShapedCode.
+	Details string
+	// Refusal is the error the store answered with when it declined the question, the one behind
+	// an unknown verdict, and nil otherwise. It carries the store's own words, so it goes to a log
+	// and never into a manifest or onto stdout. `gitdr doctor` reads its error code from it.
+	Refusal error
+}
+
+// UnnamedCode is what ShapedCode returns for a code that does not have the shape of one.
+const UnnamedCode = "unnamed"
+
+// The shape of an error code: a letter, then up to 63 letters, digits and dots. S3, Azure and
+// Cloud Storage name their errors with single words of this shape (AccessDenied,
+// ObjectLockConfigurationNotFoundError, AuthorizationFailed, notFound).
+var codeShape = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9.]{0,63}$`)
+
+// ShapedCode returns code when it has the shape of an error code, and UnnamedCode otherwise.
+//
+// A store's error code is text the store wrote, and it reaches a log, a signed manifest and the
+// document `gitdr doctor` prints. Shaped like this it can name a condition and nothing more: no
+// sentence, markup, URL or terminal escape fits in it.
+func ShapedCode(code string) string {
+	if codeShape.MatchString(code) {
+		return code
+	}
+	return UnnamedCode
 }
 
 // PutResult describes the outcome of a successful immutable write.
@@ -132,6 +159,20 @@ type Destination interface {
 	// Get opens an object for reading. Read-only; used by restore/verify. The caller
 	// closes the returned reader.
 	Get(ctx context.Context, key string) (io.ReadCloser, error)
+}
+
+// PageLister is an optional interface for Destinations that can list one page of a prefix with a
+// single request.
+//
+// List walks every page under a prefix. That is right for restore and verify, which need every
+// key, and wrong for a diagnostic that needs any one object: thousands of requests on a large
+// bucket, and no end at all against an endpoint that answers every page with another one.
+type PageLister interface {
+	// ListPage lists at most limit objects under prefix from the first page of a listing and says
+	// whether the store reported more after them. It does not walk the listing: S3 and Azure send
+	// one request, and the Cloud Storage library asks again only past a page that came back empty
+	// with a continuation, which is a client loop this code cannot stop.
+	ListPage(ctx context.Context, prefix string, limit int) (objs []Object, more bool, err error)
 }
 
 // RetentionObservation is what a store said about one object's retention, after it was written.

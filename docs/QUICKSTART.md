@@ -214,6 +214,16 @@ gitdr backup --config config.yaml     # clone, bundle, sha256, immutable upload,
 `doctor` writes nothing. `backup` exits non-zero on any failure, so treat that as a failed
 backup. The run prints the manifest key.
 
+To check only the bucket, before any source is set up, run
+
+```sh
+gitdr doctor --config config.yaml --only destination
+```
+
+It reads the destination block and nothing else, so the config needs no source and the machine
+needs no git. Add `--output json` for a document a script can read. Its `verdict` says what the
+bucket locks, see [`../SPEC.md`](../SPEC.md) §11.
+
 ## 8. Verify
 
 ```sh

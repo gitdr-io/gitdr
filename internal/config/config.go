@@ -253,6 +253,13 @@ func (c *Config) Validate() error {
 	default:
 		return fmt.Errorf("source.type %q unsupported (github | gitlab)", c.Source.Type)
 	}
+	return c.ValidateDestination()
+}
+
+// ValidateDestination checks the destination block alone, retention included, and nothing about
+// the source. `gitdr doctor -only destination` checks a bucket with it, so a config written before
+// any source is connected loads there; every other command calls Validate, which checks both.
+func (c *Config) ValidateDestination() error {
 	switch c.Destination.Type {
 	case "s3":
 		if strings.TrimSpace(c.Destination.S3.Bucket) == "" {

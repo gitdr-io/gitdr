@@ -377,3 +377,33 @@ func TestValidateDoesNotTouchTheTokenFile(t *testing.T) {
 		t.Errorf("Validate read the GitHub credential: %v", err)
 	}
 }
+
+// ValidateDestination checks the destination block and nothing about the source, which is how
+// `doctor -only destination` checks a bucket before anything is connected to back up into it.
+// Validate still refuses a source it does not know, for every other command.
+func TestValidateDestinationLeavesTheSourceAlone(t *testing.T) {
+	c := Default()
+	c.Source.Type = ""
+	c.Destination.S3.Bucket = "b"
+	if err := c.ValidateDestination(); err != nil {
+		t.Errorf("a destination with no source rejected: %v", err)
+	}
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "source.type") {
+		t.Errorf("Validate = %v, want the missing source refused", err)
+	}
+
+	for _, broken := range []func(*Config){
+		func(c *Config) { c.Destination.S3.Bucket = "" },
+		func(c *Config) { c.Destination.Type = "ftp" },
+		func(c *Config) { c.Destination.Retention.Mode = "BOGUS" },
+		func(c *Config) { c.Destination.Retention.Days = 0 },
+	} {
+		c := Default()
+		c.Source.Type = ""
+		c.Destination.S3.Bucket = "b"
+		broken(c)
+		if err := c.ValidateDestination(); err == nil {
+			t.Errorf("a broken destination accepted: %+v", c.Destination)
+		}
+	}
+}

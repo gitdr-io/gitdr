@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"strings"
 	"testing"
 	"time"
 
@@ -66,5 +67,46 @@ func TestGCSBackend(t *testing.T) {
 	}
 	if st.Verdict.Immutable() {
 		t.Error("emulator should not report a locked retention policy")
+	}
+}
+
+// ListPage names the objects on the first page of a listing and says whether there are more,
+// which is how doctor finds an object to read a retention from without walking the bucket.
+func TestGCSListPage(t *testing.T) {
+	srv, err := fakestorage.NewServerWithOptions(fakestorage.Options{Scheme: "http"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Stop()
+	const bucket = "gitdr-listpage"
+	srv.CreateBucketWithOpts(fakestorage.CreateBucketOpts{Name: bucket})
+	ctx := context.Background()
+	b := newBackend(srv.Client(), bucket, nil)
+
+	for _, key := range []string{"github.com/octo/a.bundle", "github.com/octo/b.bundle", "github.com/octo/c.bundle"} {
+		data := []byte(key)
+		if _, err := b.PutImmutable(ctx, key, bytes.NewReader(data), int64(len(data)), dest.Retention{}); err != nil {
+			t.Fatalf("put %s: %v", key, err)
+		}
+	}
+
+	objs, more, err := b.ListPage(ctx, "github.com/octo/", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(objs) != 1 || !strings.HasPrefix(objs[0].Key, "github.com/octo/") || objs[0].Size == 0 {
+		t.Errorf("first page = %+v, want one object under the prefix, with its size", objs)
+	}
+	if !more {
+		t.Error("more = false with two objects after the page")
+	}
+
+	objs, more, err = b.ListPage(ctx, "github.com/nobody/", 1)
+	if err != nil || len(objs) != 0 || more {
+		t.Errorf("an empty prefix gave %+v, more %v, %v; want nothing and no more", objs, more, err)
+	}
+
+	if _, _, err := b.ListPage(ctx, "", 0); err == nil {
+		t.Error("a page of no objects was not refused")
 	}
 }

@@ -45,6 +45,12 @@ func TestEveryBackendCanBeAskedWhatRetentionLanded(t *testing.T) {
 				t.Errorf("%s does not implement RetentionObserver, so every run it writes records "+
 					"retention as not-checked and the manifest keeps a claim nobody confirmed", tc.name)
 			}
+			// doctor finds the object it reads the retention of with one page of the listing,
+			// and a backend that cannot list one page gets no retention check from it at all.
+			if _, ok := tc.b.(dest.PageLister); !ok {
+				t.Errorf("%s does not implement PageLister, so `gitdr doctor` never looks at what "+
+					"retention is on an object there", tc.name)
+			}
 		})
 	}
 }

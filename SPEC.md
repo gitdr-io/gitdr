@@ -1058,7 +1058,7 @@ Wikis are a separate git repository and are out of scope for the metadata dump.
 | `restore` | `{ "bundleKey", "sha256", "outDir", "verified" }` |
 | `verify`  | `{ "manifestKey", "signatureValid", "artifactsChecked", "artifactsOk", "failures": [...] }` |
 | `verify -drill` | `{ "drillKey", "signatureValid", "schema", "drillId", "manifestKey", "manifestSigned", "status", "eligible", "drilled", "failures": [...] }` |
-| `doctor`  | `{ "ok", "checks": [ { "name", "ok", "detail" } ] }` |
+| `doctor`  | `gitdr.doctor/v1`: `{ "schema", "ok", "checks": [ { "name", "ok", "detail" } ] }`, the `worm` check with `verdict`, `mode` and `code`, the `retention` check with `observed` (below) |
 
 `verify -drill <key>` checks a drill report's signature and reports what the document claims.
 It reads nothing back out of the bucket, which is why it has no artifact count: reusing
@@ -1142,3 +1142,97 @@ against stdout.
 *Added after `gitdr.manifest/v2`; the manifest schema is unchanged. Before it existed there
 was no supported way to learn the key, and consumers were reading it out of the `manifest
 written` log line.*
+
+### The doctor document (`gitdr.doctor/v1`)
+
+`gitdr doctor --output json` prints one document. It is not signed and not stored. It says what a
+destination answered at one moment, which makes it a diagnosis and not evidence about any backup.
+It carries a schema anyway, because a reader has to tell a document that can hold a verdict from
+one printed by an older engine, which has the same `ok` and `checks` and no verdict at all. A
+field that is absent is not the same as one that is null.
+
+```json
+{
+  "schema": "gitdr.doctor/v1",
+  "ok": true,
+  "checks": [
+    { "name": "config", "ok": true, "detail": "valid" },
+    { "name": "worm", "ok": true, "detail": "immutable, Object Lock enabled; default retention COMPLIANCE",
+      "verdict": "immutable", "mode": "COMPLIANCE", "code": null },
+    { "name": "retention", "ok": true, "detail": "an object here is held until 2026-11-02T12:00:00Z",
+      "observed": "present" }
+  ]
+}
+```
+
+`ok` and the exit code mean what they meant before v1. `ok` is false, and the exit code 1, when a
+check failed, and a check fails only on what would fail a backup. So a bucket that locks nothing
+passes unless `worm.require` is set. **To learn what a bucket locks, read `verdict`, never `ok`.**
+
+A reader finds a check by its `name`: `git`, `git-lfs`, `config`, `encryption key` when encryption
+is on, `source` or `source auth`, `destination` when the destination could not be set up, `worm`
+and `retention`. A config that fails validation ends the document at `config`, and a destination
+that cannot be set up ends it at `destination`. Either way there is no `worm` check, and so no
+verdict to read.
+
+Every check has `name`, `ok` and `detail`. `detail` is a sentence gitdr wrote, for a person, and
+nothing should parse it. The `worm` check always has three fields more, each `null` when there is
+nothing to say.
+
+| field | values |
+|---|---|
+| `verdict` | `immutable`, `not-immutable` or `unknown`, meaning what `destination.wormVerdict` means in the manifest (v4 above). `null` when the check ended in an error instead of an answer, and then `code` says which |
+| `mode` | `COMPLIANCE` or `GOVERNANCE` for an S3 bucket's default retention, `RETENTION` for a Cloud Storage retention policy, `IMMUTABILITY` for an Azure container policy. `null` when there is none, or the store named a mode gitdr does not know |
+| `code` | `null` when the store answered the question. Otherwise the store's own error code (S3's `Code`, Azure's error code, the reason in a Cloud Storage error) if it matches `^[A-Za-z][A-Za-z0-9.]{0,63}$`, `unnamed` if the store's code does not, or one of the six below for a failure that carries no code |
+
+| code | the failure |
+|---|---|
+| `dns` | the endpoint's host name did not resolve |
+| `connect` | no connection, or it broke before the answer was complete |
+| `tls` | the TLS handshake or the certificate was refused, or an `https` endpoint answered in plain HTTP |
+| `timeout` | no answer in time, or the run was stopped before one came |
+| `too-large` | an answer ran past 1 MiB, the most doctor reads of one |
+| `not-s3` | an answer that is not the storage API's, such as an HTML page or a body that does not parse, or a failure none of the other codes names |
+
+`unknown` with a code is a store that declined the question. That covers `AccessDenied` and
+`NotImplemented`, and codes that say the key, the bucket name or the region is wrong, such as
+`InvalidAccessKeyId`, `SignatureDoesNotMatch`, `NoSuchBucket`, `PermanentRedirect` and
+`AuthorizationHeaderMalformed`. `not-immutable` comes without a code, since the store answered.
+
+The `retention` check is there when the `worm` check says `immutable` and the destination can be
+asked. It has `observed`.
+
+| value | what it means |
+|---|---|
+| `present` | the store returned a retention for an object already under the destination |
+| `absent` | the store said that object holds none. The earned negative of v5 above, and a failed check under `worm.require` |
+| `unreadable` | the listing or the read failed, or the store would not say. On S3 the read needs `s3:GetObjectRetention`, which a create-only key does not have |
+| `none` | the first page of the listing held no object, so there was nothing to look at |
+
+What doctor guarantees about its reads and writes:
+
+- **No text the store wrote reaches stdout**, in either output, except a `code` of the shape above.
+  That shape can name a condition and carry nothing else. The store's own error goes to stderr,
+  with the log.
+- **Reads are bounded.** The object comes from one page of the listing, one key long, and doctor
+  never asks for a second page. On S3 each answer is capped at 1 MiB, error answers included, and
+  past the cap the check ends with `too-large`. Cloud Storage and Azure answers are not capped
+  yet, and the Cloud Storage library asks again past a page that came back empty with a
+  continuation, which gitdr cannot stop.
+- **Nothing is written.** No probe object and no canary. On a compliance-locked bucket either would
+  be undeletable for the whole retention window.
+
+`gitdr doctor -only destination` runs the destination's checks and nothing else, which means
+`config` for the destination block, `worm` and `retention`. It needs no source, no git and no
+git-lfs, so a bucket can be checked before anything is connected to back up into it. `-only`
+takes no other value, and any other exits 2.
+
+Before v1 the `worm` check said what it found only in `detail`, so a reader had to match prose.
+The change is additive: every key an older reader used is where it was, with the value it had.
+The one exception is `detail` where it quoted the store's error, which it now names by its code.
+A store's code in `destination.wormDetails` is shaped the same way, so there a code that does not
+match reads `unnamed` too. The codes S3 documents are single words such as `AccessDenied` and
+`ObjectLockConfigurationNotFoundError`, which match, so only a code a store made up reads
+differently.
+
+*Added 2026-10-03. `gitdr.manifest/v5` and `gitdr.drill/v1` are unchanged.*

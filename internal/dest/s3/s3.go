@@ -136,13 +136,15 @@ func (b *Backend) VerifyWorm(ctx context.Context) (dest.WormStatus, error) {
 		 * other store.
 		 *
 		 * The error text is kept, redacted upstream: `NotImplemented` and `AccessDenied` land
-		 * in the same verdict and are entirely different things to an operator.
+		 * in the same verdict and are entirely different things to an operator. The code goes in
+		 * Details shaped, since a store chooses it; the whole error goes in Refusal, for a log.
 		 */
 		var api smithy.APIError
 		if errors.As(err, &api) {
 			return dest.WormStatus{
 				Verdict: dest.VerdictUnknown,
-				Details: fmt.Sprintf("could not verify immutability: the bucket answered %s", api.ErrorCode()),
+				Details: fmt.Sprintf("could not verify immutability: the bucket answered %s", dest.ShapedCode(api.ErrorCode())),
+				Refusal: err,
 			}, nil
 		}
 		return dest.WormStatus{}, fmt.Errorf("s3: get object lock config: %w", err)
@@ -160,7 +162,7 @@ func (b *Backend) VerifyWorm(ctx context.Context) (dest.WormStatus, error) {
 	}
 	if cfg.Rule != nil && cfg.Rule.DefaultRetention != nil {
 		st.Mode = string(cfg.Rule.DefaultRetention.Mode)
-		st.Details = fmt.Sprintf("Object Lock enabled; default retention %s", st.Mode)
+		st.Details = fmt.Sprintf("Object Lock enabled; default retention %s", dest.ShapedCode(st.Mode))
 	}
 	return st, nil
 }
@@ -385,6 +387,33 @@ func (b *Backend) List(ctx context.Context, prefix string) ([]dest.Object, error
 		}
 	}
 	return objs, nil
+}
+
+// ListPage lists at most limit objects under prefix with one ListObjectsV2 request (read-only),
+// and says whether the store reported more. It never sends the continuation token back, so on a
+// bucket of a million objects it is one request, and on a store that answers every page with
+// another one it is still one.
+func (b *Backend) ListPage(ctx context.Context, prefix string, limit int) ([]dest.Object, bool, error) {
+	if limit < 1 || limit > 1000 {
+		return nil, false, fmt.Errorf("s3: list %q: a page holds 1 to 1000 objects, not %d", prefix, limit)
+	}
+	out, err := b.client.ListObjectsV2(ctx, &awss3.ListObjectsV2Input{
+		Bucket:  aws.String(b.bucket),
+		Prefix:  aws.String(prefix),
+		MaxKeys: aws.Int32(int32(limit)),
+	})
+	if err != nil {
+		return nil, false, fmt.Errorf("s3: list %q: %w", prefix, err)
+	}
+	objs := make([]dest.Object, 0, len(out.Contents))
+	for _, o := range out.Contents {
+		objs = append(objs, dest.Object{Key: aws.ToString(o.Key), Size: aws.ToInt64(o.Size)})
+	}
+	// A store that sends more than it was asked for is read no further than one that did not.
+	if len(objs) > limit {
+		objs = objs[:limit]
+	}
+	return objs, aws.ToBool(out.IsTruncated), nil
 }
 
 // Get opens key for reading (read-only). Caller closes the reader.

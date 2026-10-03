@@ -190,6 +190,7 @@ func (b *Backend) VerifyWorm(ctx context.Context) (dest.WormStatus, error) {
 			return dest.WormStatus{
 				Verdict: dest.VerdictUnknown,
 				Details: "could not read the container's immutability policy: Resource Manager answered " + responseCode(re),
+				Refusal: err,
 			}, nil
 		}
 		return dest.WormStatus{}, fmt.Errorf("azure: read container immutability policy: %w", err)
@@ -286,7 +287,7 @@ func verdictFromResourceManager(c armstorage.BlobContainer) dest.WormStatus {
 			Verdict: dest.VerdictUnknown,
 			Period:  held,
 			Mode:    "IMMUTABILITY",
-			Details: fmt.Sprintf("container immutability policy in state %q, which is not Locked or Unlocked", string(*state)),
+			Details: fmt.Sprintf("container immutability policy in state %q, which is not Locked or Unlocked", dest.ShapedCode(string(*state))),
 		}
 	case isTrue(p.HasImmutabilityPolicy):
 		return dest.WormStatus{
@@ -338,9 +339,11 @@ func period(days *int32) string {
 	return fmt.Sprintf(", %d days", *days)
 }
 
+// responseCode is the code Resource Manager answered with, shaped because Resource Manager wrote
+// it, or the HTTP status when it sent none.
 func responseCode(re *azcore.ResponseError) string {
 	if re.ErrorCode != "" {
-		return re.ErrorCode
+		return dest.ShapedCode(re.ErrorCode)
 	}
 	return fmt.Sprintf("HTTP %d", re.StatusCode)
 }
@@ -488,6 +491,37 @@ func (b *Backend) List(ctx context.Context, prefix string) ([]dest.Object, error
 		}
 	}
 	return out, nil
+}
+
+// ListPage lists at most limit blobs under prefix with one List Blobs request (read-only), and
+// says whether the store reported more. Azure may answer a page with fewer blobs than asked for,
+// none included, and a continuation; that continuation is never followed here.
+func (b *Backend) ListPage(ctx context.Context, prefix string, limit int) ([]dest.Object, bool, error) {
+	if limit < 1 || limit > 5000 {
+		return nil, false, fmt.Errorf("azure: list %q: a page holds 1 to 5000 blobs, not %d", prefix, limit)
+	}
+	n := int32(limit)
+	page, err := b.client.NewListBlobsFlatPager(b.container, &azblob.ListBlobsFlatOptions{Prefix: &prefix, MaxResults: &n}).NextPage(ctx)
+	if err != nil {
+		return nil, false, fmt.Errorf("azure: list %q: %w", prefix, err)
+	}
+	var objs []dest.Object
+	if page.Segment != nil {
+		for _, item := range page.Segment.BlobItems {
+			if item == nil || item.Name == nil {
+				continue
+			}
+			o := dest.Object{Key: *item.Name}
+			if item.Properties != nil && item.Properties.ContentLength != nil {
+				o.Size = *item.Properties.ContentLength
+			}
+			objs = append(objs, o)
+		}
+	}
+	if len(objs) > limit {
+		objs = objs[:limit]
+	}
+	return objs, page.NextMarker != nil && *page.NextMarker != "", nil
 }
 
 // Get opens key for reading (read-only). Caller closes the reader.

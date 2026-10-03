@@ -320,6 +320,40 @@ func TestAzuriteCreateOnly(t *testing.T) {
 	}
 }
 
+// ListPage is one List Blobs request: the blobs on the first page, and whether Azure says there
+// are more. doctor finds an object to read a retention from this way, without walking the
+// container.
+func TestAzuriteListPage(t *testing.T) {
+	cs := connectionString(t)
+	ctx := context.Background()
+	b := container(t, cs, "gitdr-listpage")
+
+	// Under a prefix of this run's own: the container keeps every earlier run's blobs.
+	prefix := strings.TrimSuffix(uniqueKey(t, ""), "-")
+	for _, name := range []string{"/a.bundle", "/b.bundle"} {
+		data := []byte(name)
+		if _, err := b.PutImmutable(ctx, prefix+name, bytes.NewReader(data), int64(len(data)), dest.Retention{}); err != nil {
+			t.Fatalf("put: %v", err)
+		}
+	}
+
+	objs, more, err := b.ListPage(ctx, prefix+"/", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(objs) != 1 || objs[0].Key != prefix+"/a.bundle" || objs[0].Size != int64(len("/a.bundle")) {
+		t.Errorf("first page = %+v, want %s/a.bundle with its size", objs, prefix)
+	}
+	if !more {
+		t.Error("more = false with a blob after the page")
+	}
+
+	objs, more, err = b.ListPage(ctx, prefix+"/nothing/", 1)
+	if err != nil || len(objs) != 0 || more {
+		t.Errorf("an empty prefix gave %+v, more %v, %v; want nothing and no more", objs, more, err)
+	}
+}
+
 // A plain container has no version-level immutability, so the gate must say so. Reporting
 // WORM where there is none is worse than reporting none at all.
 func TestAzuriteVerifyWormReportsNone(t *testing.T) {
