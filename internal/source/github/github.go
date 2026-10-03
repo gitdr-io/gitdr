@@ -42,6 +42,10 @@ type Source struct {
 	tokenFile *tokenFile                // token-file mode: somebody else does
 	host      string
 	logger    *slog.Logger
+	// The clock a wait for a rate limit is measured and spent on. Fields, so a test can spend an
+	// hour's wait without serving it.
+	now   func() time.Time
+	sleep func(context.Context, time.Duration) error
 }
 
 var (
@@ -61,7 +65,7 @@ func newSource(opts Options, logger *slog.Logger, base http.RoundTripper) (*Sour
 	if logger == nil {
 		logger = slog.Default()
 	}
-	s := &Source{host: "github.com", logger: logger}
+	s := &Source{host: "github.com", logger: logger, now: time.Now, sleep: sleepContext}
 	apiHost := "api.github.com"
 	if opts.BaseURL != "" {
 		s.host = hostFromURL(opts.BaseURL)
@@ -137,12 +141,19 @@ func (s *Source) CheckToken(ctx context.Context) error {
 	return nil
 }
 
-// ListRepos returns repositories accessible to the installation, filtered.
+// ListRepos returns repositories accessible to the installation, filtered. Each page waits out a
+// rate limit and retries a 5xx; see call.
 func (s *Source) ListRepos(ctx context.Context, f source.Filter) ([]source.Repo, error) {
 	opt := &github.ListOptions{PerPage: 100}
 	var out []source.Repo
 	for {
-		list, resp, err := s.client.Apps.ListRepos(ctx, opt)
+		var list *github.ListRepositories
+		var resp *github.Response
+		err := s.call(ctx, func(ctx context.Context) error {
+			var err error
+			list, resp, err = s.client.Apps.ListRepos(ctx, opt)
+			return err
+		})
 		if err != nil {
 			return nil, fmt.Errorf("github: list installation repos: %w", err)
 		}

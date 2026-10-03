@@ -17,7 +17,8 @@ import (
 const metaSchema = "gitdr.meta/v1"
 
 // FetchMetadata dumps per-resource metadata as gitdr.meta/v1 JSON using App-compatible
-// per-resource REST endpoints (never the Migrations API).
+// per-resource REST endpoints (never the Migrations API). Every request waits out a rate limit
+// and retries a 5xx; see call.
 func (s *Source) FetchMetadata(ctx context.Context, r source.Repo) ([]byte, error) {
 	owner, name := r.Owner, r.Name
 	doc := map[string]any{
@@ -28,20 +29,25 @@ func (s *Source) FetchMetadata(ctx context.Context, r source.Repo) ([]byte, erro
 		"fetchedAt": time.Now().UTC().Format(time.RFC3339),
 	}
 
-	repo, _, err := s.client.Repositories.Get(ctx, owner, name)
+	var repo *github.Repository
+	err := s.call(ctx, func(ctx context.Context) error {
+		var err error
+		repo, _, err = s.client.Repositories.Get(ctx, owner, name)
+		return err
+	})
 	if err != nil {
 		return nil, fmt.Errorf("github: get repo %s: %w", r.Slug(), err)
 	}
 	doc["repo"] = repo
 
-	if doc["labels"], err = collect(func(p int) ([]*github.Label, int, error) {
+	if doc["labels"], err = collect(ctx, s, func(ctx context.Context, p int) ([]*github.Label, int, error) {
 		l, resp, e := s.client.Issues.ListLabels(ctx, owner, name, listOpts(p))
 		return l, nextPage(resp, e), e
 	}); err != nil {
 		return nil, fmt.Errorf("github: labels: %w", err)
 	}
 
-	if doc["milestones"], err = collect(func(p int) ([]*github.Milestone, int, error) {
+	if doc["milestones"], err = collect(ctx, s, func(ctx context.Context, p int) ([]*github.Milestone, int, error) {
 		m, resp, e := s.client.Issues.ListMilestones(ctx, owner, name, &github.MilestoneListOptions{State: "all", ListOptions: *listOpts(p)})
 		return m, nextPage(resp, e), e
 	}); err != nil {
@@ -49,7 +55,7 @@ func (s *Source) FetchMetadata(ctx context.Context, r source.Repo) ([]byte, erro
 	}
 
 	// Issues includes PRs; each Issue carries PullRequestLinks when it is one.
-	if doc["issues"], err = collect(func(p int) ([]*github.Issue, int, error) {
+	if doc["issues"], err = collect(ctx, s, func(ctx context.Context, p int) ([]*github.Issue, int, error) {
 		i, resp, e := s.client.Issues.ListByRepo(ctx, owner, name, &github.IssueListByRepoOptions{State: "all", ListOptions: *listOpts(p)})
 		return i, nextPage(resp, e), e
 	}); err != nil {
@@ -57,14 +63,14 @@ func (s *Source) FetchMetadata(ctx context.Context, r source.Repo) ([]byte, erro
 	}
 
 	// number 0 lists every issue/PR conversation comment in the repo.
-	if doc["comments"], err = collect(func(p int) ([]*github.IssueComment, int, error) {
+	if doc["comments"], err = collect(ctx, s, func(ctx context.Context, p int) ([]*github.IssueComment, int, error) {
 		c, resp, e := s.client.Issues.ListComments(ctx, owner, name, 0, &github.IssueListCommentsOptions{ListOptions: *listOpts(p)})
 		return c, nextPage(resp, e), e
 	}); err != nil {
 		return nil, fmt.Errorf("github: comments: %w", err)
 	}
 
-	if doc["pullRequests"], err = collect(func(p int) ([]*github.PullRequest, int, error) {
+	if doc["pullRequests"], err = collect(ctx, s, func(ctx context.Context, p int) ([]*github.PullRequest, int, error) {
 		pr, resp, e := s.client.PullRequests.List(ctx, owner, name, &github.PullRequestListOptions{State: "all", ListOptions: *listOpts(p)})
 		return pr, nextPage(resp, e), e
 	}); err != nil {
@@ -72,14 +78,14 @@ func (s *Source) FetchMetadata(ctx context.Context, r source.Repo) ([]byte, erro
 	}
 
 	// number 0 lists every PR review (diff) comment in the repo.
-	if doc["reviewComments"], err = collect(func(p int) ([]*github.PullRequestComment, int, error) {
+	if doc["reviewComments"], err = collect(ctx, s, func(ctx context.Context, p int) ([]*github.PullRequestComment, int, error) {
 		rc, resp, e := s.client.PullRequests.ListComments(ctx, owner, name, 0, &github.PullRequestListCommentsOptions{ListOptions: *listOpts(p)})
 		return rc, nextPage(resp, e), e
 	}); err != nil {
 		return nil, fmt.Errorf("github: review comments: %w", err)
 	}
 
-	if doc["releases"], err = collect(func(p int) ([]*github.RepositoryRelease, int, error) {
+	if doc["releases"], err = collect(ctx, s, func(ctx context.Context, p int) ([]*github.RepositoryRelease, int, error) {
 		rel, resp, e := s.client.Repositories.ListReleases(ctx, owner, name, listOpts(p))
 		return rel, nextPage(resp, e), e
 	}); err != nil {
@@ -98,13 +104,18 @@ func nextPage(resp *github.Response, err error) int {
 	return resp.NextPage
 }
 
-// collect paginates a list endpoint. fetch returns (items, nextPage, error); a
-// nextPage of 0 ends iteration.
-func collect[T any](fetch func(page int) ([]T, int, error)) ([]T, error) {
+// collect paginates a list endpoint, each page through s.call. fetch returns (items, nextPage,
+// error) and sends with the context it is given; a nextPage of 0 ends iteration.
+func collect[T any](ctx context.Context, s *Source, fetch func(ctx context.Context, page int) ([]T, int, error)) ([]T, error) {
 	var all []T
 	for page := 1; page != 0; {
-		items, next, err := fetch(page)
-		if err != nil {
+		var items []T
+		next := 0
+		if err := s.call(ctx, func(ctx context.Context) error {
+			var err error
+			items, next, err = fetch(ctx, page)
+			return err
+		}); err != nil {
 			return nil, err
 		}
 		all = append(all, items...)

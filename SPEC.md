@@ -230,7 +230,21 @@ or a SAS. See §4, Azure.
 - Integrity. SHA-256 per artifact plus a signed run-manifest, checked by `gitdr verify`.
 - Hardened container. Wolfi/Chainguard base, non-root, read-only rootfs, no shell, plus
   `git` and `git-lfs`, pinned by digest.
-- Fail closed, bounded concurrency, rate-limit aware, resumable.
+- Fail closed, bounded concurrency, resumable.
+- Rate limits. A GitHub API request refused for the primary rate limit waits until the reset
+  GitHub names. The wait is measured from the `Date` of the refusal, so a host clock that is off
+  from GitHub's neither retries early nor waits too long. A refusal go-github makes itself, without
+  sending the request, has no `Date` and is measured on this host's clock. A request refused for a
+  secondary limit waits out its `Retry-After`. Without one, go-github takes the wait from
+  `X-RateLimit-Reset`, measured on this host's clock. A secondary limit that names no time, or a
+  time already past, and a primary limit with no reset wait a minute, doubled for each wait
+  already spent on the request: 1, 2, 4, 8 and 16 minutes. Every wait adds a second, and up to a
+  second of jitter. A request still refused after five waits fails. When a wait would end after
+  the context's deadline, the request fails at once and the error names the reset. The CLI sets no
+  deadline of its own, and a stop signal ends a wait early. A 5xx is tried four times, about one,
+  two and four seconds apart, and so is a 5xx from the endpoint that mints the App's installation
+  token. This covers the repository listing and every metadata request. The GitLab client retries
+  a 429 and a 5xx itself. *Added in v0.1.21.*
 - Bounded transfers. gitdr runs git with `http.lowSpeedLimit=1000` and `http.lowSpeedTime=600`,
   so a clone, fetch or `ls-remote` that moves under 1000 bytes a second for ten minutes is
   aborted and its repository fails. Before this, a server that stopped sending while keeping the
