@@ -11,7 +11,7 @@ GOLANGCI_VERSION  ?= v2.12.2
 GOVULN_VERSION    ?= v1.3.0
 ACTIONLINT_VERSION ?= v1.7.12
 
-.PHONY: build build-dist test test-integration test-ci fuzz lint vuln actionlint semgrep image fmt tidy ci clean
+.PHONY: build build-dist test test-integration test-ci fuzz lint vuln actionlint semgrep image fmt tidy ci clean scale scale-image scale-down
 
 build:
 	CGO_ENABLED=0 $(GO) build -trimpath -ldflags '$(LDFLAGS)' -o bin/$(BINARY) $(CMD)
@@ -94,6 +94,31 @@ tidy:
 	$(GO) mod tidy
 
 ci: tidy fmt lint test vuln actionlint
+
+# The scale harness: thousands of repositories, 100k-ref ones and, with SCALE_BIG=1, a 6 GiB pack
+# and 8 GiB of LFS, against MinIO with Object Lock behind a proxy that enforces AWS's limits. Not
+# part of ci: it needs Docker, and the default 2,500 repositories take a couple of hours. Its code
+# carries the scale build tag, so nothing above compiles it. `make scale SCALE_REPOS=50` is the
+# quick profile. Results land in scale-results/. See scale/README.md.
+SCALE_REPOS   ?= 2500
+SCALE_TIMEOUT ?= 6h
+SCALE_RUN     ?= .
+scale:
+	$(GO) test -tags scale -count=1 ./scale/s3limits
+	SCALE_REPOS=$(SCALE_REPOS) SCALE_RESULTS_DIR=$(CURDIR)/scale-results SCALE_GO=$(GO) \
+	  $(GO) test -tags scale -count=1 -timeout $(SCALE_TIMEOUT) -run '$(SCALE_RUN)' -v ./scale
+
+# Phase 2 of the harness, not built yet: the released image as a process under a 4 GiB memory
+# cgroup, stopped with SIGTERM and SIGKILL at named log events. See scale/README.md.
+scale-image:
+	@echo 'scale-image is phase 2 of the scale harness and is not built yet; see scale/README.md' >&2
+	@exit 2
+
+# Takes down any stack a scale run left behind: one that was killed, or run with SCALE_KEEP=1.
+scale-down:
+	@for p in $$(docker compose ls --all --quiet --filter name=gitdr-scale-); do \
+	  echo "removing $$p"; docker compose --project-name $$p down --volumes --remove-orphans; \
+	done
 
 clean:
 	rm -rf bin dist

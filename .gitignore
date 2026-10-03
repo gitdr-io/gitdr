@@ -12,3 +12,6 @@
 *.bundle
 *.env
 .DS_Store
+
+# the scale harness writes its measures and logs here; see scale/README.md
+/scale-results/

@@ -1,0 +1,41 @@
+# The scale harness's object store: MinIO with Object Lock over TLS, behind s3limits, a proxy that
+# holds it to AWS's limits. The harness starts this itself (scale/stack_test.go) after making a
+# throwaway CA, certificates and credentials for the run, and builds s3limits for the Docker host.
+# Nothing here is meant to be started by hand; see scale/README.md.
+#
+# Both services publish only on loopback, on ports Docker picks, so two runs never collide.
+services:
+  minio:
+    image: quay.io/minio/minio@sha256:a1ea29fa28355559ef137d71fc570e508a214ec84ff8083e39bc5428980b015e
+    command: ["server", "/data", "--certs-dir", "/certs", "--quiet"]
+    environment:
+      MINIO_ROOT_USER: ${SCALE_MINIO_USER:?the harness sets this}
+      MINIO_ROOT_PASSWORD: ${SCALE_MINIO_PASSWORD:?the harness sets this}
+    volumes:
+      - ${SCALE_CERTS:?the harness sets this}/minio:/certs:ro
+      - data:/data
+
+  s3limits:
+    image: alpine:3.21@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d
+    command:
+      - /opt/s3limits/s3limits
+      - -listen=:9443
+      - -cert=/certs/cert.pem
+      - -key=/certs/key.pem
+      - -upstream=https://minio:9000
+      - -upstream-ca=/certs/ca.pem
+    environment:
+      S3LIMITS_RATE: ${SCALE_S3_RATE:-8000000}
+      # To sign again a body it splits into smaller chunks; see scale/s3limits.
+      S3LIMITS_ACCESS_KEY: ${SCALE_MINIO_USER:?the harness sets this}
+      S3LIMITS_SECRET_KEY: ${SCALE_MINIO_PASSWORD:?the harness sets this}
+    volumes:
+      - ${SCALE_BIN:?the harness sets this}:/opt/s3limits:ro
+      - ${SCALE_CERTS:?the harness sets this}/s3limits:/certs:ro
+    ports:
+      - "127.0.0.1::9443"
+    depends_on:
+      - minio
+
+volumes:
+  data:

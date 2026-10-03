@@ -9,3 +9,4 @@ coverage.out
 *.key
 *.bundle
 *.prom
+scale-results
