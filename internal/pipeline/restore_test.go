@@ -73,6 +73,7 @@ func backupForRestore(t *testing.T, lfs bool) *restoreFixture {
 	}
 	cfg := testConfig()
 	cfg.Source.Repo = "octo/" + name
+	md.storeAt(fixedClock()())
 	res, err := pipeline.Backup(ctx, pipeline.BackupDeps{
 		Config: cfg, Source: src, Dest: md, Git: gitexec.New(nil),
 		SigningKey: signer, ToolVersion: "test", Now: fixedClock(),

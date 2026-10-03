@@ -48,6 +48,7 @@ func TestASameDayRerunSkipsWhatTheFirstRunCopied(t *testing.T) {
 				t.Fatal("resume is off by default, and this test is about the resume path")
 			}
 			run := func(at time.Time) (*pipeline.BackupResult, error) {
+				md.storeAt(at)
 				return pipeline.Backup(ctx, pipeline.BackupDeps{
 					Config: cfg, Source: src, Dest: md, Git: gitexec.New(nil),
 					SigningKey: signer, ToolVersion: "test", Now: func() time.Time { return at },
@@ -195,6 +196,7 @@ func TestASameDayRerunFailsAnIncompleteCopyByName(t *testing.T) {
 			signer := testSigner(t)
 			cfg := testConfig()
 			run := func(at time.Time) (*pipeline.BackupResult, error) {
+				md.storeAt(at)
 				return pipeline.Backup(context.Background(), pipeline.BackupDeps{
 					Config: cfg, Source: src, Dest: md, Git: gitexec.New(nil),
 					SigningKey: signer, ToolVersion: "test", Now: func() time.Time { return at },
@@ -334,7 +336,9 @@ func TestASameDayRerunFailsWhatTheRecordDoesNotCover(t *testing.T) {
 		{
 			name: "an object the manifest does not record",
 			change: func(md *memDest) {
-				md.objs["github.com/octo/hello/2026-06-13/hello.lfs.tar"] = []byte("not from this run")
+				const stray = "github.com/octo/hello/2026-06-13/hello.lfs.tar"
+				md.objs[stray] = []byte("not from this run")
+				md.modified[stray] = time.Date(2026, 6, 13, 9, 30, 0, 0, time.UTC)
 			},
 			want: "github.com/octo/hello/2026-06-13/hello.lfs.tar is under the date, and github.com/octo/manifests/20260613T090000Z.manifest.json does not record it",
 		},
@@ -358,6 +362,7 @@ func TestASameDayRerunFailsWhatTheRecordDoesNotCover(t *testing.T) {
 			tc.change(md)
 			md.mu.Unlock()
 
+			md.storeAt(morning.Add(time.Hour))
 			res, err := pipeline.Backup(context.Background(), pipeline.BackupDeps{
 				Config: testConfig(), Source: &fixtureSource{repos: repos}, Dest: md, Git: gitexec.New(nil),
 				SigningKey: signer, ToolVersion: "test", Now: func() time.Time { return morning.Add(time.Hour) },

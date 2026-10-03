@@ -81,6 +81,11 @@ func decideUnchanged(previous, current map[string]string, copiedAt, now time.Tim
 	// Unchanged, and now the only question is whether the copy being relied on will still be
 	// there. This is the difference between saving work and losing data.
 	age := now.Sub(copiedAt)
+	// A copy made in the future has an age that never grows, so it would never be refreshed.
+	// The loader refuses one; this keeps a skip from ever resting on one.
+	if age < 0 {
+		return unchangedDecision{skip: false}
+	}
 	limit := retention / refreshFloor
 	if max := time.Duration(maxSkipDays) * 24 * time.Hour; limit > max || limit <= 0 {
 		limit = max

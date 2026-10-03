@@ -33,9 +33,22 @@ type memDest struct {
 	// refuse makes PutImmutable fail for any key containing this substring, so a test can let
 	// the work succeed and the bookkeeping fail. Empty refuses nothing.
 	refuse string
+	// clock is the store's own clock: when it says a write happened, which List reports as
+	// LastModified. Nil reports no time, as a store that does not say.
+	clock    func() time.Time
+	modified map[string]time.Time
 }
 
-func newMemDest(locked bool) *memDest { return &memDest{objs: map[string][]byte{}, locked: locked} }
+func newMemDest(locked bool) *memDest {
+	return &memDest{objs: map[string][]byte{}, modified: map[string]time.Time{}, locked: locked}
+}
+
+// storeAt sets the store's clock to at, for the writes that follow.
+func (m *memDest) storeAt(at time.Time) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.clock = func() time.Time { return at }
+}
 
 func (m *memDest) VerifyWorm(context.Context) (dest.WormStatus, error) {
 	verdict := dest.VerdictNotImmutable
@@ -59,6 +72,9 @@ func (m *memDest) PutImmutable(_ context.Context, key string, r io.Reader, _ int
 		return dest.PutResult{}, err
 	}
 	m.objs[key] = b
+	if m.clock != nil {
+		m.modified[key] = m.clock().UTC()
+	}
 	return dest.PutResult{Key: key, Size: int64(len(b)), RetainUntil: ret.Until}, nil
 }
 
@@ -68,7 +84,7 @@ func (m *memDest) List(_ context.Context, prefix string) ([]dest.Object, error) 
 	var out []dest.Object
 	for k, v := range m.objs {
 		if strings.HasPrefix(k, prefix) {
-			out = append(out, dest.Object{Key: k, Size: int64(len(v))})
+			out = append(out, dest.Object{Key: k, Size: int64(len(v)), LastModified: m.modified[k]})
 		}
 	}
 	return out, nil
@@ -346,6 +362,7 @@ func TestFanOutAndResume(t *testing.T) {
 	// manifest key differs).
 	clock1 := func() time.Time { return time.Date(2026, 6, 13, 12, 0, 0, 0, time.UTC) }
 	clock2 := func() time.Time { return time.Date(2026, 6, 13, 12, 1, 0, 0, time.UTC) }
+	md.storeAt(clock1())
 
 	res, err := pipeline.Backup(ctx, deps(clock1))
 	if err != nil {

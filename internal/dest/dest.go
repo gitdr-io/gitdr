@@ -93,6 +93,11 @@ type PutResult struct {
 type Object struct {
 	Key  string
 	Size int64
+	// LastModified is when the store says the object was written, by the store's clock: S3's
+	// LastModified, GCS's creation time, Azure's creation time. Zero when the store did not say.
+	// The objects gitdr writes are never written twice, so for them it is the time of the one
+	// write.
+	LastModified time.Time
 }
 
 // Destination is the create-only storage interface. Its entire write surface is one

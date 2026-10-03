@@ -705,6 +705,18 @@ request, and `destination.wormVerdict` as the only statement about whether it sa
   metadata or LFS archive never landed was then reported as backed up, the run exited 0, and the
   skip carried no `refs`, so the next day copied the repository in full. The narrower meaning is
   a fix and not a break: the wider one reported copies that did not exist.
+
+  Two more checks hold before a skip relies on a copy. An object under the date counts only if
+  the destination says it wrote the object on that date: S3's `LastModified`, the creation time
+  on GCS and on Azure. A run writes a date's objects on that date, so objects put there ahead of
+  their date fail that day's run instead of being skipped by it, and so does an object the store
+  gives no time for. The one legitimate case it refuses is two runs of the same date at once,
+  where the second reaches a repository the first wrote after midnight. And a `copiedAt` later
+  than the `finishedAt` of the manifest that holds it, or later than now, is not one a run
+  recorded. A skip measures the copy's age from it, and an age that never grows never reaches
+  the refresh, so one such manifest could have kept a repository skipped while every run
+  stayed green. A same-day rerun fails such a repository by name, and the next run's comparison
+  copies it. *Added in v0.1.21.*
 - `artifacts[].kind`: `bundle`, `meta`, `sha256`, or `lfs`.
 
 **What v3 added, and why the version moved.** Two optional fields on a repo entry:

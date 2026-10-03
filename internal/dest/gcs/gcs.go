@@ -115,7 +115,11 @@ func (b *Backend) List(ctx context.Context, prefix string) ([]dest.Object, error
 		if err != nil {
 			return nil, fmt.Errorf("gcs: list %q: %w", prefix, err)
 		}
-		out = append(out, dest.Object{Key: attrs.Name, Size: attrs.Size})
+		written := attrs.Created
+		if written.IsZero() {
+			written = attrs.Updated
+		}
+		out = append(out, dest.Object{Key: attrs.Name, Size: attrs.Size, LastModified: written})
 	}
 	return out, nil
 }

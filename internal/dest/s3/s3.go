@@ -218,7 +218,7 @@ func (b *Backend) List(ctx context.Context, prefix string) ([]dest.Object, error
 			return nil, fmt.Errorf("s3: list %q: %w", prefix, err)
 		}
 		for _, o := range page.Contents {
-			objs = append(objs, dest.Object{Key: aws.ToString(o.Key), Size: aws.ToInt64(o.Size)})
+			objs = append(objs, dest.Object{Key: aws.ToString(o.Key), Size: aws.ToInt64(o.Size), LastModified: aws.ToTime(o.LastModified)})
 		}
 	}
 	return objs, nil

@@ -5,6 +5,7 @@ import (
 	"context"
 	"io"
 	"testing"
+	"time"
 
 	"github.com/fsouza/fake-gcs-server/fakestorage"
 
@@ -53,6 +54,10 @@ func TestGCSBackend(t *testing.T) {
 	}
 	if len(objs) != 1 || objs[0].Key != key {
 		t.Fatalf("list = %+v", objs)
+	}
+	// When the object was written, which a same-day rerun holds against the date in its key.
+	if got := objs[0].LastModified; got.IsZero() || time.Since(got).Abs() > 10*time.Minute {
+		t.Errorf("list says %s was written at %v, want about now", key, got)
 	}
 
 	st, err := b.VerifyWorm(ctx)

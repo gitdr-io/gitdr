@@ -300,6 +300,55 @@ func TestTheNewestManifestWins(t *testing.T) {
 	}
 }
 
+// A copy made in the future is never a reason to skip. Its age is negative and never reaches the
+// refresh bound, so a skip resting on it would last until the copy it relies on had expired.
+func TestACopyMadeInTheFutureIsNeverAReasonToSkip(t *testing.T) {
+	same := refs("refs/heads/main", "aaa")
+	for _, ahead := range []time.Duration{time.Second, time.Hour, 70 * year} {
+		if got := decideUnchanged(same, same, now.Add(ahead), now, year); got.skip {
+			t.Errorf("a copy made %s from now was a reason to skip: %+v", ahead, got)
+		}
+	}
+}
+
+// The previous manifest's copy of a repository is not relied on when its copiedAt is one no run
+// recorded: later than that manifest finished, or later than now.
+func TestThePreviousCopyIsNotReliedOnForACopiedAtNoRunRecorded(t *testing.T) {
+	finished := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	at := func(t time.Time) *time.Time { return &t }
+	m := Manifest{
+		Schema:     ManifestSchema,
+		FinishedAt: finished,
+		Repos: []RepoEntry{
+			{Slug: "octo/ok", Status: StatusSuccess, CopiedAt: at(finished.Add(-time.Hour)), Refs: []RefEntry{{Name: "refs/heads/main", Commit: "aaa"}}},
+			{Slug: "octo/after-finish", Status: StatusSuccess, CopiedAt: at(finished.Add(time.Hour)), Refs: []RefEntry{{Name: "refs/heads/main", Commit: "bbb"}}},
+			{Slug: "octo/future", Status: StatusSkipped, CopiedAt: at(time.Date(2099, 1, 1, 0, 0, 0, 0, time.UTC)), Refs: []RefEntry{{Name: "refs/heads/main", Commit: "ccc"}}},
+		},
+	}
+	raw, err := json.Marshal(&m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var logged bytes.Buffer
+	r := &backupRun{
+		dst: &stubDest{objs: map[string][]byte{"github.com/octo/manifests/20260901T120000Z.manifest.json": raw}},
+		log: slog.New(slog.NewTextHandler(&logged, nil)),
+		now: func() time.Time { return now },
+	}
+	got := r.loadPrevious(context.Background(), "github.com/octo/manifests")
+	if _, ok := got["octo/ok"]; !ok {
+		t.Error("a copy with a plausible copiedAt was not read")
+	}
+	for _, slug := range []string{"octo/after-finish", "octo/future"} {
+		if c, ok := got[slug]; ok {
+			t.Errorf("%s was read with copiedAt %s; a skip would rest on a copy no run recorded", slug, c.copiedAt)
+		}
+		if !strings.Contains(logged.String(), slug) || !strings.Contains(logged.String(), "level=WARN") {
+			t.Errorf("no warning names %s:\n%s", slug, logged.String())
+		}
+	}
+}
+
 // stubDest is read-only: loadPrevious only ever lists and gets.
 type stubDest struct{ objs map[string][]byte }
 

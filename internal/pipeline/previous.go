@@ -88,6 +88,12 @@ func (r *backupRun) loadPrevious(ctx context.Context, dir string) map[string]pre
 		if entry.CopiedAt != nil {
 			copiedAt = *entry.CopiedAt
 		}
+		// A copy dated after its own manifest, or in the future, is one no run recorded, and a
+		// skip measured from it would never reach the refresh.
+		if err := plausibleCopiedAt(copiedAt, m.FinishedAt, r.now()); err != nil {
+			r.log.Warn("not relying on the previous manifest's copy of this repository; it will be copied", "key", newest, "repo", entry.Slug, "err", err)
+			continue
+		}
 		out[entry.Slug] = previousCopy{refs: entriesToRefs(entry.Refs), copiedAt: copiedAt}
 	}
 	if len(out) > 0 {

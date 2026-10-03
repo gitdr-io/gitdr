@@ -104,6 +104,26 @@ func TestMinIOFullLoop(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(out, "README.md")); err != nil {
 		t.Fatalf("restored repo missing README.md: %v", err)
 	}
+
+	// A same-day rerun skips the copy, on the store's own word for when each object was written.
+	// Across midnight UTC the rerun has a date of its own, and copies again under it. A manifest
+	// is named for the second its run finished, so the rerun starts in the next one.
+	time.Sleep(1100 * time.Millisecond)
+	again, err := pipeline.Backup(ctx, pipeline.BackupDeps{
+		Config: conf, Source: src, Dest: dst, Git: gitexec.New(nil),
+		SigningKey: signer, ToolVersion: "itest", Now: time.Now,
+	})
+	if err != nil {
+		t.Fatalf("same-day rerun: %v", err)
+	}
+	e := again.Manifest.Repos[0]
+	if again.Manifest.StartedAt.Format("2006-01-02") == res.Manifest.StartedAt.Format("2006-01-02") {
+		if e.Status != pipeline.StatusSkipped || e.Reason != pipeline.ReasonResume {
+			t.Errorf("the rerun = %s %q %q, want skipped as %q", e.Status, e.Reason, e.Error, pipeline.ReasonResume)
+		}
+	} else if e.Status != pipeline.StatusSuccess {
+		t.Errorf("the rerun after midnight = %s %q, want a copy under its own date", e.Status, e.Error)
+	}
 }
 
 func provisionLockedBucket(ctx context.Context, t *testing.T, endpoint, region, bucket string) {
@@ -203,6 +223,15 @@ func TestS3CreateOnly(t *testing.T) {
 	first := []byte("the original bundle")
 	if _, err := dst.PutImmutable(ctx, key, bytes.NewReader(first), int64(len(first)), dest.Retention{}); err != nil {
 		t.Fatalf("first put: %v", err)
+	}
+	// The listing says when the object was written, which a same-day rerun holds against the
+	// date in its key.
+	listed, err := dst.List(ctx, key)
+	if err != nil || len(listed) != 1 {
+		t.Fatalf("list %s: %v, %+v", key, err, listed)
+	}
+	if got := listed[0].LastModified; got.IsZero() || time.Since(got).Abs() > 10*time.Minute {
+		t.Errorf("list says %s was written at %v, want about now", key, got)
 	}
 
 	second := []byte("an attacker's replacement")

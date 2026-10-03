@@ -34,9 +34,10 @@ func slugRepos(host, dir string, slugs ...string) []source.Repo {
 	return repos
 }
 
-// backupAt backs up repos into md on a clock stopped at at.
+// backupAt backs up repos into md on a clock stopped at at, the store's clock with it.
 func backupAt(t *testing.T, md *memDest, signer ed25519.PrivateKey, at time.Time, repos []source.Repo) *pipeline.BackupResult {
 	t.Helper()
+	md.storeAt(at)
 	cfg := testConfig()
 	cfg.Source.Repo = ""
 	res, err := pipeline.Backup(context.Background(), pipeline.BackupDeps{

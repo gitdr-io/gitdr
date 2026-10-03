@@ -364,8 +364,16 @@ func (b *Backend) List(ctx context.Context, prefix string) ([]dest.Object, error
 		}
 		for _, item := range page.Segment.BlobItems {
 			o := dest.Object{Key: *item.Name}
-			if item.Properties != nil && item.Properties.ContentLength != nil {
-				o.Size = *item.Properties.ContentLength
+			if p := item.Properties; p != nil {
+				if p.ContentLength != nil {
+					o.Size = *p.ContentLength
+				}
+				switch {
+				case p.CreationTime != nil:
+					o.LastModified = *p.CreationTime
+				case p.LastModified != nil:
+					o.LastModified = *p.LastModified
+				}
 			}
 			out = append(out, o)
 		}

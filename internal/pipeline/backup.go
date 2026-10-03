@@ -369,28 +369,52 @@ func (r *backupRun) resumed(ctx context.Context, repo source.Repo) (RepoEntry, b
 		return RepoEntry{}, false
 	}
 	// Only what is filed directly in the date's folder. A listing is by prefix and reaches into
-	// any deeper folder, such as a GitLab subgroup named like the repository.
+	// any deeper folder, such as a GitLab subgroup named like the repository. In key order, so
+	// an error names the same object whatever order the store lists them in.
+	sort.Slice(objs, func(i, j int) bool { return objs[i].Key < objs[j].Key })
 	stored := map[string]bool{}
 	var under []string
+	var foreign []dest.Object
 	for _, o := range objs {
-		if path.Dir(o.Key) == dir {
-			stored[o.Key] = true
-			under = append(under, o.Key)
+		if path.Dir(o.Key) != dir {
+			continue
+		}
+		stored[o.Key] = true
+		under = append(under, o.Key)
+		if o.LastModified.IsZero() || o.LastModified.UTC().Format("2006-01-02") != r.date {
+			foreign = append(foreign, o)
 		}
 	}
 	if len(under) == 0 {
 		return RepoEntry{}, false
 	}
-	sort.Strings(under)
 
 	day, err := time.Parse("2006-01-02", r.date)
 	if err != nil {
 		return failedEntry(slug, fmt.Errorf("the run's date %q: %w", r.date, err)), true
 	}
 	next := day.AddDate(0, 0, 1).Format("2006-01-02")
+	// Every refusal below leaves the date spent, and says so the same way.
+	spent := func(what, detail string) (RepoEntry, bool) {
+		return failedEntry(slug, fmt.Errorf("%s (%s); its keys are create-only, so the next copy is on %s", what, detail, next)), true
+	}
 	incomplete := func(detail string) (RepoEntry, bool) {
-		return failedEntry(slug, fmt.Errorf("an incomplete copy for %s exists (%s); its keys are create-only, so the next copy is on %s",
-			r.date, detail, next)), true
+		return spent("an incomplete copy for "+r.date+" exists", detail)
+	}
+
+	// An object counts only if the store wrote it on the date its key names. A run writes a
+	// date's objects that day, so one written earlier was put there ahead of the date, by
+	// something other than a run, and a copy planted for a future date must fail that day's run
+	// rather than be skipped by it. A store that does not say when it wrote an object has not
+	// shown that either. A run that crosses midnight writes its last repositories the next day,
+	// and only a second run of the same date that reached them after that is refused here.
+	if len(foreign) > 0 {
+		o := foreign[0]
+		when := "and the destination does not say when it was written"
+		if !o.LastModified.IsZero() {
+			when = "and the destination wrote it at " + o.LastModified.UTC().Format(time.RFC3339)
+		}
+		return spent("an object under "+r.date+" was not written that day", fmt.Sprintf("%s is filed under the date %s", o.Key, when))
 	}
 
 	bundleKey, _, _ := artifactKeys(repo.Host, repo.Owner, repo.Name, r.date)
@@ -420,13 +444,36 @@ func (r *backupRun) resumed(ctx context.Context, repo source.Repo) (RepoEntry, b
 		}
 	}
 
+	copiedAt := copiedAtOf(found.entry, found.finishedAt)
+	if copiedAt != nil {
+		if err := plausibleCopiedAt(*copiedAt, found.finishedAt, r.now()); err != nil {
+			return spent("the manifest that records the copy for "+r.date+" cannot be believed", fmt.Sprintf("%s: %v", found.manifestKey, err))
+		}
+	}
+
 	return RepoEntry{
 		Slug:     slug,
 		Status:   StatusSkipped,
 		Reason:   ReasonResume,
 		Refs:     found.entry.Refs,
-		CopiedAt: copiedAtOf(found.entry, found.finishedAt),
+		CopiedAt: copiedAt,
 	}, true
+}
+
+// plausibleCopiedAt refuses a copy's copiedAt that no run could have recorded: one later than the
+// finish of the manifest that holds it, or later than now. A skip relies on copiedAt for the age
+// of the copy, and an age that never grows never reaches the refresh, so one manifest naming a
+// copy made in the future would have skipped the repository for good while every run stayed
+// green.
+func plausibleCopiedAt(copiedAt, finished, now time.Time) error {
+	switch {
+	case copiedAt.After(finished):
+		return fmt.Errorf("it says the copy was made at %s, after the manifest itself finished at %s",
+			copiedAt.UTC().Format(time.RFC3339), finished.UTC().Format(time.RFC3339))
+	case copiedAt.After(now):
+		return fmt.Errorf("it says the copy was made at %s, which is later than now", copiedAt.UTC().Format(time.RFC3339))
+	}
+	return nil
 }
 
 // failedEntry is a repository this run failed with err before writing anything of it.

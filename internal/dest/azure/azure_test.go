@@ -20,6 +20,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/bloberror"
@@ -141,6 +142,10 @@ func TestAzuriteRoundTrip(t *testing.T) {
 	}
 	if found.Size != int64(len(data)) {
 		t.Errorf("list size = %d, want %d", found.Size, len(data))
+	}
+	// When the blob was written, which a same-day rerun holds against the date in its key.
+	if got := found.LastModified; got.IsZero() || time.Since(got).Abs() > 10*time.Minute {
+		t.Errorf("list says %s was written at %v, want about now", key, got)
 	}
 }
 
