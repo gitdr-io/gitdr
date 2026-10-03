@@ -591,6 +591,67 @@ func TestARateLimitResetIsMeasuredOnGitHubsClock(t *testing.T) {
 	}
 }
 
+// Only a failure likely to pass is marked transient. The pipeline stores nothing for a repository
+// whose metadata failed that way, and stores its code for any other failure.
+func TestOnlyAFailureLikelyToPassIsTransient(t *testing.T) {
+	key := testKeyPEM(t)
+	for _, tc := range []struct {
+		name      string
+		deadline  time.Duration // none when zero
+		answer    func(now time.Time) reply
+		mintFails int
+		transient bool
+	}{
+		{
+			name: "a rate limit that lifts after the deadline", deadline: 5 * time.Minute, transient: true,
+			answer: func(now time.Time) reply { return primaryLimit(http.StatusForbidden, now.Add(30*time.Minute)) },
+		},
+		{
+			name: "a rate limit that never lifts", transient: true,
+			answer: func(now time.Time) reply { return primaryLimit(http.StatusForbidden, now.Add(time.Minute)) },
+		},
+		{
+			name: "a 5xx that does not clear", transient: true,
+			answer: func(time.Time) reply { return failure(http.StatusBadGateway) },
+		},
+		{
+			name: "a 5xx minting the token that does not clear", mintFails: 10, transient: true,
+			answer: func(time.Time) reply { return repoPage(0, "hello") },
+		},
+		{
+			name: "a permission the installation does not have",
+			answer: func(time.Time) reply {
+				return reply{status: http.StatusForbidden, body: `{"message":"Resource not accessible by integration"}`}
+			},
+		},
+		{
+			name:   "a 404",
+			answer: func(time.Time) reply { return failure(http.StatusNotFound) },
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clock := newFakeClock()
+			api := newFakeAPI(t, clock, func(*http.Request, int) reply { return tc.answer(clock.now()) })
+			api.failMints(tc.mintFails, http.StatusBadGateway)
+			s := clockedSource(t, api, key, clock)
+			ctx := context.Background()
+			if tc.deadline != 0 {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithTimeout(ctx, tc.deadline)
+				defer cancel()
+			}
+
+			_, err := s.ListRepos(ctx, source.Filter{})
+			if err == nil {
+				t.Fatal("ListRepos succeeded against an API that refuses it")
+			}
+			if got := errors.Is(err, source.ErrTransient); got != tc.transient {
+				t.Errorf("transient = %v, want %v: %v", got, tc.transient, err)
+			}
+		})
+	}
+}
+
 // The waits SPEC.md promises for a limit that names no time: a minute, doubled for each wait
 // already spent on the request, five of them, and then the request fails.
 func TestALimitThatNamesNoTimeWaitsLongerEachTime(t *testing.T) {

@@ -11,6 +11,8 @@ import (
 
 	ghinstallation "github.com/bradleyfalzon/ghinstallation/v2"
 	"github.com/google/go-github/v90/github"
+
+	"gitdr.io/gitdr/internal/source"
 )
 
 // GitHub's rate limits, and its transient 5xx.
@@ -49,6 +51,9 @@ const (
 // spent limit against its own clock and would refuse the retry without sending it; the wait just
 // served is the answer to that memory, and whether the limit has lifted is GitHub's to say. A
 // retry it refuses again is waited for again, up to rateLimitWaits.
+//
+// A limit it gives up on, and a 5xx that outlasts its tries, are marked source.ErrTransient: the
+// pipeline then stores nothing for the repository, since the next run will probably get through.
 func (s *Source) call(ctx context.Context, fn func(context.Context) error) error {
 	reqCtx := ctx
 	waits, serverErrors := 0, 0
@@ -60,7 +65,7 @@ func (s *Source) call(ctx context.Context, fn func(context.Context) error) error
 		now := s.now()
 		if reset, limited := limitLifts(err, now, waits); limited {
 			if waits == rateLimitWaits {
-				return fmt.Errorf("rate limited after %d waits for the limit to lift: %w", waits, err)
+				return source.Transient(fmt.Errorf("rate limited after %d waits for the limit to lift: %w", waits, err))
 			}
 			waits++
 			// Never from the past: a reset that has gone by on this clock and not on GitHub's would
@@ -71,25 +76,28 @@ func (s *Source) call(ctx context.Context, fn func(context.Context) error) error
 			}
 			resume = resume.Add(rateLimitSlack + jitter())
 			if deadline, ok := ctx.Deadline(); ok && resume.After(deadline) {
-				return fmt.Errorf("rate limited until %s, past the deadline of %s: %w",
-					reset.UTC().Format(time.RFC3339), deadline.UTC().Format(time.RFC3339), err)
+				return source.Transient(fmt.Errorf("rate limited until %s, past the deadline of %s: %w",
+					reset.UTC().Format(time.RFC3339), deadline.UTC().Format(time.RFC3339), err))
 			}
 			s.logger.Warn("github rate limit reached; waiting for it to lift",
 				"until", reset.UTC().Format(time.RFC3339), "err", err)
 			if serr := s.sleep(ctx, resume.Sub(now)); serr != nil {
-				return fmt.Errorf("rate limited until %s; stopped waiting: %w", reset.UTC().Format(time.RFC3339), serr)
+				return source.Transient(fmt.Errorf("rate limited until %s; stopped waiting: %w", reset.UTC().Format(time.RFC3339), serr))
 			}
 			reqCtx = context.WithValue(ctx, github.BypassRateLimitCheck, true)
 			continue
 		}
-		if !isServerError(err) || serverErrors+1 == serverErrorAttempts {
+		if !isServerError(err) {
 			return err
+		}
+		if serverErrors+1 == serverErrorAttempts {
+			return source.Transient(err)
 		}
 		wait := serverErrorBackoff<<serverErrors + jitter()
 		serverErrors++
 		s.logger.Warn("github server error; retrying", "in", wait.Round(time.Millisecond), "err", err)
 		if serr := s.sleep(ctx, wait); serr != nil {
-			return fmt.Errorf("stopped retrying: %w: %w", serr, err)
+			return source.Transient(fmt.Errorf("stopped retrying: %w: %w", serr, err))
 		}
 	}
 }

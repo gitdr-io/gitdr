@@ -349,6 +349,7 @@ func (r *backupRun) backupRepo(ctx context.Context, repo source.Repo, ret dest.R
 	fail := func(err error) RepoEntry {
 		entry.Status = StatusFailed
 		entry.Error = err.Error()
+		entry.Reason = "" // a reason belongs to a skip, and an empty repository can still fail
 		return entry
 	}
 
@@ -392,6 +393,18 @@ func (r *backupRun) backupRepo(ctx context.Context, repo source.Repo, ret dest.R
 	date := r.now().UTC().Format("2006-01-02")
 	prefix := path.Join(repo.Host, repo.Owner, repo.Name, date)
 
+	// The metadata is fetched before anything is written, and what a failure costs depends on
+	// whether it is likely to pass. A transient one, a rate limit that could not be waited out or
+	// a server error that outlasted its retries, fails the repository here with nothing stored:
+	// the next run will probably get through, and nothing written to the destination can be taken
+	// back. Any other failure, a permission missing say, would fail every run the same way, so the
+	// code is stored regardless, bundle and checksum, and the repository fails on its metadata
+	// after that, as it did before v0.1.21.
+	meta, metaErr := r.src.FetchMetadata(ctx, repo)
+	if metaErr != nil && (errors.Is(metaErr, source.ErrTransient) || ctx.Err() != nil) {
+		return fail(fmt.Errorf("metadata: %w", metaErr))
+	}
+
 	// No commits, so no bundle — but the metadata is still stored below. A repository with no
 	// code can still carry issues, labels and milestones, and dropping those because nobody
 	// pushed a commit would be a silent loss of exactly the kind this tool exists to prevent.
@@ -418,16 +431,14 @@ func (r *backupRun) backupRepo(ctx context.Context, repo source.Repo, ret dest.R
 		entry.Artifacts = append(entry.Artifacts, artifact("bundle", bres, bundleSHA))
 	}
 
-	// per-resource metadata
-	meta, err := r.src.FetchMetadata(ctx, repo)
-	if err != nil {
-		return fail(fmt.Errorf("metadata: %w", err))
+	// per-resource metadata, fetched above
+	if metaErr == nil {
+		mres, metaSHA, err := r.putBytes(ctx, path.Join(prefix, repo.Name+".meta.json"), meta, ret)
+		if err != nil {
+			return fail(err)
+		}
+		entry.Artifacts = append(entry.Artifacts, artifact("meta", mres, metaSHA))
 	}
-	mres, metaSHA, err := r.putBytes(ctx, path.Join(prefix, repo.Name+".meta.json"), meta, ret)
-	if err != nil {
-		return fail(err)
-	}
-	entry.Artifacts = append(entry.Artifacts, artifact("meta", mres, metaSHA))
 
 	// sha256 sidecar (sha256sum format) over the stored bundle object
 	if hasRefs {
@@ -437,6 +448,11 @@ func (r *backupRun) backupRepo(ctx context.Context, repo source.Repo, ret dest.R
 			return fail(err)
 		}
 		entry.Artifacts = append(entry.Artifacts, artifact("sha256", sres, shaSHA))
+	}
+
+	// The code is stored, and the repository fails on the metadata it could not have.
+	if metaErr != nil {
+		return fail(fmt.Errorf("metadata: %w", metaErr))
 	}
 
 	// LFS objects (optional): fetch and store as a separate immutable tar artifact.

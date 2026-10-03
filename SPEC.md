@@ -38,6 +38,16 @@ A single static Go binary, run as a one-shot job. Two pluggable interfaces.
 4. Write a signed run-manifest (per-repo status, checksums, versions, timing).
 5. Emit structured logs and metrics. Exit non-zero on any failure.
 
+In step 3 the metadata is fetched before anything of the repository is written. A failure likely
+to pass, a rate limit gitdr could not wait out or a server error that outlasted its retries, fails
+the repository with nothing stored for it, and the next run tries again. Any other metadata
+failure, a permission the credential lacks for example, would fail every run the same way, so the
+bundle and its checksum are stored anyway and the repository then fails on its metadata. Up to
+v0.1.20 the metadata was fetched after the bundle was stored, so a rate limit left a bundle under
+object lock with no metadata beside it, and no checksum either. Only the GitHub source marks a
+failure as likely to pass, so on GitLab every metadata failure stores the code first.
+*Changed in v0.1.21.*
+
 ### Object key layout
 
 ```

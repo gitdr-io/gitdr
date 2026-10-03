@@ -3,7 +3,33 @@
 // needed to clone and dump them, no method mutates the upstream VCS.
 package source
 
-import "context"
+import (
+	"context"
+	"errors"
+)
+
+// ErrTransient marks a failure that is likely to pass: a rate limit that could not be waited out,
+// or a server error that outlasted its retries.
+//
+// The pipeline fetches metadata before it writes anything, and stops a repository whose metadata
+// failed this way with nothing stored, because the next run will probably get through. Any other
+// failure, a missing permission say, would fail every run the same way, so the repository's code
+// is stored regardless and only then is the repository failed. A source that marks nothing gets
+// the second behaviour for every failure, which is the safe one.
+var ErrTransient = errors.New("transient failure")
+
+// Transient marks err as ErrTransient, keeping its message. It returns nil for nil.
+func Transient(err error) error {
+	if err == nil {
+		return nil
+	}
+	return transientError{err}
+}
+
+type transientError struct{ err error }
+
+func (e transientError) Error() string   { return e.err.Error() }
+func (e transientError) Unwrap() []error { return []error{e.err, ErrTransient} }
 
 // Repo identifies a single repository discovered on a Source, plus the minimal
 // attributes the pipeline needs to back it up.
