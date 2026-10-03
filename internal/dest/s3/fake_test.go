@@ -163,6 +163,8 @@ func (f *fakeStore) serve(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case r.Method == http.MethodHead:
 		f.head(w, r, key)
+	case r.Method == http.MethodGet && q.Has("retention"):
+		f.retention(w, key)
 	case r.Method == http.MethodPut && q.Has("partNumber"):
 		f.uploadPart(w, r, key)
 	case r.Method == http.MethodPut:
@@ -395,6 +397,25 @@ func (f *fakeStore) head(w http.ResponseWriter, r *http.Request, key string) {
 		w.Header().Set("X-Amz-Object-Lock-Retain-Until-Date", o.retainUntil)
 	}
 	w.WriteHeader(http.StatusOK)
+}
+
+// retention answers GetObjectRetention: the lock the object holds, or the error AWS gives for an
+// object that holds none.
+func (f *fakeStore) retention(w http.ResponseWriter, key string) {
+	f.op("GetObjectRetention")
+	o := f.object(key)
+	switch {
+	case o == nil:
+		s3Error(w, http.StatusNotFound, "NoSuchKey", "The specified key does not exist.")
+	case o.lockMode == "":
+		s3Error(w, http.StatusNotFound, "NoSuchObjectLockConfiguration", "The specified object does not have a ObjectLock configuration")
+	default:
+		writeXML(w, struct {
+			XMLName         xml.Name `xml:"Retention"`
+			Mode            string   `xml:"Mode"`
+			RetainUntilDate string   `xml:"RetainUntilDate"`
+		}{Mode: o.lockMode, RetainUntilDate: o.retainUntil})
+	}
 }
 
 func (f *fakeStore) putObject(w http.ResponseWriter, r *http.Request, key string) {

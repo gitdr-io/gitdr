@@ -936,9 +936,9 @@ before 0.1.19 is best read as `unknown`, whatever value it carries.
 
 | value | what it means |
 |---|---|
-| `present` | the store returned a retention for an object this run wrote |
-| `absent` | the store implements the question and said that object holds nothing. An **earned** negative |
-| `not-checked` | nobody asked, or the store refused. A statement about gitdr's visibility |
+| `present` | the store returned a retention for each object the run asked about, one per write path it used |
+| `absent` | the store implements the question and said one of those objects holds nothing. An **earned** negative |
+| `not-checked` | nobody asked, or the store refused for at least one of them. A statement about gitdr's visibility |
 
 It is the same failure as v4, one level down. `wormVerdict` is about the bucket's
 *configuration*; this is about an object gitdr actually wrote, and the two can disagree: a store
@@ -948,12 +948,21 @@ for* — `PutObject` returns no object-lock headers, so there was never anything
 while on GCS the same field is the expiry the write returned. One field, two meanings, both
 signed.
 
-**Checked once per run, on the first object written, and only where the preflight said
-`immutable`.** The check is a strong falsifier and a weak confirmer, and the design leans on
-that: a store applies object lock in the PUT path, so one that drops the header for the first
-object drops it for all of them and a negative generalises from one sample — while a positive
-proves only that this object is retained. Per-object checks would be thousands of extra requests
-buying detection of an anomaly the protocol does not produce.
+**Checked once per write path, and only where the preflight said `immutable`.** The check is a
+strong falsifier and a weak confirmer, and the design leans on that: a store applies object lock
+in its write path, so one that drops the header for one object drops it for every object written
+the same way and a negative generalises from one sample of that path — while a positive proves
+only that this object is retained. Per-object checks would be thousands of extra requests buying
+detection of an anomaly the protocol does not produce.
+
+On S3 from v0.1.22 an object goes in one of two ways: up to the multipart threshold in one
+`PutObject`, and past it in parts, with the lock headers on `CreateMultipartUpload` (§4). A store
+can honour them on one call and not the other, so a run asks, on every backend, about the
+smallest object it wrote, which went in one PUT unless every object went in parts, and the
+largest, which went in parts if any object did. `absent` on either is `absent`; `present` needs
+both; anything else is `not-checked`. *Changed in v0.1.22: a run asked about the first object it
+wrote, a single PUT whenever the first repository was small, so a store that dropped the lock on
+every upload in parts read `present`, and `--require-worm` passed it.*
 
 **It only ever lowers a claim.** `absent` sets `wormVerdict` to `not-immutable` and
 `wormImmutable` to `false`; `present` adds nothing, no badge and no upgrade. There is

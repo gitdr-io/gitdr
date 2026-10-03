@@ -340,3 +340,48 @@ func TestAStoreThatRefusesAFullObjectChecksumGetsAComposite(t *testing.T) {
 	}
 	noAbort(t, fake)
 }
+
+// A store that keeps the lock on a single PUT and drops it on an upload in parts reads absent on
+// the object written in parts, and present on the other. Which object a run asks about decides
+// whether it sees that: it asks about one of each (pipeline, observeRetention).
+func TestALockDroppedOnCompleteReadsAbsent(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		drop    bool
+		inParts dest.RetentionObservation
+	}{
+		{"a store that keeps the lock", false, dest.RetentionPresent},
+		{"a store that drops it on Complete", true, dest.RetentionAbsent},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake, srv := newFakeStore(t)
+			fake.dropLockOnComplete = tc.drop
+			b := newPartsBackend(t, srv, false)
+			ctx := context.Background()
+			ret := dest.Retention{Mode: dest.RetentionCompliance, Until: time.Now().Add(24 * time.Hour).Truncate(time.Second)}
+
+			sidecar := []byte("0123abcd  hello.bundle\n")
+			if _, err := b.PutImmutable(ctx, "one-put", bytes.NewReader(sidecar), int64(len(sidecar)), ret); err != nil {
+				t.Fatalf("single put: %v", err)
+			}
+			f, data := payloadFile(t, 23*mib)
+			if _, err := b.PutImmutable(ctx, "in-parts", f, int64(len(data)), ret); err != nil {
+				t.Fatalf("put in parts: %v", err)
+			}
+			if got := fake.count("CreateMultipartUpload"); got != 1 {
+				t.Fatalf("%d uploads in parts, want 1: only the large object goes in parts", got)
+			}
+
+			for key, want := range map[string]dest.RetentionObservation{"one-put": dest.RetentionPresent, "in-parts": tc.inParts} {
+				got, until, err := b.ObserveRetention(ctx, key)
+				if got != want {
+					t.Errorf("%s reads %s (%v), want %s", key, got, err, want)
+				}
+				if got == dest.RetentionPresent && !until.Equal(ret.Until) {
+					t.Errorf("%s is retained until %s, want %s", key, until, ret.Until)
+				}
+			}
+			noAbort(t, fake)
+		})
+	}
+}

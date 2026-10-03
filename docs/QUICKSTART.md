@@ -84,7 +84,7 @@ storage calls the engine makes (`internal/dest/s3/s3.go`) for `backup`, `verify`
 | `s3:GetBucketObjectLockConfiguration` | `GetObjectLockConfiguration` | the WORM check before every backup, and `doctor`. Without it the verdict is `unknown` and backups are written without retention |
 | `s3:ListBucket` | `ListObjectsV2` | the previous manifest, the resume check, the manifest a drill or restore looks up, the LFS archive |
 | `s3:GetObject` | `GetObject`, `HeadObject` | reading manifests, signatures and artifacts back. `HeadObject` is the create-only check before each write when `endpoint` is set, and how a write whose answer was lost is settled |
-| `s3:GetObjectRetention` | `GetObjectRetention` | confirming the first object of a run holds its lock. Optional: without it the manifest says `not-checked` |
+| `s3:GetObjectRetention` | `GetObjectRetention` | confirming that a run's objects hold their lock, on the smallest it wrote and the largest, so a single PUT and an upload in parts are both checked. Optional: without it the manifest says `not-checked` |
 | `s3:PutObject` | `PutObject`; `CreateMultipartUpload`, `UploadPart`, `CompleteMultipartUpload` | artifacts, the signed manifest, the drill report. An artifact over 4 GiB goes in parts, and AWS authorizes those three calls under `s3:PutObject` |
 | `s3:PutObjectRetention` | `PutObject` or `CreateMultipartUpload` with `x-amz-object-lock-*` headers | AWS requires it to set retention on a new object, and `backup` does on every write to a bucket it confirmed immutable |
 

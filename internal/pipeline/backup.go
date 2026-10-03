@@ -1030,15 +1030,28 @@ func orNow(f func() time.Time) func() time.Time {
 }
 
 /*
- * Ask the destination what retention is on the first object this run wrote.
+ * Ask the destination what retention is on the objects this run wrote, one from each way it
+ * writes them.
  *
- * One object, not every object. The check is a strong falsifier and a weak confirmer, and the
- * design leans on exactly that: a store applies object lock in the PUT path, so one that drops
- * the header for the first object drops it for all of them, and a negative therefore generalises
- * from a single sample. A positive does not - it proves this object is retained and that the
- * store implements the headers, and nothing about the rest. Per-object checks would be three or
- * four thousand extra requests on a large estate buying detection of an anomaly the protocol does
- * not produce.
+ * One object per write path, not every object. The check is a strong falsifier and a weak
+ * confirmer, and the design leans on exactly that: a store applies object lock in its write path,
+ * so one that drops the header for one object drops it for every object written the same way, and
+ * a negative generalises from a single sample. A positive does not - it proves this object is
+ * retained and that the store implements the headers, and nothing about the rest. Per-object
+ * checks would be three or four thousand extra requests on a large estate buying detection of an
+ * anomaly the protocol does not produce.
+ *
+ * But the generalisation stops at the path. An object over the multipart threshold is written in
+ * parts, with the lock headers on CreateMultipartUpload rather than on PutObject, and a store can
+ * honour them on one and not the other. Backblaze documents no lock headers on its multipart call
+ * at all. The run used to ask about the first object it wrote, a single PUT whenever the first
+ * repository was small, so a store that dropped the lock on every object written in parts still
+ * read present. The run now asks about the smallest object it wrote, which went in one PUT unless
+ * every object went in parts, and the largest, which went in parts if any object did:
+ *
+ *   - absent when either is absent, and that lowers the verdict;
+ *   - present when both are present;
+ *   - not-checked otherwise, since an answer for one path says nothing about the other.
  *
  * It may only ever lower the verdict. There is no path here that turns "not-immutable" into
  * "immutable", no badge and no green: the whole purpose is to remove a claim gitdr could not
@@ -1057,34 +1070,63 @@ func (r *backupRun) observeRetention(ctx context.Context, entries []RepoEntry) (
 	if !ok {
 		return dest.RetentionNotChecked, verdict
 	}
-	var key string
-	for _, e := range entries {
-		if len(e.Artifacts) > 0 {
-			key = e.Artifacts[0].Key
-			break
-		}
-	}
-	if key == "" {
+	keys := retentionSamples(entries)
+	if len(keys) == 0 {
 		return dest.RetentionNotChecked, verdict
 	}
 
-	got, until, err := observer.ObserveRetention(ctx, key)
-	switch got {
-	case dest.RetentionPresent:
-		r.log.Info("retention observed", "key", key, "until", until.Format(time.RFC3339))
-	case dest.RetentionAbsent:
-		// The earned negative, and the reason all of this exists. The bucket said it locks, the
-		// write was accepted, and the object holds nothing. The objects cannot be unwritten -
-		// the destination is create-only - so failing closed here can only mean refusing to
-		// report a protection that is not there.
-		r.log.Warn("the destination accepted this run and applied no retention to it",
-			"key", key, "bucket_said", r.wormStatus.Details)
-		verdict = dest.VerdictNotImmutable
-	default:
-		// A refusal is not a no. On S3 this is the common case rather than the exotic one:
-		// reading an object's retention needs s3:GetObjectRetention, and this product tells
-		// operators to scope destination credentials create/put-only.
-		r.log.Info("could not confirm the retention on this run's objects", "key", key, "err", err)
+	observed := dest.RetentionPresent
+	for _, key := range keys {
+		got, until, err := observer.ObserveRetention(ctx, key)
+		switch got {
+		case dest.RetentionPresent:
+			r.log.Info("retention observed", "key", key, "until", until.Format(time.RFC3339))
+		case dest.RetentionAbsent:
+			// The earned negative, and the reason all of this exists. The bucket said it locks,
+			// the write was accepted, and the object holds nothing. The objects cannot be
+			// unwritten - the destination is create-only - so failing closed here can only mean
+			// refusing to report a protection that is not there.
+			r.log.Warn("the destination accepted this run and applied no retention to it",
+				"key", key, "bucket_said", r.wormStatus.Details)
+			observed = dest.RetentionAbsent
+		default:
+			// A refusal is not a no. On S3 this is the common case rather than the exotic one:
+			// reading an object's retention needs s3:GetObjectRetention, and this product tells
+			// operators to scope destination credentials create/put-only.
+			r.log.Info("could not confirm the retention on this run's objects", "key", key, "err", err)
+			if observed == dest.RetentionPresent {
+				observed = dest.RetentionNotChecked
+			}
+		}
 	}
-	return got, verdict
+	if observed == dest.RetentionAbsent {
+		verdict = dest.VerdictNotImmutable
+	}
+	return observed, verdict
+}
+
+// retentionSamples is the keys observeRetention asks about: the smallest artifact the run wrote,
+// which went in one PutObject unless every artifact went in parts, and the largest, which went in
+// parts if any artifact did. One key when they are the same object, and none when the run wrote
+// nothing.
+func retentionSamples(entries []RepoEntry) []string {
+	var smallest, largest *ArtifactInfo
+	for i := range entries {
+		for j := range entries[i].Artifacts {
+			a := &entries[i].Artifacts[j]
+			if smallest == nil || a.Size < smallest.Size {
+				smallest = a
+			}
+			if largest == nil || a.Size > largest.Size {
+				largest = a
+			}
+		}
+	}
+	switch {
+	case smallest == nil:
+		return nil
+	case smallest.Key == largest.Key:
+		return []string{smallest.Key}
+	}
+	return []string{smallest.Key, largest.Key}
 }
