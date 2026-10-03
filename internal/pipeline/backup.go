@@ -104,16 +104,20 @@ func (r *backupRun) run(ctx context.Context) (*BackupResult, error) {
 	started := r.now().UTC()
 	r.date = started.Format("2006-01-02")
 
-	// The work stops at the deadline, and the manifest does not. It is written after the work
-	// with the run's own context, so a run that ran out of time still records what it did and the
-	// repositories it did not finish. A deadline on everything would have cut the manifest too,
-	// and a run that writes no manifest is the outcome the deadline exists to prevent.
+	// The work stops at the deadline, or at a stop signal, and the manifest does not. It is
+	// written after the work on a context of its own, so a run that ran out of time or was told
+	// to stop still records what it did and the repositories it did not finish. A deadline on
+	// everything would have cut the manifest too, and a run that writes no manifest is the
+	// outcome the deadline exists to prevent.
 	work := ctx
 	if !r.deadline.IsZero() {
 		var cancel context.CancelFunc
-		work, cancel = context.WithDeadline(ctx, r.deadline)
+		work, cancel = context.WithDeadlineCause(ctx, r.deadline,
+			fmt.Errorf("the run's deadline %s passed", r.deadline.UTC().Format(time.RFC3339)))
 		defer cancel()
 	}
+	final, stopFinal := manifestContext(ctx, manifestGrace)
+	defer stopFinal()
 
 	if err := r.wormCheck(work); err != nil {
 		return nil, err
@@ -159,9 +163,12 @@ func (r *backupRun) run(ctx context.Context) (*BackupResult, error) {
 			allOK = false
 		}
 	}
+	if work.Err() != nil {
+		r.log.Warn("the run was stopped before it finished; filing what it did", "cause", context.Cause(work))
+	}
 
 	// What actually landed on one object, before the manifest is composed and signed.
-	observed, verdict := r.observeRetention(ctx, entries)
+	observed, verdict := r.observeRetention(final, entries)
 	// The case the flag exists for. The objects are already written and cannot be unwritten, so
 	// failing closed here can only mean refusing to report a protection that is not there.
 	//
@@ -191,7 +198,7 @@ func (r *backupRun) run(ctx context.Context) (*BackupResult, error) {
 		Repos:      entries,
 	}
 
-	key, err := r.uploadManifest(ctx, m, manifestDir(repos), ret)
+	key, err := r.uploadManifest(final, m, manifestDir(repos), ret)
 	res := &BackupResult{Manifest: m, ManifestKey: key}
 	if err != nil {
 		return res, fmt.Errorf("manifest: %w", err)
@@ -268,8 +275,33 @@ func (r *backupRun) selectRepos(ctx context.Context) ([]source.Repo, error) {
 	return repos, nil
 }
 
+// manifestGrace is how long a stopped run has to file its manifest, from the moment it was
+// stopped. The caller that stops it waits longer than this before it kills it.
+const manifestGrace = 45 * time.Second
+
+// manifestContext is the context the manifest is written on. Stopping ctx does not cancel it,
+// because a stopped run still has to file what it did: the copies it finished are in the bucket,
+// and without a manifest nothing can verify, restore or drill them, and the next run cannot skip
+// them. Once ctx is stopped it lasts grace longer, so a stop still ends the process.
+//
+// Up to v0.1.20 the manifest was written on the context a SIGTERM cancels, so a stopped run
+// filed nothing at all.
+func manifestContext(ctx context.Context, grace time.Duration) (context.Context, context.CancelFunc) {
+	final, cancel := context.WithCancel(context.WithoutCancel(ctx))
+	stop := context.AfterFunc(ctx, func() { time.AfterFunc(grace, cancel) })
+	return final, func() { stop(); cancel() }
+}
+
+// stoppedBefore is the error of a repository the run was stopped before finishing.
+const stoppedBefore = "stopped before it finished"
+
 // fanOut backs up repos with bounded concurrency, preserving input order. Each
 // goroutine writes a distinct entries[i], so no lock is needed.
+//
+// Once ctx is done, at the deadline or on a stop signal, nothing more is started. A repository
+// that was never started, or that failed after the stop, is recorded as failed and stopped before
+// it finished, so the manifest names every repository the run selected. The ones in flight are
+// waited for: their git commands are killed with the context.
 func (r *backupRun) fanOut(ctx context.Context, repos []source.Repo, ret dest.Retention) []RepoEntry {
 	limit := r.cfg.Backup.Concurrency
 	if limit < 1 {
@@ -279,12 +311,32 @@ func (r *backupRun) fanOut(ctx context.Context, repos []source.Repo, ret dest.Re
 	sem := make(chan struct{}, limit)
 	var wg sync.WaitGroup
 	for i := range repos {
+		acquired := false
+		select {
+		case sem <- struct{}{}:
+			acquired = true
+		case <-ctx.Done():
+		}
+		if ctx.Err() != nil {
+			if acquired {
+				<-sem
+			}
+			cause := context.Cause(ctx)
+			for j := i; j < len(repos); j++ {
+				entries[j] = failedEntry(repos[j].Slug(), fmt.Errorf("%s: %w", stoppedBefore, cause))
+			}
+			r.log.Warn("repositories not started; the run was stopped", "count", len(repos)-i, "cause", cause)
+			break
+		}
 		wg.Add(1)
-		sem <- struct{}{}
 		go func(i int) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			entries[i] = r.backupOne(ctx, repos[i], ret)
+			e := r.backupOne(ctx, repos[i], ret)
+			if e.Status == StatusFailed && ctx.Err() != nil {
+				e.Error = stoppedBefore + ": " + e.Error
+			}
+			entries[i] = e
 		}(i)
 	}
 	wg.Wait()

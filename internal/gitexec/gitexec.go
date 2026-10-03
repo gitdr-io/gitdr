@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"time"
 )
 
 // Git runs git subcommands.
@@ -399,8 +400,16 @@ func (g *Git) command(ctx context.Context, workdir string, cfg []gitConfig, extr
 		cmd.Dir = workdir
 	}
 	cmd.Env = commandEnv(cfg, extra)
+	// Cancelling ctx kills git, and git is not always the last holder of its stderr: a git-lfs or
+	// a remote helper it started can outlive it with the pipe still open, and Wait used to wait
+	// for that child however long it ran. A stopped run then never got as far as its manifest.
+	// Wait now gives such a child waitDelay to let go, and then closes the pipes itself.
+	cmd.WaitDelay = waitDelay
 	return cmd
 }
+
+// waitDelay is how long a killed git's children may hold its output open.
+const waitDelay = 5 * time.Second
 
 // A transfer that moves fewer than lowSpeedLimit bytes a second for lowSpeedTime seconds is
 // aborted by git, as http.lowSpeedLimit and http.lowSpeedTime. Without them a server that stops

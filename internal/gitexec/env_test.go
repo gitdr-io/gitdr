@@ -31,10 +31,28 @@ import (
 // through for that.
 const fakeLog = "invocations.jsonl"
 
+// A file named fakeModeFile beside the link makes the fake git misbehave in the way it names
+// instead: see misbehave. Like the fake itself it is found by place and not by a variable, since
+// gitexec's allowlist withholds any variable a test sets. fakeGitMode tells the child the fake
+// starts itself, outside gitexec and so outside the allowlist, to be the "sleep" mode, and
+// fakeGitPIDFile is the file beside the link that child's pid goes to.
+const (
+	fakeModeFile   = "mode"
+	fakeGitMode    = "GITDR_TEST_FAKE_GIT_MODE"
+	fakeGitPIDFile = "child.pid"
+)
+
 func TestMain(m *testing.M) {
+	if mode := os.Getenv(fakeGitMode); mode != "" {
+		os.Exit(misbehave(mode))
+	}
 	switch filepath.Base(os.Args[0]) {
 	case "git", "git-lfs":
-		os.Exit(fakeGit(filepath.Join(filepath.Dir(os.Args[0]), fakeLog)))
+		dir := filepath.Dir(os.Args[0])
+		if mode, err := os.ReadFile(filepath.Join(dir, fakeModeFile)); err == nil {
+			os.Exit(misbehave(strings.TrimSpace(string(mode))))
+		}
+		os.Exit(fakeGit(filepath.Join(dir, fakeLog)))
 	}
 	os.Exit(m.Run())
 }
@@ -53,6 +71,53 @@ func fake(t *testing.T, name string) (bin, logPath string) {
 		t.Fatal(err)
 	}
 	return bin, filepath.Join(dir, fakeLog)
+}
+
+// fakeMisbehaving is fake's git, made to misbehave in the way mode names.
+func fakeMisbehaving(t *testing.T, mode string) (bin string) {
+	t.Helper()
+	bin, _ = fake(t, "git")
+	if err := os.WriteFile(filepath.Join(filepath.Dir(bin), fakeModeFile), []byte(mode), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return bin
+}
+
+// misbehave is the fake git's misbehaviour, by mode.
+//
+//   - "hold-stderr": start a child that inherits stderr and sleeps, write its pid to the file
+//     fakeGitPIDFile names, and sleep: a git whose git-lfs or remote helper outlives it.
+//   - "sleep": sleep, holding whatever was inherited. The child above.
+func misbehave(mode string) int {
+	switch mode {
+	case "hold-stderr":
+		exe, err := os.Executable()
+		if err != nil {
+			return 3
+		}
+		child := exec.Command(exe)
+		for _, kv := range os.Environ() {
+			if !strings.HasPrefix(kv, fakeGitMode+"=") {
+				child.Env = append(child.Env, kv)
+			}
+		}
+		child.Env = append(child.Env, fakeGitMode+"=sleep")
+		child.Stderr = os.Stderr
+		if err := child.Start(); err != nil {
+			return 3
+		}
+		// Beside the link this fake was started through.
+		pidFile := filepath.Join(filepath.Dir(os.Args[0]), fakeGitPIDFile)
+		if err := os.WriteFile(pidFile, []byte(strconv.Itoa(child.Process.Pid)), 0o600); err != nil {
+			return 3
+		}
+		time.Sleep(20 * time.Second)
+		return 0
+	case "sleep":
+		time.Sleep(20 * time.Second)
+		return 0
+	}
+	return 3
 }
 
 type invocation struct {

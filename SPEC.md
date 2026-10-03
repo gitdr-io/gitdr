@@ -526,6 +526,17 @@ repository uncopied, every run green, until the refresh. A signing key rotated s
 was written fails the check as a forgery does: the next run copies what that manifest recorded,
 once, and a same-day rerun fails by name the repositories copied under the old key that day.
 
+**A stopped backup files its manifest, from v0.1.21.** On SIGTERM or SIGINT, or at its deadline,
+a backup starts no more repositories. The ones in flight are stopped and their git commands
+killed, and a git-lfs or remote helper still holding git's stderr gets five seconds before the
+pipe is closed on it. Every repository the run did not finish, in flight or never started, is
+recorded as `failed` with an `error` that starts `stopped before it finished`. The manifest is
+then written on a context the signal does not cancel, within 45 seconds of the stop, and the run
+exits 1. The copies the run did finish are in that manifest, so `verify`, `restore` and `drill`
+reach them, and the same day's rerun skips them. Up to v0.1.20 a stop cancelled the manifest's
+own upload, so a stopped run filed nothing. A caller that kills the engine should wait a minute
+after SIGTERM before it does.
+
 Skipping is reported as `status: "skipped"` with a `reason`, the same shape already used for a
 repository with no commits — additive, and a consumer switching on `status` sees a value it
 already knows.
