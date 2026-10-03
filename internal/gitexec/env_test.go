@@ -88,8 +88,18 @@ func fakeMisbehaving(t *testing.T, mode string) (bin string) {
 //   - "hold-stderr": start a child that inherits stderr and sleeps, write its pid to the file
 //     fakeGitPIDFile names, and sleep: a git whose git-lfs or remote helper outlives it.
 //   - "sleep": sleep, holding whatever was inherited. The child above.
+//   - "stderr-flood": write 10 MiB of noise to stderr, then floodLastLine, and fail.
 func misbehave(mode string) int {
 	switch mode {
+	case "stderr-flood":
+		noise := strings.Repeat("remote: Counting objects: 100% (12345/12345), done.\n", 1024)
+		for written := 0; written < 10<<20; written += len(noise) {
+			if _, err := os.Stderr.WriteString(noise); err != nil {
+				return 3
+			}
+		}
+		_, _ = os.Stderr.WriteString(floodLastLine + "\n")
+		return 128
 	case "hold-stderr":
 		exe, err := os.Executable()
 		if err != nil {

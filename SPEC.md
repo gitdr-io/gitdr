@@ -723,7 +723,11 @@ Until then: **read `retainUntil` as the retention that applies if the destinatio
 request, and `destination.wormVerdict` as the only statement about whether it said it would.**
 
 - `status` (run-level and per-repo): `success`, `failed`, or `skipped`.
-- `repos[].error` is present only when that repo's `status` is `failed`.
+- `repos[].error` is present only when that repo's `status` is `failed`. An error from git carries
+  at most the last 64 KiB or so of git's stderr, the end, where git says what went wrong, and
+  then says how much was cut: `[git stderr cut: the first N bytes dropped, the last M kept]`. Up
+  to v0.1.20 it carried all of it, and one noisy clone could make a manifest too large to read.
+  *Changed in v0.1.21.*
 - `repos[].reason` is present only when that repo's `status` is `skipped`, and says which of
   two cases applies:
   - `already backed up for this date` — a manifest records a complete copy of the repository

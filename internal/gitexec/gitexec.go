@@ -364,12 +364,13 @@ func (g *Git) output(ctx context.Context, workdir string, args ...string) (strin
 func (g *Git) outputCfg(ctx context.Context, workdir string, cfg []gitConfig, args ...string) (string, error) {
 	cmd := g.command(ctx, workdir, cfg, []string{"GIT_TERMINAL_PROMPT=0"}, args)
 
-	var stdout, stderr bytes.Buffer
+	var stdout bytes.Buffer
+	stderr := &stderrTail{max: stderrKept}
 	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
+	cmd.Stderr = stderr
 	g.logger.Debug("git", "args", args, "dir", workdir)
 	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("git %s: %w: %s", args[0], err, strings.TrimSpace(stderr.String()))
+		return "", fmt.Errorf("git %s: %w: %s", args[0], err, stderr)
 	}
 	return stdout.String(), nil
 }
@@ -380,13 +381,53 @@ func (g *Git) run(ctx context.Context, workdir string, cfg []gitConfig, args ...
 		"GIT_LFS_SKIP_SMUDGE=1", // LFS is fetched explicitly later (M2)
 	}, args)
 
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
+	stderr := &stderrTail{max: stderrKept}
+	cmd.Stderr = stderr
 	g.logger.Debug("git", "args", args, "dir", workdir) // args carry no secrets by construction
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("git %s: %w: %s", args[0], err, strings.TrimSpace(stderr.String()))
+		return fmt.Errorf("git %s: %w: %s", args[0], err, stderr)
 	}
 	return nil
+}
+
+// stderrKept is how much of git's stderr an error carries: the end of it, where git says what went
+// wrong, and little enough that the error, its prefix and the marker below with it, stays under
+// 64 KiB.
+//
+// The whole of it used to go into the error. A clone or an LFS fetch can print megabytes of
+// progress and warnings, and the error goes into the manifest, the log and whatever reads them: one
+// noisy repository made a manifest no reader would take and a log line nothing could store.
+const stderrKept = 64<<10 - 512
+
+// stderrTail keeps the last max bytes written to it, and counts what it let go of.
+type stderrTail struct {
+	max     int
+	buf     []byte
+	dropped int64
+}
+
+func (t *stderrTail) Write(p []byte) (int, error) {
+	n := len(p)
+	if n >= t.max {
+		t.dropped += int64(len(t.buf) + n - t.max)
+		t.buf = append(t.buf[:0], p[n-t.max:]...)
+		return n, nil
+	}
+	if over := len(t.buf) + n - t.max; over > 0 {
+		t.dropped += int64(over)
+		t.buf = t.buf[:copy(t.buf, t.buf[over:])]
+	}
+	t.buf = append(t.buf, p...)
+	return n, nil
+}
+
+// String is what was kept, and when anything was let go of, a marker at the end saying how much.
+func (t *stderrTail) String() string {
+	s := strings.TrimSpace(string(t.buf))
+	if t.dropped > 0 {
+		s += fmt.Sprintf(" [git stderr cut: the first %d bytes dropped, the last %d kept]", t.dropped, len(t.buf))
+	}
+	return s
 }
 
 // command builds every git process gitdr starts. It is the only place one is built, so every
