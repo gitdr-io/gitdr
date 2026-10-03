@@ -18,6 +18,17 @@ import (
 // prGetDumpable is PR_GET_DUMPABLE from <linux/prctl.h>.
 const prGetDumpable = 3
 
+// dumpableFlag reads this process's dumpable flag. /proc/self/status has no line for it
+// (proc_pid_status(5)), so it is asked of the kernel.
+func dumpableFlag(t *testing.T) uintptr {
+	t.Helper()
+	flag, _, errno := syscall.RawSyscall(syscall.SYS_PRCTL, prGetDumpable, 0, 0)
+	if errno != 0 {
+		t.Fatalf("PR_GET_DUMPABLE: %v", errno)
+	}
+	return flag
+}
+
 // The two programs this test binary becomes when TestTheKernelClosesTheStartupWindow copies it:
 // the engine, which starts as gitdr does, init included, and exits; and a reader, which starts
 // the engine and reads its environment for as long as it runs.
@@ -34,9 +45,29 @@ func TestMain(m *testing.M) {
 // startupCanary is the secret the reader gives the engine to keep in its environment.
 const startupCanary = "canary-startup-signing-key"
 
-// readWhileItStarts starts the engine at path with a secret in its environment, reads
-// /proc/<pid>/environ until the engine exits, and prints whether any read held the secret.
+// engineUser is the uid and gid the image runs gitdr as.
+const engineUser = 65532
+
+// readWhileItStarts takes the engine's user, starts the engine at path with a secret in its
+// environment, reads /proc/<pid>/environ until the engine exits, and prints whether any read held
+// the secret.
+//
+// It takes the user itself rather than being started with it. os/exec starts a child with
+// CLONE_VM, and a child that changes its credentials before its exec resets the dumpable flag of
+// the memory it still shares with its parent to fs.suid_dumpable. Started with
+// SysProcAttr.Credential, the reader would change the test binary's own flag, which on a host with
+// fs.suid_dumpable=2 is what TestGitCannotReadTheEngine then found.
 func readWhileItStarts(path string) int {
+	for _, step := range []func() error{
+		func() error { return syscall.Setgroups(nil) },
+		func() error { return syscall.Setgid(engineUser) },
+		func() error { return syscall.Setuid(engineUser) },
+	} {
+		if err := step(); err != nil {
+			fmt.Fprintln(os.Stderr, "take the engine's user:", err)
+			return 2
+		}
+	}
 	cmd := exec.Command(path)
 	cmd.Env = []string{"GITDR_MANIFEST_SIGNING_KEY=" + startupCanary}
 	if err := cmd.Start(); err != nil {
@@ -108,9 +139,7 @@ func TestTheKernelClosesTheStartupWindow(t *testing.T) {
 		}
 		n := 0
 		for range 20 {
-			cmd := exec.Command(reader, engine)
-			cmd.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: 65532, Gid: 65532}}
-			out, err := cmd.Output()
+			out, err := exec.Command(reader, engine).Output()
 			if err != nil {
 				t.Fatalf("reader: %v", err)
 			}
@@ -132,22 +161,21 @@ func TestTheKernelClosesTheStartupWindow(t *testing.T) {
 	if unreadable != 0 {
 		t.Errorf("%d of 20 starts of an engine only root can read leaked its environment", unreadable)
 	}
+	// The test's own process is the engine too, and nothing here may have changed its flag.
+	if flag := dumpableFlag(t); flag != 0 {
+		t.Errorf("this test left its own process with dumpable = %d, want 0", flag)
+	}
 }
 
 // git, which runs as gitdr's own user, cannot read gitdr's environment, where a run keeps the
 // destination's keys and the manifest signing key.
 //
 // This test binary is package main, so the init that ran before it is the engine's. The flag comes
-// first. /proc/self/status has no line for it (proc_pid_status(5)), so it is asked of the kernel.
-// Then what the flag is for: a child of this process tries what an exploited git would, reading
-// /proc/<pid>/environ. The control comes last, the same read of a dumpable process, which has to
-// succeed, or the refusal before it could be a read that never works.
+// first (dumpableFlag). Then what the flag is for: a child of this process tries what an exploited
+// git would, reading /proc/<pid>/environ. The control comes last, the same read of a dumpable
+// process, which has to succeed, or the refusal before it could be a read that never works.
 func TestGitCannotReadTheEngine(t *testing.T) {
-	flag, _, errno := syscall.RawSyscall(syscall.SYS_PRCTL, prGetDumpable, 0, 0)
-	if errno != 0 {
-		t.Fatalf("PR_GET_DUMPABLE: %v", errno)
-	}
-	if flag != 0 {
+	if flag := dumpableFlag(t); flag != 0 {
 		t.Errorf("dumpable = %d after init, want 0", flag)
 	}
 	if holdsCapSysPtrace(t) {
