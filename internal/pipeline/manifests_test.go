@@ -113,6 +113,17 @@ func TestOnlyAManifestFiledDirectlyInTheDirectoryIsACandidate(t *testing.T) {
 	}
 }
 
+// verify reads a manifest only up to the cap, as every other reader does, and says why it stopped.
+// It used to read the whole object, so it read manifests that restore and drill then refused.
+func TestVerifyReadsAManifestOnlyUpToTheCap(t *testing.T) {
+	const key = "github.com/octo/manifests/20260901T120000Z.manifest.json"
+	d := &stubDest{objs: map[string][]byte{key: []byte(`{"schema":"gitdr.manifest/v5"}`)}}
+	_, err := verifyWithin(context.Background(), VerifyDeps{Dest: d}, key, 16)
+	if err == nil || !strings.Contains(err.Error(), key+" is larger than the") {
+		t.Errorf("err = %v, want a refusal of a manifest past the cap", err)
+	}
+}
+
 // The loader reads at most maxManifestBytes and refuses a larger object rather than parsing a
 // truncated one. It used to read one byte past the cap for the drill and never look.
 func TestAManifestLargerThanTheCapIsRefused(t *testing.T) {

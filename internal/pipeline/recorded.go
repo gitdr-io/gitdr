@@ -3,6 +3,7 @@ package pipeline
 import (
 	"context"
 	"crypto/ed25519"
+	"errors"
 	"fmt"
 	"log/slog"
 	"path"
@@ -78,6 +79,9 @@ type recordedCopy struct {
 type copySearchReport struct {
 	seen   int // manifests looked at
 	passed int // of those, the ones that could not be read or were refused
+	// tooLarge counts the passed ones that were past the cap, and largest is the first of them.
+	tooLarge int
+	largest  *manifestTooLarge
 	// named is the first entry for the repository that lists the artifact without recording it
 	// as a copy, a failed one, and namedIn the manifest that holds it.
 	named   *RepoEntry
@@ -137,6 +141,7 @@ func (s *copySearch) find(ctx context.Context, dirs []string, day time.Time, slu
 			if err != nil {
 				return nil, rep, fmt.Errorf("list manifests under %s: %w", prefix, err)
 			}
+			sizes := listedSizes(objs)
 			for _, key := range filedManifests(objs, dir) {
 				if !notAfter.IsZero() {
 					at, err := time.Parse(manifestStamp, strings.TrimSuffix(path.Base(key), manifestSuffix))
@@ -145,9 +150,16 @@ func (s *copySearch) find(ctx context.Context, dirs []string, day time.Time, slu
 					}
 				}
 				rep.seen++
-				m := s.load(ctx, key)
+				m := s.load(ctx, key, sizes[key])
 				if m.err != nil {
 					rep.passed++
+					var large *manifestTooLarge
+					if errors.As(m.err, &large) {
+						if rep.tooLarge == 0 {
+							rep.largest = large
+						}
+						rep.tooLarge++
+					}
 					continue
 				}
 				e, ok := m.entries[slug]
@@ -188,22 +200,27 @@ func (s *copySearch) list(ctx context.Context, prefix string) ([]dest.Object, er
 }
 
 // load reads the manifest at key once per search, with the loader's checks, and keeps the entries
-// of the repositories the search keeps and nothing else. Called with s.mu held.
-func (s *copySearch) load(ctx context.Context, key string) *searchedManifest {
+// of the repositories the search keeps and nothing else. size is what the listing said of it, and
+// one past the cap is refused before it is fetched. Called with s.mu held.
+func (s *copySearch) load(ctx context.Context, key string, size int64) *searchedManifest {
 	if m, ok := s.loaded[key]; ok {
 		return m
 	}
 	entries := map[string]RepoEntry{}
-	head, err := readManifestEntries(ctx, s.dst, s.pub, key, func(e RepoEntry) {
-		if s.keep != nil && !s.keep(e.Slug) {
-			return
-		}
-		// One entry per repository is what a run writes. A second is not believed over the
-		// first.
-		if _, dup := entries[e.Slug]; !dup {
-			entries[e.Slug] = e
-		}
-	})
+	err := oversized(key, size)
+	var head manifestHead
+	if err == nil {
+		head, err = readManifestEntries(ctx, s.dst, s.pub, key, func(e RepoEntry) {
+			if s.keep != nil && !s.keep(e.Slug) {
+				return
+			}
+			// One entry per repository is what a run writes. A second is not believed over the
+			// first.
+			if _, dup := entries[e.Slug]; !dup {
+				entries[e.Slug] = e
+			}
+		})
+	}
 	out := &searchedManifest{finishedAt: head.FinishedAt, entries: entries}
 	if err != nil {
 		out = &searchedManifest{err: err}

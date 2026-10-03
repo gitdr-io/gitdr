@@ -148,6 +148,46 @@ func refuseManifest(format string, args ...any) error {
 	return &manifestRefused{reason: fmt.Sprintf(format, args...)}
 }
 
+// manifestTooLarge is a manifest larger than maxManifestBytes, refused without being parsed: by
+// the size a listing gave for it, before a byte of it is fetched, or by the read that passed the
+// cap. size is the listed size, and 0 when only the read found out.
+type manifestTooLarge struct {
+	key  string
+	size int64
+}
+
+func (e *manifestTooLarge) Error() string {
+	if e.size > 0 {
+		return fmt.Sprintf("manifest %s is %s, larger than the %s this engine reads", e.key, mib(e.size), mib(maxManifestBytes))
+	}
+	return fmt.Sprintf("manifest %s is larger than the %s this engine reads", e.key, mib(maxManifestBytes))
+}
+
+// oversized is the refusal of the manifest at key by its listed size, or nil when it fits.
+func oversized(key string, size int64) error {
+	if size > maxManifestBytes {
+		return &manifestTooLarge{key: key, size: size}
+	}
+	return nil
+}
+
+// listedSizes is each listed object's size, by key.
+func listedSizes(objs []dest.Object) map[string]int64 {
+	sizes := make(map[string]int64, len(objs))
+	for _, o := range objs {
+		sizes[o.Key] = o.Size
+	}
+	return sizes
+}
+
+// mib writes n bytes in MiB, whole when it divides.
+func mib(n int64) string {
+	if n%(1<<20) == 0 {
+		return fmt.Sprintf("%d MiB", n>>20)
+	}
+	return fmt.Sprintf("%.1f MiB", float64(n)/(1<<20))
+}
+
 // loadManifest reads the run-manifest at key. Drill, restore and the next backup all read
 // manifests through it, and nothing else in gitdr does.
 //
@@ -182,6 +222,10 @@ func loadManifest(ctx context.Context, d dest.Destination, pub ed25519.PublicKey
 // refuses it unless its detached signature holds over exactly those bytes. Nothing is parsed.
 func readManifestBytes(ctx context.Context, d dest.Destination, pub ed25519.PublicKey, key string) ([]byte, error) {
 	raw, err := readCapped(ctx, d, key, maxManifestBytes)
+	var large *objectTooLarge
+	if errors.As(err, &large) {
+		return nil, &manifestTooLarge{key: key}
+	}
 	if err != nil {
 		return nil, fmt.Errorf("read manifest %s: %w", key, err)
 	}
@@ -344,7 +388,12 @@ func readCapped(ctx context.Context, d dest.Destination, key string, limit int64
 		return nil, err
 	}
 	if int64(len(b)) > limit {
-		return nil, fmt.Errorf("larger than %d bytes", limit)
+		return nil, &objectTooLarge{limit: limit}
 	}
 	return b, nil
 }
+
+// objectTooLarge is readCapped's refusal of an object past its limit.
+type objectTooLarge struct{ limit int64 }
+
+func (e *objectTooLarge) Error() string { return fmt.Sprintf("larger than %d bytes", e.limit) }

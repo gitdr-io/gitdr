@@ -496,6 +496,16 @@ manifest is decoded one repository at a time, keeping only the selected reposito
 repository, which files its manifest in the organisation's directory, made the organisation's
 next run copy every other repository in full. *Changed in v0.1.21.*
 
+**How large a manifest gitdr reads, from v0.1.21.** Every reader, the next run, a same-day rerun,
+`restore`, `drill` and `verify`, reads at most 128 MiB of a manifest, about 1.5 million refs. One
+past that is refused without being parsed, and unread where a listing already gave its size. The
+next run warns, names the manifest and its size, and copies the repositories only it records. A
+restore by date that passed one over says so and names the size, where it used to suggest a
+rotated signing key. Up to v0.1.20 the cap was 32 MiB, about 390,000 refs, which an organisation
+with a few large repositories passes because `--mirror` brings every `refs/pull/*`: the next run
+logged it at debug and copied everything, and restore and drill refused the manifest, while
+`verify` read a manifest of any size. *Changed in v0.1.21.*
+
 Skipping is reported as `status: "skipped"` with a `reason`, the same shape already used for a
 repository with no commits — additive, and a consumer switching on `status` sees a value it
 already knows.

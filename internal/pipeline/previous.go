@@ -23,12 +23,16 @@ type previousCopy struct {
 	copiedAt time.Time
 }
 
-// maxManifestBytes caps what will be read into memory.
+// maxManifestBytes caps what will be read of one manifest, by every reader: the next run, a
+// same-day rerun, restore, drill and verify.
 //
-// A manifest for a very large organisation is a few megabytes; anything past this is either
-// corrupt or is not a manifest, and neither is worth exhausting a worker's memory over. The
-// run proceeds without a comparison, which costs a full copy and loses nothing.
-const maxManifestBytes = 32 << 20
+// A manifest carries the ref map of every repository its run covered, about 85 bytes a ref, and
+// `--mirror` brings every refs/pull/*, so an organisation with a few large repositories passed the
+// 32 MiB this used to be. The next run then copied everything, and a restore or a drill of the run
+// refused it. 128 MiB holds about 1.5 million refs. It is not raised further because stdout and the
+// caller copy a manifest several times over, and the refs leave the manifest in a later version.
+// Past the cap a manifest is refused unread, and the warning says how large it is.
+const maxManifestBytes = 128 << 20
 
 // maxPreviousManifests is how many of the newest manifests the next run reads, at most.
 const maxPreviousManifests = 10
@@ -78,6 +82,7 @@ func (r *backupRun) loadPrevious(ctx context.Context, dir string, selected map[s
 	// path where the answer is load-bearing.
 	out := map[string]previousCopy{}
 	decided := map[string]bool{}
+	sizes := listedSizes(objs)
 	read := 0
 	for _, key := range filedManifests(objs, dir) {
 		finished, err := time.Parse(manifestStamp, strings.TrimSuffix(path.Base(key), manifestSuffix))
@@ -88,6 +93,11 @@ func (r *backupRun) loadPrevious(ctx context.Context, dir string, selected map[s
 			break
 		}
 		read++
+		// Refused unread: the listing already says it is past the cap.
+		if err := oversized(key, sizes[key]); err != nil {
+			r.log.Warn("passing over a previous manifest this run cannot read or trust", "key", key, "err", err)
+			continue
+		}
 
 		// What the skip needs of each entry, and only of the repositories still undecided: the
 		// rest of a large manifest is ref maps of repositories this run does not need.

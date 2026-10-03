@@ -5,8 +5,8 @@ import (
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"strings"
 
@@ -32,15 +32,29 @@ type VerifyResult struct {
 
 // Verify checks the manifest's Ed25519 signature, then re-reads every referenced
 // artifact and recomputes its SHA-256 against the manifest. Read-only.
+//
+// It reads at most maxManifestBytes of the manifest, the cap every other reader has. It used to
+// read the whole object, so verify read a manifest that restore and drill then refused, and a
+// large enough object could take the memory of whatever ran it.
 func Verify(ctx context.Context, d VerifyDeps, manifestKey string) (*VerifyResult, error) {
+	return verifyWithin(ctx, d, manifestKey, maxManifestBytes)
+}
+
+// verifyWithin is Verify reading at most limit bytes of the manifest, so a test can reach the cap
+// without a manifest that large.
+func verifyWithin(ctx context.Context, d VerifyDeps, manifestKey string, limit int64) (*VerifyResult, error) {
 	log := orDefault(d.Logger)
 	res := &VerifyResult{ManifestKey: manifestKey}
 
-	canon, err := getBytes(ctx, d.Dest, manifestKey)
+	canon, err := readCapped(ctx, d.Dest, manifestKey, limit)
+	var large *objectTooLarge
+	if errors.As(err, &large) {
+		return res, fmt.Errorf("read manifest: %s is larger than the %s this engine reads", manifestKey, mib(limit))
+	}
 	if err != nil {
 		return res, fmt.Errorf("read manifest: %w", err)
 	}
-	sigB64, err := getBytes(ctx, d.Dest, manifestKey+".sig")
+	sigB64, err := readCapped(ctx, d.Dest, manifestKey+".sig", maxSignatureBytes)
 	if err != nil {
 		return res, fmt.Errorf("read signature: %w", err)
 	}
@@ -95,15 +109,6 @@ func Verify(ctx context.Context, d VerifyDeps, manifestKey string) (*VerifyResul
 	return res, nil
 }
 
-func getBytes(ctx context.Context, d dest.Destination, key string) ([]byte, error) {
-	rc, err := d.Get(ctx, key)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = rc.Close() }()
-	return io.ReadAll(rc)
-}
-
 // getSHA streams an object through SHA-256 without buffering it whole.
 func getSHA(ctx context.Context, d dest.Destination, key string) (string, error) {
 	rc, err := d.Get(ctx, key)
@@ -152,11 +157,11 @@ type VerifyDrillResult struct {
 func VerifyDrill(ctx context.Context, d VerifyDeps, drillKey string) (*VerifyDrillResult, error) {
 	res := &VerifyDrillResult{DrillKey: drillKey}
 
-	canon, err := getBytes(ctx, d.Dest, drillKey)
+	canon, err := readCapped(ctx, d.Dest, drillKey, maxManifestBytes)
 	if err != nil {
 		return res, fmt.Errorf("read drill report: %w", err)
 	}
-	sigB64, err := getBytes(ctx, d.Dest, drillKey+".sig")
+	sigB64, err := readCapped(ctx, d.Dest, drillKey+".sig", maxSignatureBytes)
 	if err != nil {
 		return res, fmt.Errorf("read signature: %w", err)
 	}

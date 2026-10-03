@@ -470,6 +470,11 @@ func findRestoreChecks(ctx context.Context, d dest.Destination, pub ed25519.Publ
 		return nil, fmt.Errorf("no signed manifest records %s as a copy: %s records %q as %s%s, so that run holds no copy of it to restore. A copy is recorded by the manifest of the run that finished it",
 			bundleKey, rep.namedIn, slug, rep.named.Status, why)
 	}
+	if rep.tooLarge > 0 {
+		// Not a rotated key, and saying so would send an operator after the wrong thing.
+		return nil, fmt.Errorf("no signed manifest this engine can read records %s: %d of the %d %s are larger than the %s it reads, as the warnings above say; %v. -manifest refuses it for the same reason. Without manifest.publicKeyPath, restore checks the bundle against its unsigned sha256 sidecar instead",
+			bundleKey, rep.tooLarge, rep.seen, searched, mib(maxManifestBytes), rep.largest)
+	}
 	if rep.passed > 0 {
 		return nil, fmt.Errorf("no signed manifest records %s: %d of the %d %s did not verify with the configured public key or could not be used, as the warnings above say. If the signing key was rotated, point manifest.publicKeyPath at the key that signed this backup; otherwise pass -manifest <key>, the manifestKey the backup printed",
 			bundleKey, rep.passed, rep.seen, searched)
