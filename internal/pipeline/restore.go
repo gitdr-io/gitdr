@@ -147,7 +147,7 @@ func Restore(ctx context.Context, d RestoreDeps, req RestoreRequest) (*RestoreRe
 	if err != nil {
 		return nil, err
 	}
-	gotSHA, _, err := crypto.SHA256File(storedBundle)
+	gotSHA, _, err := crypto.SHA256File(ctx, storedBundle)
 	if err != nil {
 		return nil, err
 	}
@@ -166,7 +166,7 @@ func Restore(ctx context.Context, d RestoreDeps, req RestoreRequest) (*RestoreRe
 	bundlePath := storedBundle
 	if d.EncryptionKey != nil {
 		bundlePath = filepath.Join(tmp, req.Name+".bundle")
-		if err := crypto.DecryptFile(storedBundle, bundlePath, d.EncryptionKey); err != nil {
+		if err := crypto.DecryptFile(ctx, storedBundle, bundlePath, d.EncryptionKey); err != nil {
 			return nil, fmt.Errorf("decrypt bundle: %w", err)
 		}
 	}
@@ -230,7 +230,7 @@ func Restore(ctx context.Context, d RestoreDeps, req RestoreRequest) (*RestoreRe
 		// Checked before anything reads the data, the same order the bundle gets:
 		// checksum first, so a tampered archive is refused before it is extracted.
 		if checks != nil {
-			gotLfs, _, err := crypto.SHA256File(storedLfs)
+			gotLfs, _, err := crypto.SHA256File(ctx, storedLfs)
 			if err != nil {
 				return nil, err
 			}
@@ -242,7 +242,7 @@ func Restore(ctx context.Context, d RestoreDeps, req RestoreRequest) (*RestoreRe
 		lfsTar := storedLfs
 		if d.EncryptionKey != nil {
 			lfsTar = filepath.Join(tmp, req.Name+".lfs.tar")
-			if err := crypto.DecryptFile(storedLfs, lfsTar, d.EncryptionKey); err != nil {
+			if err := crypto.DecryptFile(ctx, storedLfs, lfsTar, d.EncryptionKey); err != nil {
 				return nil, fmt.Errorf("decrypt lfs: %w", err)
 			}
 		}

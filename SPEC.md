@@ -537,6 +537,15 @@ reach them, and the same day's rerun skips them. Up to v0.1.20 a stop cancelled 
 own upload, so a stopped run filed nothing. A caller that kills the engine should wait a minute
 after SIGTERM before it does.
 
+Of those 45 seconds, the repositories in flight get 30. Their LFS archive, encryption and
+checksums stop at their next read, as their git commands and their uploads do. One still running
+30 seconds after the stop, in a step that does not stop at once, is recorded as `failed` with
+`stopped before it finished: <cause>; still running 30s after the stop` and the artifacts it had
+written by then, and the manifest is written without waiting for it any longer. *Amended
+2026-10-04, before v0.1.21 was tagged: the run waited for every repository in flight without a
+bound, and those steps ran to the end of their file, so a repository archiving or hashing many GiB
+when the run was stopped could outlast the 45 seconds and take the manifest with it.*
+
 Skipping is reported as `status: "skipped"` with a `reason`, the same shape already used for a
 repository with no commits — additive, and a consumer switching on `status` sees a value it
 already knows.

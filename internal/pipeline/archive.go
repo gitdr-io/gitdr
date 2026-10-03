@@ -2,26 +2,36 @@ package pipeline
 
 import (
 	"archive/tar"
+	"context"
 	"fmt"
 	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
+
+	"gitdr.io/gitdr/internal/ctxio"
 )
 
 // writeTarFile tars srcDir's contents (paths relative to srcDir) into dstFile.
-func writeTarFile(srcDir, dstFile string) error { return writeTar(srcDir, dstFile, false) }
+func writeTarFile(ctx context.Context, srcDir, dstFile string) error {
+	return writeTar(ctx, srcDir, dstFile, false)
+}
 
 // moveIntoTar is writeTarFile that removes each file from srcDir once it is in the archive, so
 // the LFS objects and their archive are never both on the scratch disk whole.
-func moveIntoTar(srcDir, dstFile string) error { return writeTar(srcDir, dstFile, true) }
+func moveIntoTar(ctx context.Context, srcDir, dstFile string) error {
+	return writeTar(ctx, srcDir, dstFile, true)
+}
 
 // archiveLFS is how a backup archives a repository's LFS objects: moveIntoTar. A test replaces it
-// to fail the archive, which no fixture can make fail on its own (export_test.go).
+// to fail the archive, which no fixture can make fail on its own, or to hold it (export_test.go).
 var archiveLFS = moveIntoTar
 
-func writeTar(srcDir, dstFile string, removeEach bool) error {
+// writeTar stops once ctx is done, before the next file and at the next read of the one being
+// copied, with ctx's error. A stopped backup used to wait for the archive of every repository in
+// flight to be finished, many GiB of LFS objects each, and the manifest's grace ran out meanwhile.
+func writeTar(ctx context.Context, srcDir, dstFile string, removeEach bool) error {
 	f, err := os.Create(dstFile)
 	if err != nil {
 		return fmt.Errorf("tar create %q: %w", dstFile, err)
@@ -29,6 +39,9 @@ func writeTar(srcDir, dstFile string, removeEach bool) error {
 	tw := tar.NewWriter(f)
 	walkErr := filepath.WalkDir(srcDir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
+			return err
+		}
+		if err := ctx.Err(); err != nil {
 			return err
 		}
 		rel, err := filepath.Rel(srcDir, path)
@@ -64,7 +77,7 @@ func writeTar(srcDir, dstFile string, removeEach bool) error {
 		if err != nil {
 			return err
 		}
-		_, err = io.Copy(tw, src)
+		_, err = io.Copy(tw, ctxio.Reader(ctx, src))
 		if cerr := src.Close(); err == nil {
 			err = cerr
 		}

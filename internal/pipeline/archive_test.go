@@ -2,6 +2,8 @@ package pipeline
 
 import (
 	"archive/tar"
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -128,6 +130,31 @@ func TestExtractTarFileRefusesPrePlantedSymlink(t *testing.T) {
 	}
 }
 
+// An archive stops with its context, with the context's error, and leaves the objects it has not
+// reached where they are. A backup stopped during the archive of many GiB of LFS objects used to
+// wait for the last of them.
+func TestAnArchiveStopsWithItsContext(t *testing.T) {
+	dir := t.TempDir()
+	srcDir := filepath.Join(dir, "lfs")
+	for _, name := range []string{"a", "b", "c"} {
+		p := filepath.Join(srcDir, "objects", name, name+"-oid")
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(name), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ctx, stop := context.WithCancel(t.Context())
+	stop()
+	if err := moveIntoTar(ctx, srcDir, filepath.Join(dir, "lfs.tar")); !errors.Is(err, context.Canceled) {
+		t.Fatalf("the stopped archive returned %v, want context.Canceled", err)
+	}
+	if !dirHasFiles(filepath.Join(srcDir, "objects", "c")) {
+		t.Error("the stopped archive moved objects it should not have reached")
+	}
+}
+
 // The ordinary path still has to work: a directory and a regular file round-trip.
 func TestWriteAndExtractTarFileRoundTrip(t *testing.T) {
 	dir := t.TempDir()
@@ -141,7 +168,7 @@ func TestWriteAndExtractTarFileRoundTrip(t *testing.T) {
 	}
 
 	archive := filepath.Join(dir, "out.tar")
-	if err := writeTarFile(srcDir, archive); err != nil {
+	if err := writeTarFile(t.Context(), srcDir, archive); err != nil {
 		t.Fatal(err)
 	}
 	destDir := filepath.Join(dir, "dest")
@@ -173,7 +200,7 @@ func TestWriteTarFileSkipsSymlinks(t *testing.T) {
 	}
 
 	archive := filepath.Join(dir, "out.tar")
-	if err := writeTarFile(srcDir, archive); err != nil {
+	if err := writeTarFile(t.Context(), srcDir, archive); err != nil {
 		t.Fatal(err)
 	}
 

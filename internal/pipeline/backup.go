@@ -282,6 +282,16 @@ func (r *backupRun) selectRepos(ctx context.Context) ([]source.Repo, error) {
 // stopped. The caller that stops it waits longer than this before it kills it.
 const manifestGrace = 45 * time.Second
 
+// inFlightGrace is how much of manifestGrace a stopped run gives the repositories it has in
+// flight. The other 15 s are the manifest's own.
+//
+// A stop ends most of what a repository does at once: its git commands are killed, its reads and
+// writes are on the stopped context, and its archive, encryption and checksums stop at their next
+// read. A step that does none of that, a whole-file checksum a store computes before it sends a
+// byte say, used to hold the run until it was done, and the grace ran out under the manifest's own
+// upload. A variable, so a test can shorten it (export_test.go).
+var inFlightGrace = manifestGrace - 15*time.Second
+
 // manifestContext is the context the manifest is written on. Stopping ctx does not cancel it,
 // because a stopped run still has to file what it did: the copies it finished are in the bucket,
 // and without a manifest nothing can verify, restore or drill them, and the next run cannot skip
@@ -298,19 +308,36 @@ func manifestContext(ctx context.Context, grace time.Duration) (context.Context,
 // stoppedBefore is the error of a repository the run was stopped before finishing.
 const stoppedBefore = "stopped before it finished"
 
-// fanOut backs up repos with bounded concurrency, preserving input order. Each
-// goroutine writes a distinct entries[i], so no lock is needed.
+// fanOut backs up repos with bounded concurrency, preserving input order.
 //
 // Once ctx is done, at the deadline or on a stop signal, nothing more is started. A repository
 // that was never started, or that failed after the stop, is recorded as failed and stopped before
 // it finished, so the manifest names every repository the run selected. The ones in flight are
-// waited for: their git commands are killed with the context.
+// waited for, their git commands killed with the context, for inFlightGrace at most. One still
+// running then is recorded as stopped before it finished, with what it had written, and the run
+// goes on to its manifest without waiting for it any longer.
 func (r *backupRun) fanOut(ctx context.Context, repos []source.Repo, ret dest.Retention) []RepoEntry {
 	limit := r.cfg.Backup.Concurrency
 	if limit < 1 {
 		limit = 1
 	}
 	entries := make([]RepoEntry, len(repos))
+	progress := make([]*copyProgress, len(repos))
+	// Each entry is settled once, by its repository or by the run that stopped waiting for it,
+	// whichever comes first, and its repo finished event is written then. What a repository
+	// returns after the run stopped waiting for it is dropped.
+	var mu sync.Mutex
+	settled := make([]bool, len(repos))
+	settle := func(i int, e RepoEntry) {
+		mu.Lock()
+		defer mu.Unlock()
+		if settled[i] {
+			return
+		}
+		entries[i], settled[i] = e, true
+		r.finished(e)
+	}
+
 	sem := make(chan struct{}, limit)
 	var wg sync.WaitGroup
 	for i := range repos {
@@ -327,25 +354,83 @@ func (r *backupRun) fanOut(ctx context.Context, repos []source.Repo, ret dest.Re
 			cause := context.Cause(ctx)
 			r.log.Warn("repositories not started; the run was stopped", "count", len(repos)-i, "cause", cause)
 			for j := i; j < len(repos); j++ {
-				entries[j] = failedEntry(repos[j].Slug(), fmt.Errorf("%s: %w", stoppedBefore, cause))
-				r.finished(entries[j])
+				settle(j, failedEntry(repos[j].Slug(), fmt.Errorf("%s: %w", stoppedBefore, cause)))
 			}
 			break
 		}
+		progress[i] = &copyProgress{}
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			e := r.backupOne(ctx, repos[i], ret)
+			e := r.backupOne(ctx, repos[i], ret, progress[i])
 			if e.Status == StatusFailed && ctx.Err() != nil {
 				e.Error = stoppedBefore + ": " + e.Error
 			}
-			entries[i] = e
-			r.finished(e)
+			settle(i, e)
 		}(i)
 	}
-	wg.Wait()
+
+	all := make(chan struct{})
+	go func() { wg.Wait(); close(all) }()
+	select {
+	case <-all:
+		return entries
+	case <-ctx.Done():
+	}
+	wait := time.NewTimer(inFlightGrace)
+	defer wait.Stop()
+	select {
+	case <-all:
+		return entries
+	case <-wait.C:
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	cause := context.Cause(ctx)
+	for i := range repos {
+		if settled[i] {
+			continue
+		}
+		r.log.Warn("a repository was still running when the run could wait no longer; recording it as stopped",
+			"repo", repos[i].Slug(), "waited", inFlightGrace)
+		e := failedEntry(repos[i].Slug(), fmt.Errorf("%s: %w; still running %s after the stop", stoppedBefore, cause, inFlightGrace))
+		e.Artifacts = progress[i].written()
+		entries[i], settled[i] = e, true
+		r.finished(e)
+	}
 	return entries
+}
+
+// copyProgress is what one repository has written so far. The run reads it when it stops waiting
+// for a repository that may still be writing, so it is locked.
+type copyProgress struct {
+	mu        sync.Mutex
+	artifacts map[string]ArtifactInfo // by kind
+}
+
+func (p *copyProgress) wrote(a ArtifactInfo) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.artifacts == nil {
+		p.artifacts = map[string]ArtifactInfo{}
+	}
+	p.artifacts[a.Kind] = a
+}
+
+// written is what has been written so far, in the order a manifest lists a repository's artifacts
+// whatever order they were written in.
+func (p *copyProgress) written() []ArtifactInfo {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	var out []ArtifactInfo
+	for _, kind := range []string{"bundle", "meta", "sha256", "lfs"} {
+		if a, ok := p.artifacts[kind]; ok {
+			out = append(out, a)
+		}
+	}
+	return out
 }
 
 // The names of the events a backup writes to stderr, part of the output contract (SPEC §11): a
@@ -388,8 +473,9 @@ func (r *backupRun) finished(e RepoEntry) {
 	r.log.Info(EventRepoFinished, attrs...)
 }
 
-// backupOne adds resume-skip and logging around backupRepo.
-func (r *backupRun) backupOne(ctx context.Context, repo source.Repo, ret dest.Retention) RepoEntry {
+// backupOne adds resume-skip and logging around backupRepo, which records each artifact it writes in
+// progress.
+func (r *backupRun) backupOne(ctx context.Context, repo source.Repo, ret dest.Retention, progress *copyProgress) RepoEntry {
 	if r.cfg.Backup.Resume {
 		if entry, ok := r.resumed(ctx, repo); ok {
 			if entry.Status == StatusFailed {
@@ -434,7 +520,7 @@ func (r *backupRun) backupOne(ctx context.Context, repo source.Repo, ret dest.Re
 		}
 	}
 
-	entry := r.backupRepo(ctx, repo, ret)
+	entry := r.backupRepo(ctx, repo, ret, progress)
 	// Recorded only on a copy that succeeded. A failed run's refs describe a repository
 	// nothing was written for, and trusting them next time would skip the retry.
 	if entry.Status == StatusSuccess && len(current) > 0 {
@@ -633,7 +719,10 @@ func (r *backupRun) retention() dest.Retention {
 // same day's rerun fails the repository by name (resumed). Up to v0.1.20 the bundle, the metadata
 // and the checksum were stored before the LFS objects were even fetched, so an LFS failure always
 // left a partial copy.
-func (r *backupRun) backupRepo(ctx context.Context, repo source.Repo, ret dest.Retention) RepoEntry {
+//
+// Each artifact goes into progress as it lands, so a repository the run stops waiting for is still
+// recorded with what it wrote (fanOut).
+func (r *backupRun) backupRepo(ctx context.Context, repo source.Repo, ret dest.Retention, progress *copyProgress) RepoEntry {
 	entry := RepoEntry{Slug: repo.Slug(), Status: StatusSuccess}
 	fail := func(err error) RepoEntry {
 		entry.Status = StatusFailed
@@ -712,7 +801,7 @@ func (r *backupRun) backupRepo(ctx context.Context, repo source.Repo, ret dest.R
 		}
 		if lfsDir := filepath.Join(mirror, "lfs"); dirHasFiles(lfsDir) {
 			lfsTar := filepath.Join(tmp, repo.Name+".lfs.tar")
-			if err := archiveLFS(lfsDir, lfsTar); err != nil {
+			if err := archiveLFS(ctx, lfsDir, lfsTar); err != nil {
 				return fail(err)
 			}
 			files = append(files, &stagedArtifact{kind: "lfs", key: key(".lfs.tar"), path: lfsTar})
@@ -732,7 +821,7 @@ func (r *backupRun) backupRepo(ctx context.Context, repo source.Repo, ret dest.R
 	// Encrypted, when that is on, and checksummed: the stored checksum covers the stored object,
 	// ciphertext when encrypted.
 	for _, f := range files {
-		if err := r.stageFile(f); err != nil {
+		if err := r.stageFile(ctx, f); err != nil {
 			return fail(err)
 		}
 	}
@@ -764,23 +853,15 @@ func (r *backupRun) backupRepo(ctx context.Context, repo source.Repo, ret dest.R
 	}
 
 	// Every upload in that order, and the sidecar last.
-	written := map[string]ArtifactInfo{}
-	record := func() {
-		for _, kind := range []string{"bundle", "meta", "sha256", "lfs"} {
-			if a, ok := written[kind]; ok {
-				entry.Artifacts = append(entry.Artifacts, a)
-			}
-		}
-	}
 	for _, a := range staged {
 		res, err := r.putStaged(ctx, a, ret)
 		if err != nil {
-			record() // a failed entry still lists what it wrote
+			entry.Artifacts = progress.written() // a failed entry still lists what it wrote
 			return fail(err)
 		}
-		written[a.kind] = artifact(a.kind, res, a.sha)
+		progress.wrote(artifact(a.kind, res, a.sha))
 	}
-	record()
+	entry.Artifacts = progress.written()
 
 	// The code is stored, and the repository fails on the metadata it could not have.
 	if metaErr != nil {
@@ -801,17 +882,17 @@ type stagedArtifact struct {
 
 // stageFile encrypts a's file when encryption is on, and checksums what will be stored. The
 // plaintext is removed once the ciphertext exists, as the scratch disk holds one of them at a
-// time.
-func (r *backupRun) stageFile(a *stagedArtifact) error {
+// time. Both stop with ctx.
+func (r *backupRun) stageFile(ctx context.Context, a *stagedArtifact) error {
 	if r.encKey != nil {
 		enc := a.path + ".enc"
-		if err := crypto.EncryptFile(a.path, enc, r.encKey); err != nil {
+		if err := crypto.EncryptFile(ctx, a.path, enc, r.encKey); err != nil {
 			return fmt.Errorf("encrypt: %w", err)
 		}
 		_ = os.Remove(a.path)
 		a.path = enc
 	}
-	sha, size, err := crypto.SHA256File(a.path)
+	sha, size, err := crypto.SHA256File(ctx, a.path)
 	if err != nil {
 		return err
 	}

@@ -25,7 +25,7 @@ func FuzzExtractTar(f *testing.F) {
 		f.Fatal(err)
 	}
 	genuine := filepath.Join(f.TempDir(), "genuine.tar")
-	if err := writeTarFile(srcDir, genuine); err != nil {
+	if err := writeTarFile(f.Context(), srcDir, genuine); err != nil {
 		f.Fatal(err)
 	}
 	genuineBytes, err := os.ReadFile(genuine)

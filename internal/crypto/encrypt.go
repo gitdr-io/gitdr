@@ -2,6 +2,7 @@ package crypto
 
 import (
 	"bufio"
+	"context"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
@@ -12,6 +13,8 @@ import (
 	"io"
 	"os"
 	"strings"
+
+	"gitdr.io/gitdr/internal/ctxio"
 )
 
 // Optional client-side envelope encryption. Each stream gets a random data key (DEK)
@@ -171,16 +174,19 @@ func Decrypt(dst io.Writer, src io.Reader, kek []byte) error {
 }
 
 // EncryptFile streams srcPath to a new encrypted dstPath.
-func EncryptFile(srcPath, dstPath string, kek []byte) error {
-	return fileXform(srcPath, dstPath, kek, Encrypt)
+func EncryptFile(ctx context.Context, srcPath, dstPath string, kek []byte) error {
+	return fileXform(ctx, srcPath, dstPath, kek, Encrypt)
 }
 
 // DecryptFile streams an encrypted srcPath to a new plaintext dstPath.
-func DecryptFile(srcPath, dstPath string, kek []byte) error {
-	return fileXform(srcPath, dstPath, kek, Decrypt)
+func DecryptFile(ctx context.Context, srcPath, dstPath string, kek []byte) error {
+	return fileXform(ctx, srcPath, dstPath, kek, Decrypt)
 }
 
-func fileXform(srcPath, dstPath string, kek []byte, fn func(io.Writer, io.Reader, []byte) error) error {
+// fileXform runs fn from srcPath into a new dstPath. Once ctx is done the read stops at its next
+// chunk and fn fails with ctx's error, so a stop does not wait for a file of many GiB to be done.
+// The part of dstPath written by then is the caller's to remove, with the rest of its scratch.
+func fileXform(ctx context.Context, srcPath, dstPath string, kek []byte, fn func(io.Writer, io.Reader, []byte) error) error {
 	in, err := os.Open(srcPath)
 	if err != nil {
 		return err
@@ -190,7 +196,7 @@ func fileXform(srcPath, dstPath string, kek []byte, fn func(io.Writer, io.Reader
 	if err != nil {
 		return err
 	}
-	if err := fn(out, in, kek); err != nil {
+	if err := fn(out, ctxio.Reader(ctx, in), kek); err != nil {
 		_ = out.Close()
 		return err
 	}

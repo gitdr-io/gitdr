@@ -2,9 +2,13 @@ package crypto
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
+	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -74,6 +78,48 @@ func TestDecryptTruncation(t *testing.T) {
 	truncated := ct.Bytes()[:ct.Len()-(encChunk+encTag)] // drop the final (last-flagged) chunk
 	if err := Decrypt(&bytes.Buffer{}, bytes.NewReader(truncated), key); err == nil {
 		t.Fatal("decrypt of a truncated stream must fail")
+	}
+}
+
+// The file helpers stop with their context. A backup stopped by SIGTERM used to wait for the
+// encryption and the hash of every artifact in flight to reach the end of the file, and the
+// manifest's grace ran out meanwhile.
+func TestTheFileHelpersStopWithTheirContext(t *testing.T) {
+	dir := t.TempDir()
+	plain := filepath.Join(dir, "artifact")
+	body := bytes.Repeat([]byte("z"), 3*encChunk+7)
+	if err := os.WriteFile(plain, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	key := randKey(t)
+	stopped, stop := context.WithCancel(t.Context())
+	stop()
+
+	enc := filepath.Join(dir, "artifact.enc")
+	if err := EncryptFile(stopped, plain, enc, key); !errors.Is(err, context.Canceled) {
+		t.Errorf("EncryptFile on a stopped context: %v, want context.Canceled", err)
+	}
+	if _, _, err := SHA256File(stopped, plain); !errors.Is(err, context.Canceled) {
+		t.Errorf("SHA256File on a stopped context: %v, want context.Canceled", err)
+	}
+
+	// Not stopped, they do the whole file.
+	if err := EncryptFile(t.Context(), plain, enc, key); err != nil {
+		t.Fatal(err)
+	}
+	if err := DecryptFile(stopped, enc, filepath.Join(dir, "stopped"), key); !errors.Is(err, context.Canceled) {
+		t.Errorf("DecryptFile on a stopped context: %v, want context.Canceled", err)
+	}
+	back := filepath.Join(dir, "artifact.back")
+	if err := DecryptFile(t.Context(), enc, back, key); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := os.ReadFile(back); err != nil || !bytes.Equal(got, body) {
+		t.Errorf("the round trip gave %d bytes (%v), want the %d written", len(got), err, len(body))
+	}
+	sum, n, err := SHA256File(t.Context(), plain)
+	if err != nil || n != int64(len(body)) || sum != SHA256Bytes(body) {
+		t.Errorf("SHA256File = %s, %d, %v; want %s over %d bytes", sum, n, err, SHA256Bytes(body), len(body))
 	}
 }
 
