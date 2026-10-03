@@ -75,7 +75,8 @@ flowchart TB
 
 Trust boundaries. TB1 the runner (secrets live here, anything inside is as trusted as the
 runner). TB2 the network to the VCS. TB3 the network to the object store (immutability is
-enforced on the far side). TB4 the `gitdr` to `git` subprocess (argv/env exposure).
+enforced on the far side). TB4 the `gitdr` to `git` subprocess: argv and environment exposure,
+and git and git-lfs parsing content an attacker controls while running as gitdr's own user.
 
 ## 4. Assumptions and out of scope
 
@@ -104,6 +105,8 @@ Ratings: L/M/H Likelihood times Impact. "Residual" is what remains after the mit
 |---|---|---|---|
 | T/E | Argument injection via crafted repo name or URL | `--` end-of-options guards, no shell, validated inputs | L×H / low |
 | I | Token visible in argv or `/proc` | Auth via env, never the command line | M×H / low |
+| I/E | A flaw in git or git-lfs, reached through crafted repository content, reads the run's secrets: from git's own environment, from gitdr's (`/proc/<pid>/environ`, `/proc/<pid>/mem`, ptrace), or from a file gitdr's user can read | git gets an allowlisted environment with none of gitdr's secrets in it. gitdr is non-dumpable from exec (its binary is root's, mode 0711) and again from its init (prctl). gitdr's own secrets leave its environment once read. Keys go in the environment rather than in files, and the VM secrets file is root's | M×H / med: files gitdr's user can read, the identity and metadata endpoints of the machine or pod, and the source credential, which git holds by design |
+| T/E | A compromised git rewrites its configuration (`~/.gitconfig`) so that it runs again in later runs | Each run gets an empty `HOME` of its own (systemd `RuntimeDirectory`, the cron wrapper's `mktemp`, the chart's emptyDir), and git's configuration lives in a root-owned `/etc/gitconfig` | L×H / low |
 
 ### E3, data store: secrets and keys on the runner (TB1)
 | STRIDE | Threat | Mitigation | L×I / residual |
@@ -170,6 +173,7 @@ The headline scenarios, resolved by the controls above.
 | T6 | Confidentiality vs the storage provider | M | M | Med | Client-side envelope encryption |
 | T7 | Retention expiry leaves data deletable | M | M | Med | Retention at or above RPO, lifecycle policy |
 | T8 | Signing-key or KEK compromise | L | H | Med | Keys off-runner (KMS/HSM), scoped, rotated, stored apart from backups |
+| T9 | A git or git-lfs flaw, reached through repository content, reads the run's secrets | M | H | Med | Allowlisted git environment, gitdr non-dumpable (0711 binary plus prctl), keys in env not files, an empty `HOME` per run |
 
 ## 8. Residual risks and operator responsibilities
 
@@ -186,8 +190,15 @@ The High risks drop to Low only if the operator holds up their side.
 - Choose a retention window that matches your RPO, and enable client-side encryption when
   the storage provider must not read your data.
 - Verify release signatures before you deploy.
+- Give gitdr its keys in the environment, not as files: git runs as gitdr's user and can read
+  any file that user can. Install the binary owned by root with mode 0711, as the image does, and
+  keep the secrets file on a VM root's (`deploy/README.md`).
+- Give each run an empty `HOME` of its own, and keep git's configuration in a root-owned
+  `/etc/gitconfig`.
 
 Accepted, un-mitigated by design: upstream VCS availability, metadata fidelity (audit-only
 issue/PR JSON), confidentiality without client-side encryption, and the fact that a runner
 compromised during a run can read that run's secrets and in-flight data. It still can't
-delete prior immutable backups.
+delete prior immutable backups. Likewise a git compromised through repository content can use
+the source credential it is given and reach what gitdr's user can: files, and the identity and
+metadata endpoints of the machine or pod.

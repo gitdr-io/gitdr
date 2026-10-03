@@ -2,6 +2,8 @@
 #   GITDR_GITHUB_APP_PRIVATE_KEY    PEM contents (or source.github.privateKeyPath)
 #   GITDR_MANIFEST_SIGNING_KEY      PEM contents (or manifest.signingKeyPath)
 #   AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY   S3-compatible static keys (opt-in)
+# Prefer the env vars to the *Path options: git runs as gitdr's user and can read any file that
+# user can, and a secret in gitdr's environment never reaches git (SPEC §6).
 # Any field can be overridden via GITDR_<PATH>, e.g. GITDR_DESTINATION_S3_BUCKET=foo.
 
 source:

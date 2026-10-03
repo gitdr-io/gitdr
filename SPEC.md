@@ -243,11 +243,16 @@ or a SAS. See §4, Azure.
   `ALL_PROXY` and `NO_PROXY`, in either case), the CA variables (`SSL_CERT_FILE`,
   `SSL_CERT_DIR`, `GIT_SSL_CAINFO` and `GIT_SSL_CAPATH`), and `GIT_HTTP_LOW_SPEED_LIMIT` and
   `GIT_HTTP_LOW_SPEED_TIME`. They also get gitdr's own `GIT_*` settings, which carry the source
-  credential. The destination's credentials and the signing and encryption keys never reach
-  them. Up to v0.1.20 git got the whole environment. Any other variable that changed what git
-  does, `GIT_CONFIG_GLOBAL` for instance, no longer reaches it, so configure git in
-  `~/.gitconfig` instead. git's messages are in English whatever the locale.
-  *Changed in v0.1.21.*
+  credential. A secret given to gitdr in its environment, such as the destination's credentials
+  or the signing and encryption keys, never reaches them. They can still reach whatever gitdr's
+  user can: a key given as a file (`manifest.signingKeyPath`, `source.github.privateKeyPath`, a
+  cloud credentials file), and the identity and metadata endpoints of the machine or pod. So give
+  keys in the environment, not as files. Up to v0.1.20 git got the whole environment. Any other
+  variable that changed what git does, `GIT_CONFIG_GLOBAL` for instance, no longer reaches it,
+  and gitdr names the ones it finds in a warning as it starts. Configure git in `/etc/gitconfig`,
+  owned by root, and give each run an empty `HOME` of its own, so that a git compromised once
+  cannot change what git does in the next run. git's messages are in English whatever the
+  locale. *Changed in v0.1.21.*
 - Reading gitdr. git runs as gitdr's user, and a process can read the environment and memory of
   another with the same user, through `/proc` or ptrace, unless that one is not dumpable. The
   kernel starts gitdr non-dumpable when the user it runs as cannot read its binary: the image
