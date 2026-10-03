@@ -156,6 +156,9 @@ func (r *backupRun) run(ctx context.Context) (*BackupResult, error) {
 	r.previous = r.loadPrevious(work, manifestDir(repos), selected)
 	r.copies = newCopySearch(r.dst, r.pub, r.log, func(slug string) bool { return selected[slug] })
 
+	// The first of the run's events (SPEC §11): how many repositories it will report on. From
+	// here every one of them gets its repo finished, however the run ends.
+	r.log.Info(EventReposSelected, "count", len(repos))
 	entries := r.fanOut(work, repos, ret)
 	allOK := true
 	for _, e := range entries {
@@ -203,7 +206,7 @@ func (r *backupRun) run(ctx context.Context) (*BackupResult, error) {
 	if err != nil {
 		return res, fmt.Errorf("manifest: %w", err)
 	}
-	r.log.Info("manifest written", "key", key, "status", m.Status)
+	r.log.Info(EventManifestWritten, "key", key, "status", m.Status)
 	if !allOK {
 		return res, errors.New("backup completed with failures")
 	}
@@ -322,10 +325,11 @@ func (r *backupRun) fanOut(ctx context.Context, repos []source.Repo, ret dest.Re
 				<-sem
 			}
 			cause := context.Cause(ctx)
+			r.log.Warn("repositories not started; the run was stopped", "count", len(repos)-i, "cause", cause)
 			for j := i; j < len(repos); j++ {
 				entries[j] = failedEntry(repos[j].Slug(), fmt.Errorf("%s: %w", stoppedBefore, cause))
+				r.finished(entries[j])
 			}
-			r.log.Warn("repositories not started; the run was stopped", "count", len(repos)-i, "cause", cause)
 			break
 		}
 		wg.Add(1)
@@ -337,10 +341,51 @@ func (r *backupRun) fanOut(ctx context.Context, repos []source.Repo, ret dest.Re
 				e.Error = stoppedBefore + ": " + e.Error
 			}
 			entries[i] = e
+			r.finished(e)
 		}(i)
 	}
 	wg.Wait()
 	return entries
+}
+
+// The names of the events a backup writes to stderr, part of the output contract (SPEC §11): a
+// caller reads them as they come to show progress, and matches on these strings.
+const (
+	// EventReposSelected comes once, with "count", the repositories the run will report on.
+	EventReposSelected = "repos selected"
+	// EventRepoFinished comes once per repository, after its last write.
+	EventRepoFinished = "repo finished"
+	// EventManifestWritten comes once, with "key" and "status", after the manifest is stored.
+	EventManifestWritten = "manifest written"
+)
+
+// finishedArtifact is an artifact as the repo finished event names it.
+type finishedArtifact struct {
+	Kind string `json:"kind"`
+	Key  string `json:"key"`
+	Size int64  `json:"size"`
+}
+
+// finished writes the repo finished event for e, which is final: what the manifest will record for
+// the repository. reason, error and copiedAt are there when the entry has them, copiedAt in the
+// manifest's own format.
+func (r *backupRun) finished(e RepoEntry) {
+	attrs := []any{"slug", e.Slug, "status", e.Status}
+	if e.Reason != "" {
+		attrs = append(attrs, "reason", e.Reason)
+	}
+	if e.Error != "" {
+		attrs = append(attrs, "error", e.Error)
+	}
+	artifacts := make([]finishedArtifact, 0, len(e.Artifacts))
+	for _, a := range e.Artifacts {
+		artifacts = append(artifacts, finishedArtifact{Kind: a.Kind, Key: a.Key, Size: a.Size})
+	}
+	attrs = append(attrs, "artifacts", artifacts)
+	if e.CopiedAt != nil {
+		attrs = append(attrs, "copiedAt", e.CopiedAt.UTC().Format(time.RFC3339Nano))
+	}
+	r.log.Info(EventRepoFinished, attrs...)
 }
 
 // backupOne adds resume-skip and logging around backupRepo.

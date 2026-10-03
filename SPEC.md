@@ -941,6 +941,37 @@ artifacts and exit zero on a document it cannot read.
 `verify` output shape is untouched: this is a second shape under a new flag, not a change to
 the first.*
 
+### Events on stderr (`backup`)
+
+`backup` writes three events among its log lines on stderr, so a caller can follow a run without
+waiting for it to end. Their `msg` strings and fields are part of this contract. They are written
+at level INFO, so a caller reads them with the log level at `info` or below, and in the default
+JSON log format, one object per line. The other log lines are not part of the contract.
+
+| `msg` | when | fields |
+|---|---|---|
+| `repos selected` | once, before the first repository | `count`: how many repositories the run will report on |
+| `repo finished` | once per repository, after its last write | `slug`, `status`, `reason`, `error`, `artifacts` `[{ "kind", "key", "size" }]`, `copiedAt` |
+| `manifest written` | once, after the manifest is stored | `key`, `status` |
+
+A `repo finished` line says what the manifest then records for the repository, field for field:
+`reason`, `error` and `copiedAt` appear only when the entry has them, `copiedAt` in the
+manifest's format, and `artifacts` is `[]` when nothing was written. Lines come in the order
+repositories finish, not the manifest's order. Every repository the run selected gets one, a run
+that was stopped included: those it stopped or never started are `failed` with an error that
+starts `stopped before it finished`. A caller can count the lines against `count`.
+
+The lines are provisional until `manifest written`. The signed manifest is the record, and a
+line for a run whose manifest was never stored records a copy nothing vouches for. For example:
+
+```json
+{"time":"2026-06-13T12:00:04.121Z","level":"INFO","msg":"repo finished","slug":"octo/empty","status":"skipped","reason":"repository has no commits","artifacts":[{"kind":"meta","key":"github.com/octo/empty/2026-06-13/empty.meta.json","size":41}]}
+```
+
+`internal/pipeline/events_test.go` pins the shape. *Added in v0.1.21, with `manifest written`
+documented as the contract string it already was. The manifest and `--output json` are
+unchanged.*
+
 Exit codes are fail-closed. Any non-zero code means the run is not to be trusted; the specific
 value narrows why.
 
