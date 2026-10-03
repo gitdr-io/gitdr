@@ -12,14 +12,19 @@ User=gitdr
 Group=gitdr
 
 # Secrets live here (GITDR_GITHUB_APP_PRIVATE_KEY, GITDR_MANIFEST_SIGNING_KEY, AWS_*,
-# GITDR_ENCRYPTION_KEY, ...). KEY=value per line; own it gitdr:gitdr, mode 0600.
+# GITDR_ENCRYPTION_KEY, ...). KEY=value per line; own it root:root, mode 0600. systemd reads it
+# as root, before it switches to User=, so neither gitdr nor the git it runs can read the file.
 EnvironmentFile=/etc/gitdr/gitdr.env
 
 ExecStart=/usr/local/bin/gitdr backup --config /etc/gitdr/config.yaml
 
 # Transient working area for clones/bundles (disk-backed, auto-created at /var/cache/gitdr).
 CacheDirectory=gitdr
-Environment=TMPDIR=/var/cache/gitdr HOME=/var/cache/gitdr
+# HOME is apart from the cache: an empty directory made for this run (/run/gitdr) and removed
+# when it ends, so a git compromised once cannot leave a .gitconfig for the next run.
+RuntimeDirectory=gitdr
+RuntimeDirectoryMode=0700
+Environment=TMPDIR=/var/cache/gitdr HOME=%t/gitdr
 UMask=0077
 
 # Hardening: gitdr only needs network + its cache dir. Lock the rest down.
