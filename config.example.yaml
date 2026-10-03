@@ -27,6 +27,8 @@ destination:
     region: "us-east-1"
     endpoint: ""               # empty = AWS; MinIO: http://localhost:9000
     usePathStyle: false        # true for MinIO and most S3-compatible stores
+    multipartThreshold: 0      # bytes; 0 = 4 GiB. Larger objects are written in parts
+    partSize: 0                # bytes; 0 = 64 MiB, the smallest part
   gcs:
     bucket: ""                 # GCS bucket with a LOCKED retention policy (Bucket Lock)
     endpoint: ""               # empty = real GCS; set for an emulator

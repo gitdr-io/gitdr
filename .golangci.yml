@@ -30,7 +30,7 @@ linters:
         - pattern: 'DeleteContainer\('
           msg: "storage is create-only; Azure container deletion is forbidden (invariant #3)"
         - pattern: 'AbortMultipartUpload\('
-          msg: "no multipart path exists; adding one is a deliberate review, not a side effect (invariant #3)"
+          msg: "an upload in parts is never aborted; the bucket's lifecycle rule ends one a stopped run left (invariant #3)"
         # Deletion is not the only way to lose a backup.
         - pattern: 'PutBucketLifecycleConfiguration\('
           msg: "a lifecycle rule deletes on a timer; retention belongs to the bucket owner (invariant #3)"

@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -33,6 +34,12 @@ type Options struct {
 	Region       string // defaults to us-east-1 (also fine for MinIO)
 	Endpoint     string // empty = AWS; set for MinIO/Wasabi/B2/IDrive
 	UsePathStyle bool   // true for MinIO and most S3-compatible stores
+	// MultipartThreshold is the size above which an object is written in parts; 0 is 4 GiB.
+	// PartSize is the smallest part; 0 is 64 MiB, and a larger object gets larger parts so it
+	// stays under 9,000 of them. Both are bounded by MinPartSize and MaxPartSize. They exist so
+	// a test can write in parts without writing gigabytes.
+	MultipartThreshold int64
+	PartSize           int64
 }
 
 // Backend is a create-only S3 Destination.
@@ -44,6 +51,12 @@ type Backend struct {
 	// S3-compatible stores return 501 for it, so for custom endpoints we fall back to a
 	// HeadObject pre-check instead.
 	conditionalWrite bool
+
+	multipartThreshold int64
+	partSize           int64
+	// composite is set once the store has refused a full-object CRC32 for an upload in parts.
+	// Every later upload asks for a composite one instead.
+	composite atomic.Bool
 }
 
 var _ dest.Destination = (*Backend)(nil)
@@ -63,6 +76,18 @@ func New(ctx context.Context, opts Options, logger *slog.Logger) (*Backend, erro
 	if region == "" {
 		region = "us-east-1"
 	}
+	threshold, partSize := opts.MultipartThreshold, opts.PartSize
+	if threshold == 0 {
+		threshold = defaultMultipartThreshold
+	}
+	if partSize == 0 {
+		partSize = defaultPartSize
+	}
+	for name, v := range map[string]int64{"multipart threshold": threshold, "part size": partSize} {
+		if v < MinPartSize || v > MaxPartSize {
+			return nil, fmt.Errorf("s3: %s %d is outside %d to %d bytes", name, v, MinPartSize, MaxPartSize)
+		}
+	}
 	cfg, err := awsconfig.LoadDefaultConfig(ctx, awsconfig.WithRegion(region))
 	if err != nil {
 		return nil, fmt.Errorf("s3: load aws config: %w", err)
@@ -74,10 +99,12 @@ func New(ctx context.Context, opts Options, logger *slog.Logger) (*Backend, erro
 		o.UsePathStyle = opts.UsePathStyle
 	})
 	return &Backend{
-		client:           client,
-		bucket:           opts.Bucket,
-		logger:           logger,
-		conditionalWrite: opts.Endpoint == "", // If-None-Match on AWS; HeadObject pre-check elsewhere
+		client:             client,
+		bucket:             opts.Bucket,
+		logger:             logger,
+		conditionalWrite:   opts.Endpoint == "", // If-None-Match on AWS; HeadObject pre-check elsewhere
+		multipartThreshold: threshold,
+		partSize:           partSize,
 	}, nil
 }
 
@@ -153,6 +180,19 @@ func (b *Backend) VerifyWorm(ctx context.Context) (dest.WormStatus, error) {
 // 16 MiB, so no object over 16 MiB could be written to MinIO over TLS. A checksum header already
 // on the request turns the trailer off (the same file, lines 131-139 and 285-290).
 func (b *Backend) PutImmutable(ctx context.Context, key string, r io.Reader, size int64, ret dest.Retention) (dest.PutResult, error) {
+	// Past the threshold, in parts (multipart.go). Every caller in gitdr hands a file or a byte
+	// slice, both readable at an offset; anything else goes as one PUT.
+	if ra, ok := r.(io.ReaderAt); ok && size > b.multipartThreshold {
+		var base int64
+		if s, ok := r.(io.Seeker); ok {
+			var err error
+			if base, err = s.Seek(0, io.SeekCurrent); err != nil {
+				return dest.PutResult{}, fmt.Errorf("s3: put %q: %w", key, err)
+			}
+		}
+		return b.putParts(ctx, key, ra, base, size, ret)
+	}
+
 	in := &awss3.PutObjectInput{
 		Bucket:            aws.String(b.bucket),
 		Key:               aws.String(key),

@@ -155,10 +155,12 @@ func buildDest(ctx context.Context, cfg *config.Config, log *slog.Logger) (dest.
 	switch cfg.Destination.Type {
 	case "s3":
 		return s3backend.New(ctx, s3backend.Options{
-			Bucket:       cfg.Destination.S3.Bucket,
-			Region:       cfg.Destination.S3.Region,
-			Endpoint:     cfg.Destination.S3.Endpoint,
-			UsePathStyle: cfg.Destination.S3.UsePathStyle,
+			Bucket:             cfg.Destination.S3.Bucket,
+			Region:             cfg.Destination.S3.Region,
+			Endpoint:           cfg.Destination.S3.Endpoint,
+			UsePathStyle:       cfg.Destination.S3.UsePathStyle,
+			MultipartThreshold: cfg.Destination.S3.MultipartThreshold,
+			PartSize:           cfg.Destination.S3.PartSize,
 		}, log)
 	case "gcs":
 		return gcsbackend.New(ctx, gcsbackend.Options{

@@ -9,8 +9,10 @@ package pipeline_test
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
+	"hash/crc32"
 	"io"
 	"os"
 	"path/filepath"
@@ -195,6 +197,83 @@ func s3Endpoint(t *testing.T) string {
 		t.Skip("set GITDR_TEST_S3_ENDPOINT (and AWS_* creds) to run the MinIO integration test")
 	}
 	return endpoint
+}
+
+// TestS3MultipartCreateOnly writes an object in parts to a real Object Lock store, reads it back
+// whole, finds its lock, and is refused a second write at the same key. The threshold is 8 MiB
+// and the parts 5 MiB, the smallest S3 takes, so the test sends 23 MiB where production would
+// need over 4 GiB.
+func TestS3MultipartCreateOnly(t *testing.T) {
+	endpoint := s3Endpoint(t)
+	bucket := envOr("GITDR_TEST_S3_BUCKET", "gitdr-itest")
+	region := envOr("AWS_REGION", "us-east-1")
+	ctx := context.Background()
+
+	provisionLockedBucket(ctx, t, endpoint, region, bucket)
+	dst, err := s3backend.New(ctx, s3backend.Options{
+		Bucket: bucket, Region: region, Endpoint: endpoint, UsePathStyle: true,
+		MultipartThreshold: 8 << 20, PartSize: 5 << 20,
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := make([]byte, 23<<20)
+	for i := range data {
+		data[i] = byte(i*7 + i>>20)
+	}
+	path := filepath.Join(t.TempDir(), "big.bundle")
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = f.Close() }()
+
+	key := fmt.Sprintf("github.com/octo/parts/%d.bundle", time.Now().UnixNano())
+	ret := dest.Retention{Mode: dest.RetentionCompliance, Until: time.Now().Add(24 * time.Hour)}
+	res, err := dst.PutImmutable(ctx, key, f, int64(len(data)), ret)
+	if err != nil {
+		t.Fatalf("put in parts: %v", err)
+	}
+	if res.Size != int64(len(data)) {
+		t.Errorf("size %d, want %d", res.Size, len(data))
+	}
+
+	rc, err := dst.Get(ctx, key)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	got, err := io.ReadAll(rc)
+	_ = rc.Close()
+	if err != nil || !bytes.Equal(got, data) {
+		t.Fatalf("read back %d bytes (%v), not the object written", len(got), err)
+	}
+	if obs, _, err := dst.ObserveRetention(ctx, key); obs != dest.RetentionPresent {
+		t.Errorf("retention on the object in parts: %s (%v), want present", obs, err)
+	}
+
+	// The store keeps the full-object CRC32 the upload asked for: it is what a lost answer to
+	// Complete is settled by.
+	cfg, err := awsconfig.LoadDefaultConfig(ctx, awsconfig.WithRegion(region))
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := awss3.NewFromConfig(cfg, func(o *awss3.Options) { o.BaseEndpoint, o.UsePathStyle = aws.String(endpoint), true })
+	head, err := raw.HeadObject(ctx, &awss3.HeadObjectInput{Bucket: aws.String(bucket), Key: aws.String(key), ChecksumMode: s3types.ChecksumModeEnabled})
+	if err != nil {
+		t.Fatalf("head: %v", err)
+	}
+	sum := crc32.ChecksumIEEE(data)
+	want := base64.StdEncoding.EncodeToString([]byte{byte(sum >> 24), byte(sum >> 16), byte(sum >> 8), byte(sum)})
+	if got := aws.ToString(head.ChecksumCRC32); got != want {
+		t.Errorf("the store reports CRC32 %q (%s) for the object in parts, want the full-object %q", got, head.ChecksumType, want)
+	}
+
+	if _, err := dst.PutImmutable(ctx, key, bytes.NewReader(data), int64(len(data)), ret); err == nil {
+		t.Fatal("a second write in parts to the same key succeeded; the destination is not create-only")
+	}
 }
 
 // TestS3CreateOnly proves the S3 destination refuses to overwrite.

@@ -83,16 +83,16 @@ storage calls the engine makes (`internal/dest/s3/s3.go`) for `backup`, `verify`
 |---|---|---|
 | `s3:GetBucketObjectLockConfiguration` | `GetObjectLockConfiguration` | the WORM check before every backup, and `doctor`. Without it the verdict is `unknown` and backups are written without retention |
 | `s3:ListBucket` | `ListObjectsV2` | the previous manifest, the resume check, the manifest a drill or restore looks up, the LFS archive |
-| `s3:GetObject` | `GetObject`, `HeadObject` | reading manifests, signatures and artifacts back. `HeadObject` is the create-only check before each write when `endpoint` is set |
+| `s3:GetObject` | `GetObject`, `HeadObject` | reading manifests, signatures and artifacts back. `HeadObject` is the create-only check before each write when `endpoint` is set, and how a write whose answer was lost is settled |
 | `s3:GetObjectRetention` | `GetObjectRetention` | confirming the first object of a run holds its lock. Optional: without it the manifest says `not-checked` |
-| `s3:PutObject` | `PutObject` | artifacts, the signed manifest, the drill report |
-| `s3:PutObjectRetention` | `PutObject` with `x-amz-object-lock-*` headers | AWS requires it to set retention on a new object, and `backup` does on every write to a bucket it confirmed immutable |
+| `s3:PutObject` | `PutObject`; `CreateMultipartUpload`, `UploadPart`, `CompleteMultipartUpload` | artifacts, the signed manifest, the drill report. An artifact over 4 GiB goes in parts, and AWS authorizes those three calls under `s3:PutObject` |
+| `s3:PutObjectRetention` | `PutObject` or `CreateMultipartUpload` with `x-amz-object-lock-*` headers | AWS requires it to set retention on a new object, and `backup` does on every write to a bucket it confirmed immutable |
 
 `s3:PutObjectRetention` also allows the `PutObjectRetention` call on existing objects. Under
 COMPLIANCE that can only lengthen a lock, and under GOVERNANCE shortening one also needs
 `s3:BypassGovernanceRetention`, which this policy leaves out. gitdr never makes that call.
 
-Left out on purpose: `s3:DeleteObject`, `s3:DeleteObjectVersion`,
+Left out on purpose: `s3:DeleteObject`, `s3:DeleteObjectVersion`, `s3:AbortMultipartUpload`,
 `s3:BypassGovernanceRetention`, `s3:PutObjectLegalHold`, `s3:PutBucketObjectLockConfiguration`,
 `s3:PutLifecycleConfiguration`, `s3:PutBucketPolicy`.
 
@@ -117,8 +117,8 @@ b2 key create --bucket my-worm-bucket gitdr-backup \
 | `readBucketRetentions` | `GetObjectLockConfiguration` | the WORM check |
 | `listFiles` | `ListObjectsV2` | as `s3:ListBucket` above |
 | `readFiles` | `GetObject`, `HeadObject` | reading back. B2 answers `If-None-Match` with 501, so gitdr checks every key with `HeadObject` before it writes |
-| `writeFiles` | `PutObject` | artifacts, manifests, drill reports |
-| `writeFileRetentions` | `PutObject` with Object Lock headers | Backblaze documents it as required to set a retention on upload (for its native upload call; its S3 page does not say either way) |
+| `writeFiles` | `PutObject`; `CreateMultipartUpload`, `UploadPart`, `CompleteMultipartUpload` | artifacts, manifests, drill reports. An artifact over 4 GiB goes in parts |
+| `writeFileRetentions` | `PutObject` or `CreateMultipartUpload` with Object Lock headers | Backblaze documents it as required to set a retention on upload (for its native upload call; its S3 page does not say either way) |
 | `readFileRetentions` | `GetObjectRetention` | the post-write lock check. Optional, as on AWS |
 
 Left out on purpose: `deleteFiles`, `bypassGovernance`, `writeBucketRetentions`, `writeBuckets`,
@@ -132,6 +132,27 @@ not deleting, the earlier versions stay and a locked one cannot be removed, but 
 reads as missing until it is unhidden. `verify` reports it.
 
 The auditor's key needs `listFiles,readFiles`.
+
+**Incomplete uploads.** An artifact over 4 GiB goes up in parts. A run stopped in the middle of
+one leaves those parts behind as an upload that never completes. It is not an object, `ls` does
+not show it, and AWS bills it as storage. gitdr never aborts an upload, because the key it runs
+with can take nothing away, so give the bucket a lifecycle rule that ends an incomplete upload
+after three days, longer than any one upload takes. On AWS:
+
+```json
+{"Rules": [{"ID": "end-incomplete-uploads", "Status": "Enabled", "Filter": {},
+  "AbortIncompleteMultipartUpload": {"DaysAfterInitiation": 3}}]}
+```
+
+```sh
+aws s3api put-bucket-lifecycle-configuration --bucket my-worm-bucket \
+  --lifecycle-configuration file://lifecycle.json
+```
+
+The rule ends uploads and touches no object, locked or not. On B2 the same rule is a lifecycle
+rule with `"daysFromStartingToCancelingUnfinishedLargeFiles": 3` and nothing else set: a
+`daysFromHidingToDeleting` in it would delete hidden files. MinIO ends incomplete uploads on its
+own after a day (`stale_uploads_expiry`).
 
 ## 3. Source credentials (read-only)
 

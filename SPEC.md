@@ -251,6 +251,19 @@ gitdr then reads the object's size and CRC32 with `HeadObject` in checksum mode,
 are this write's, the write succeeded. A different object at the key is still refused, and so is
 one the store will not give a checksum for. *Changed in v0.1.22.*
 
+An object over 4 GiB is written in parts, because a single PutObject stops at 5 GiB on AWS, B2,
+R2 and Wasabi. Parts are at least 64 MiB, and larger for a larger object so it stays under 9,000
+of them. Four go at a time, each with its CRC32 in a header, and a failed part is sent again on
+its own. The upload asks for a full-object CRC32, or for a composite one from a store that refuses
+that. Create-only holds as it does for one PUT. The key is checked before the upload starts, on
+every store, so gigabytes are never sent only to be refused. On AWS, completing the upload carries
+`If-None-Match` and the object's size; elsewhere the key is checked again just before. Completing
+is sent once, and a lost answer is settled as above. An upload is never aborted: one a stopped
+run leaves behind is ended by the bucket's lifecycle rule, which `docs/QUICKSTART.md` gives.
+`destination.s3.multipartThreshold` and `destination.s3.partSize`, in bytes from 5 MiB to 5 GiB,
+move the threshold and the smallest part, so a test can write in parts without writing gigabytes.
+*Changed in v0.1.22.*
+
 ## 5. Object storage authentication
 
 Use each cloud SDK's default credential provider chain. One code path resolves static keys

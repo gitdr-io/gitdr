@@ -201,6 +201,37 @@ func TestValidate(t *testing.T) {
 	}
 }
 
+// The multipart settings take S3's own bounds on a part, 5 MiB to 5 GiB, or 0 for the default.
+func TestMultipartSettingsStayInsideS3sBounds(t *testing.T) {
+	for _, tc := range []struct {
+		threshold, part int64
+		ok              bool
+	}{
+		{0, 0, true},
+		{8 << 20, 5 << 20, true},
+		{5 << 30, 5 << 30, true},
+		{5<<20 - 1, 0, false},
+		{0, 5<<30 + 1, false},
+		{-1, 0, false},
+	} {
+		c := Default()
+		c.Destination.S3.Bucket = "b"
+		c.Destination.S3.MultipartThreshold, c.Destination.S3.PartSize = tc.threshold, tc.part
+		if err := c.Validate(); (err == nil) != tc.ok {
+			t.Errorf("threshold %d, part %d: err = %v, want ok %v", tc.threshold, tc.part, err, tc.ok)
+		}
+	}
+	t.Setenv("GITDR_DESTINATION_S3_MULTIPARTTHRESHOLD", "8388608")
+	t.Setenv("GITDR_DESTINATION_S3_PARTSIZE", "5242880")
+	c, err := Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Destination.S3.MultipartThreshold != 8<<20 || c.Destination.S3.PartSize != 5<<20 {
+		t.Errorf("from the environment: threshold %d, part %d", c.Destination.S3.MultipartThreshold, c.Destination.S3.PartSize)
+	}
+}
+
 func TestSecretNeverFormatted(t *testing.T) {
 	c := Default()
 	c.Source.GitHub.PrivateKey = redact.Secret("super-secret-key")

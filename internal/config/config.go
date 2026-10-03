@@ -98,7 +98,18 @@ type S3Config struct {
 	Region       string `yaml:"region"`
 	Endpoint     string `yaml:"endpoint"`     // empty = AWS; MinIO/Wasabi/B2 set their endpoint
 	UsePathStyle bool   `yaml:"usePathStyle"` // true for MinIO and most S3-compatible stores
+	// MultipartThreshold and PartSize are in bytes. An object larger than the threshold (0: 4 GiB)
+	// is written in parts of at least PartSize (0: 64 MiB). Each is 5 MiB to 5 GiB when set. They
+	// exist so a test can write in parts without writing gigabytes.
+	MultipartThreshold int64 `yaml:"multipartThreshold"`
+	PartSize           int64 `yaml:"partSize"`
 }
+
+// The bounds on a part, which are S3's, and so on both multipart settings.
+const (
+	minS3PartSize = 5 << 20
+	maxS3PartSize = 5 << 30
+)
 
 // RetentionConfig configures object-lock retention applied to every write.
 type RetentionConfig struct {
@@ -199,6 +210,8 @@ func applyEnvOverrides(c *Config) {
 	envStr(&c.Destination.S3.Region, "DESTINATION_S3_REGION")
 	envStr(&c.Destination.S3.Endpoint, "DESTINATION_S3_ENDPOINT")
 	envBool(&c.Destination.S3.UsePathStyle, "DESTINATION_S3_USEPATHSTYLE")
+	envInt64(&c.Destination.S3.MultipartThreshold, "DESTINATION_S3_MULTIPARTTHRESHOLD")
+	envInt64(&c.Destination.S3.PartSize, "DESTINATION_S3_PARTSIZE")
 	envStr(&c.Destination.GCS.Bucket, "DESTINATION_GCS_BUCKET")
 	envStr(&c.Destination.GCS.Endpoint, "DESTINATION_GCS_ENDPOINT")
 	envStr(&c.Destination.Azure.Account, "DESTINATION_AZURE_ACCOUNT")
@@ -244,6 +257,15 @@ func (c *Config) Validate() error {
 	case "s3":
 		if strings.TrimSpace(c.Destination.S3.Bucket) == "" {
 			return fmt.Errorf("destination.s3.bucket is required")
+		}
+		for name, v := range map[string]int64{
+			"multipartThreshold": c.Destination.S3.MultipartThreshold,
+			"partSize":           c.Destination.S3.PartSize,
+		} {
+			if v != 0 && (v < minS3PartSize || v > maxS3PartSize) {
+				return fmt.Errorf("destination.s3.%s %d must be 0 or between %d (5 MiB) and %d (5 GiB) bytes",
+					name, v, int64(minS3PartSize), int64(maxS3PartSize))
+			}
 		}
 	case "gcs":
 		if strings.TrimSpace(c.Destination.GCS.Bucket) == "" {
