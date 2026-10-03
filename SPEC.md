@@ -238,6 +238,13 @@ Providers not in this list work too, but verify their Object Lock support before
 on WORM. Credentials are static keys via the standard `AWS_*` env (the SDK default chain).
 Scope them create/put-only.
 
+Every write carries the object's CRC32 in the `x-amz-checksum-crc32` header, which gitdr
+computes before the upload. AWS and B2 want a checksum on a write under Object Lock. Asked for
+the algorithm alone, the AWS SDK computes the checksum as it sends, and over TLS it sends the
+body `aws-chunked` as a single chunk with the checksum in a trailer. MinIO refuses a chunk over
+16 MiB, so before this no object over 16 MiB could be written to MinIO over TLS. *Changed in
+v0.1.21.*
+
 ## 5. Object storage authentication
 
 Use each cloud SDK's default credential provider chain. One code path resolves static keys

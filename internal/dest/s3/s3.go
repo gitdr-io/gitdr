@@ -6,8 +6,10 @@ package s3
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
+	"hash/crc32"
 	"io"
 	"log/slog"
 	"net/url"
@@ -141,6 +143,14 @@ func (b *Backend) VerifyWorm(ctx context.Context) (dest.WormStatus, error) {
 // headers to a bucket without Object Lock is a 400. An explicit CRC32 checksum is always
 // sent: AWS and some S3-compatible stores (Backblaze B2) require Content-MD5 or an
 // x-amz-checksum header on Object Lock PutObject requests.
+//
+// The CRC32 is computed here and sent as a header, so the body goes as it is, with its length.
+// Asked for the algorithm alone, the SDK computes the checksum on the way out, and over TLS it
+// sends the body aws-chunked, the whole object as one chunk, with the checksum in a trailer
+// (service/internal/checksum v1.11.3: middleware_compute_input_checksum.go, lines 163-177, and
+// aws_chunked_encoding.go, lines 90-111). AWS takes a chunk of any size; MinIO refuses one over
+// 16 MiB, so no object over 16 MiB could be written to MinIO over TLS. A checksum header already
+// on the request turns the trailer off (the same file, lines 131-139 and 285-290).
 func (b *Backend) PutImmutable(ctx context.Context, key string, r io.Reader, size int64, ret dest.Retention) (dest.PutResult, error) {
 	in := &awss3.PutObjectInput{
 		Bucket:            aws.String(b.bucket),
@@ -166,6 +176,15 @@ func (b *Backend) PutImmutable(ctx context.Context, key string, r io.Reader, siz
 		return dest.PutResult{}, fmt.Errorf("s3: refusing to overwrite existing object %q", key)
 	}
 
+	// After the existence check, so an object that is refused is not read first.
+	crc, ok, err := crc32Of(r, size)
+	if err != nil {
+		return dest.PutResult{}, fmt.Errorf("s3: checksum %q: %w", key, err)
+	}
+	if ok {
+		in.ChecksumCRC32 = aws.String(crc)
+	}
+
 	out, err := b.client.PutObject(ctx, in)
 	if err != nil {
 		return dest.PutResult{}, fmt.Errorf("s3: put %q: %w", key, err)
@@ -181,6 +200,31 @@ func (b *Backend) PutImmutable(ctx context.Context, key string, r io.Reader, siz
 		res.VersionID = *out.VersionId
 	}
 	return res, nil
+}
+
+// crc32Of is the CRC32 S3 expects of the next size bytes of r, base64 of the big-endian sum, read
+// and then rewound to where r stood.
+//
+// Every caller in gitdr passes a file or a byte slice. A reader that cannot rewind reports no
+// checksum, and the SDK computes it on the way out instead, as a trailer over TLS. That is the
+// path a store limiting chunk size refuses past the limit, and nothing in gitdr takes it.
+func crc32Of(r io.Reader, size int64) (string, bool, error) {
+	rs, ok := r.(io.ReadSeeker)
+	if !ok {
+		return "", false, nil
+	}
+	start, err := rs.Seek(0, io.SeekCurrent)
+	if err != nil {
+		return "", false, err
+	}
+	sum := crc32.NewIEEE()
+	if _, err := io.CopyN(sum, rs, size); err != nil {
+		return "", false, err
+	}
+	if _, err := rs.Seek(start, io.SeekStart); err != nil {
+		return "", false, err
+	}
+	return base64.StdEncoding.EncodeToString(sum.Sum(nil)), true, nil
 }
 
 // objectExists reports whether key is already present. A NotFound (missing key) is the
