@@ -335,9 +335,15 @@ func TestGitSeesOnlyTheEnvironmentItNeeds(t *testing.T) {
 
 // Withheld names what is in gitdr's environment, would change what git does, and no longer reaches
 // it, so an operator who relied on one hears about it. What git does get is not named, and neither
-// is the locale, which nearly every environment sets.
+// is the locale, which nearly every environment sets, nor a variable gitdr sets on git itself: the
+// image sets GIT_TERMINAL_PROMPT=0, and git gets gitdr's own GIT_TERMINAL_PROMPT=0 regardless.
 func TestWithheldNamesWhatGitNoLongerGets(t *testing.T) {
 	for k, v := range map[string]string{
+		"GIT_TERMINAL_PROMPT":   "0",
+		"GIT_LFS_SKIP_SMUDGE":   "1",
+		"GIT_CONFIG_COUNT":      "1",
+		"GIT_CONFIG_KEY_0":      "core.askPass",
+		"GIT_CONFIG_VALUE_0":    "/usr/bin/true",
 		"GIT_CONFIG_PARAMETERS": "'http.extraheader'='Authorization: Basic c2VjcmV0'",
 		"GIT_PROXY_SSL_CAINFO":  "/etc/proxy-ca.pem",
 		"XDG_CONFIG_HOME":       "/home/op/.config",
@@ -355,7 +361,8 @@ func TestWithheldNamesWhatGitNoLongerGets(t *testing.T) {
 			t.Errorf("Withheld() = %v, and it does not name %s", got, want)
 		}
 	}
-	for _, passed := range []string{"GIT_SSL_CAINFO", "HTTPS_PROXY", "LANG"} {
+	for _, passed := range []string{"GIT_SSL_CAINFO", "HTTPS_PROXY", "LANG",
+		"GIT_TERMINAL_PROMPT", "GIT_LFS_SKIP_SMUDGE", "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0"} {
 		if slices.Contains(got, passed) {
 			t.Errorf("Withheld() = %v names %s, which it should not", got, passed)
 		}

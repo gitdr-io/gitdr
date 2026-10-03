@@ -508,12 +508,14 @@ var passedThrough = map[string]bool{
 // GIT_CONFIG_PARAMETERS's can.
 //
 // Not the locale. Nearly every environment sets one, and all it changes is the language of git's
-// messages.
+// messages. Nor the variables gitdr sets on git itself (commandEnv), whose own values git gets
+// whatever the environment says, as it did before: the image sets GIT_TERMINAL_PROMPT=0, and a
+// warning about it on every run would teach operators to ignore the warning.
 func Withheld() []string {
 	var names []string
 	for _, kv := range os.Environ() {
 		name, _, _ := strings.Cut(kv, "=")
-		if passedThrough[name] {
+		if passedThrough[name] || setByGitdr(name) {
 			continue
 		}
 		switch {
@@ -525,4 +527,14 @@ func Withheld() []string {
 	}
 	slices.Sort(names)
 	return slices.Compact(names)
+}
+
+// setByGitdr reports whether gitdr sets the variable name on git itself, in commandEnv.
+func setByGitdr(name string) bool {
+	switch {
+	case name == "GIT_TERMINAL_PROMPT", name == "GIT_LFS_SKIP_SMUDGE", name == "GIT_CONFIG_COUNT",
+		strings.HasPrefix(name, "GIT_CONFIG_KEY_"), strings.HasPrefix(name, "GIT_CONFIG_VALUE_"):
+		return true
+	}
+	return false
 }
