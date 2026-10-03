@@ -160,8 +160,13 @@ func TestScale1DayCycle(t *testing.T) {
 		finding = "empty-repo-rerun"
 	}
 	sc.check(t, "the same-day rerun succeeds", b.err == nil && b.phase.Failed == 0, sample(failures(b), 3), finding)
+	// Not the repository with no commits: it has no refs to record, and its day-1 entry, a skip as
+	// empty, has no copiedAt to carry.
 	var bare []string
 	for _, e := range b.entries() {
+		if e.Slug == o.slug(o.empty) {
+			continue
+		}
 		if e.Status == pipeline.StatusSkipped && e.Reason == pipeline.ReasonResume && (len(e.Refs) == 0 || e.CopiedAt == nil) {
 			bare = append(bare, e.Slug)
 		}
