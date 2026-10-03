@@ -238,7 +238,7 @@ func (r *backupRun) destInfo(ret dest.Retention, verdict dest.WormVerdict, obser
 // wormCheck verifies destination immutability. WORM is recommended, not required:
 // configuring it is the operator's responsibility. If the destination is not immutable
 // gitdr warns loudly and proceeds, unless requireWORM is set, in which case it fails
-// closed.
+// closed. A bucket the store says does not exist fails the run either way.
 func (r *backupRun) wormCheck(ctx context.Context) error {
 	st, err := r.dst.VerifyWorm(ctx)
 	if err != nil {
@@ -253,6 +253,13 @@ func (r *backupRun) wormCheck(ctx context.Context) error {
 		return nil
 	}
 	r.wormStatus = st
+	// A bucket that is not there is not a WORM question: there is nothing to write into. So the run
+	// stops here, before it lists or clones anything, worm.require or not. It used to warn that it
+	// could not read the bucket's immutability, clone every repository, and fail each one at its
+	// first upload.
+	if errors.Is(st.Refusal, dest.ErrNoSuchBucket) {
+		return fmt.Errorf("destination: %w; nothing was copied", st.Refusal)
+	}
 	if st.Verdict.Immutable() {
 		r.log.Info("destination is WORM-immutable", "mode", st.Mode, "details", st.Details)
 		return nil

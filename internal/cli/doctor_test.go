@@ -832,33 +832,64 @@ func TestDoctorSaysWhatRetentionIsOnAnObject(t *testing.T) {
 
 // A bucket that does not exist is never reported as one that locks nothing. MinIO answers the lock
 // question about a missing bucket with ObjectLockConfigurationNotFoundError, the answer an
-// unlocked bucket gets, and doctor called a mistyped bucket name "NOT immutable".
+// unlocked bucket gets, and doctor called a mistyped bucket name "NOT immutable". AWS answers the
+// lock question itself with NoSuchBucket.
+//
+// Nor is it a pass. A bucket that is not there is not a WORM question: a backup has nothing to
+// write into and stops before it copies anything, so the check fails, worm.require or not, and
+// doctor exits 1. A bucket that is there and locks nothing still passes unless worm.require is set.
 func TestDoctorNeverCallsAMissingBucketUnlocked(t *testing.T) {
+	noLock := answer(http.StatusNotFound, noLockConfiguration)
+	noBucket := answer(http.StatusNotFound,
+		`<Error><Code>NoSuchBucket</Code><Message>The specified bucket does not exist</Message></Error>`)
 	for _, tc := range []struct {
 		name          string
-		list          http.HandlerFunc
+		lock, list    http.HandlerFunc
+		require       bool
 		verdict, code string
+		ok            bool
 	}{
-		{"a bucket that is not there", answer(http.StatusNotFound,
-			`<Error><Code>NoSuchBucket</Code><Message>The specified bucket does not exist</Message></Error>`), "unknown", "NoSuchBucket"},
-		{"a bucket that is there", nil, "not-immutable", "null"},
+		{"a bucket that is not there, as MinIO says it", noLock, noBucket, false, "unknown", "NoSuchBucket", false},
+		{"a bucket that is not there, as AWS says it", noBucket, nil, false, "unknown", "NoSuchBucket", false},
+		{"a bucket that is not there, worm.require", noLock, noBucket, true, "unknown", "NoSuchBucket", false},
+		{"a bucket that is there", noLock, nil, false, "not-immutable", "null", true},
 	} {
 		for _, scope := range doctorScopes {
 			t.Run(tc.name+", "+scope.name, func(t *testing.T) {
 				doctorEnv(t)
 				store := newDoctorStore(t)
-				store.lock = answer(http.StatusNotFound, noLockConfiguration)
+				store.lock = tc.lock
 				if tc.list != nil {
 					store.list = tc.list
 				}
-				args := append(slices.Clone(scope.args), "-config", bucketConfig(t, store.URL, ""), "-output", "json")
-				code, out, _ := runDoctorCLI(context.Background(), t, args...)
-				w := decodeDoctor(t, out).check(t, "worm")
-				if text(w.Verdict) != tc.verdict || text(w.Code) != tc.code {
-					t.Errorf("worm = verdict %s, code %s; want %s, %s\n%s", text(w.Verdict), text(w.Code), tc.verdict, tc.code, out)
+				extra := ""
+				if tc.require {
+					extra = "worm:\n  require: true\n"
 				}
-				if destOnly(scope.args) && code != 0 {
-					t.Errorf("exit %d, want 0: neither is a failure unless worm.require is set", code)
+				cfg := bucketConfig(t, store.URL, extra)
+				code, out, _ := runDoctorCLI(context.Background(), t, append(slices.Clone(scope.args), "-config", cfg, "-output", "json")...)
+				rep := decodeDoctor(t, out)
+				w := rep.check(t, "worm")
+				if text(w.Verdict) != tc.verdict || text(w.Code) != tc.code || w.OK != tc.ok {
+					t.Errorf("worm = verdict %s, code %s, ok %v; want %s, %s, %v\n%s",
+						text(w.Verdict), text(w.Code), w.OK, tc.verdict, tc.code, tc.ok, out)
+				}
+				if !tc.ok && !strings.Contains(w.Detail, "the bucket does not exist") {
+					t.Errorf("worm detail %q does not say the bucket does not exist", w.Detail)
+				}
+				if !destOnly(scope.args) {
+					return // the source check fails here for want of a credential, whatever the bucket
+				}
+				wantCode := 0
+				if !tc.ok {
+					wantCode = 1
+				}
+				if code != wantCode || rep.OK != tc.ok {
+					t.Errorf("exit %d and ok %v, want %d and %v", code, rep.OK, wantCode, tc.ok)
+				}
+				code, printed, _ := runDoctorCLI(context.Background(), t, "-only", "destination", "-config", cfg)
+				if !tc.ok && (code != 1 || !strings.Contains(printed, "[FAIL] worm, the bucket does not exist")) {
+					t.Errorf("text output: exit %d, want 1 and a failed worm check\n%s", code, printed)
 				}
 			})
 		}

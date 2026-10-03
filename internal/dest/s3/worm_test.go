@@ -104,6 +104,44 @@ func TestVerifyWormAsksWhetherTheBucketExists(t *testing.T) {
 	})
 }
 
+// A bucket that does not exist is marked so, whichever call says it: the listing behind MinIO's
+// "no lock configuration", or the lock question itself, which AWS answers with NoSuchBucket. The
+// mark is dest.ErrNoSuchBucket, with the store's error inside it for its code. A refusal that
+// says anything else carries no mark, so the run warns about it and goes on as before.
+func TestVerifyWormMarksABucketThatDoesNotExist(t *testing.T) {
+	refused := xmlAnswer(http.StatusForbidden, `<Error><Code>AccessDenied</Code><Message>Access Denied</Message></Error>`)
+	for _, tc := range []struct {
+		name       string
+		lock, list http.HandlerFunc
+		missing    bool
+		code       string
+	}{
+		{"no lock configuration, and the listing finds no bucket", xmlAnswer(http.StatusNotFound, noLockConfiguration),
+			xmlAnswer(http.StatusNotFound, noSuchBucket), true, "NoSuchBucket"},
+		{"the lock question finds no bucket", xmlAnswer(http.StatusNotFound, noSuchBucket), nil, true, "NoSuchBucket"},
+		{"no lock configuration, and the key may not list", xmlAnswer(http.StatusNotFound, noLockConfiguration), refused, false, "AccessDenied"},
+		{"the lock question refused", refused, nil, false, "AccessDenied"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := newReaderStore(t, byCall(tc.lock, tc.list, nil))
+			st, err := newReaderBackend(t, store.URL).VerifyWorm(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if st.Verdict != dest.VerdictUnknown {
+				t.Errorf("verdict %q (%s), want unknown", st.Verdict.Wire(), st.Details)
+			}
+			if got := errors.Is(st.Refusal, dest.ErrNoSuchBucket); got != tc.missing {
+				t.Errorf("Refusal %v: marked as a missing bucket = %v, want %v", st.Refusal, got, tc.missing)
+			}
+			var api smithy.APIError
+			if !errors.As(st.Refusal, &api) || api.ErrorCode() != tc.code {
+				t.Errorf("Refusal = %v, want the store's %s inside it", st.Refusal, tc.code)
+			}
+		})
+	}
+}
+
 // An answer that is not the storage API's is no answer, and never the earned negative. Handed a
 // web page where the lock configuration belongs, the SDK read it as a configuration with nothing
 // in it, and gitdr said "Object Lock not enabled". A 404 page became the code NotFound, which the

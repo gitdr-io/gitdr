@@ -102,6 +102,12 @@ const UnnamedCode = "unnamed"
 // web page, an empty body, another call's document. It is no answer, and never a store's no.
 var ErrNotStorageAPI = errors.New("the endpoint did not answer as the storage API does")
 
+// ErrNoSuchBucket marks the Refusal behind an unknown verdict when the store said the bucket itself
+// does not exist, and the store's own error stays inside it. That is not a WORM question: there is
+// nothing to lock and nothing to write into. So a backup stops before it copies anything, and
+// doctor fails the check, worm.require or not.
+var ErrNoSuchBucket = errors.New("the bucket does not exist")
+
 // The shape of an error code: a letter, then up to 63 letters, digits and dots. S3, Azure and
 // Cloud Storage name their errors with single words of this shape (AccessDenied,
 // ObjectLockConfigurationNotFoundError, AuthorizationFailed, notFound).

@@ -136,13 +136,14 @@ func (b *Backend) VerifyWorm(ctx context.Context) (dest.WormStatus, error) {
 		 * The error text is kept, redacted upstream: `NotImplemented` and `AccessDenied` land
 		 * in the same verdict and are entirely different things to an operator. The code goes in
 		 * Details shaped, since a store chooses it; the whole error goes in Refusal, for a log.
+		 * NoSuchBucket, AWS's answer about a bucket that is not there, is marked as such.
 		 */
 		var api smithy.APIError
 		if errors.As(err, &api) {
 			return dest.WormStatus{
 				Verdict: dest.VerdictUnknown,
 				Details: fmt.Sprintf("could not verify immutability: the bucket answered %s", dest.ShapedCode(api.ErrorCode())),
-				Refusal: err,
+				Refusal: markMissingBucket(err),
 			}, nil
 		}
 		return dest.WormStatus{}, fmt.Errorf("s3: get object lock config: %w", err)
@@ -187,10 +188,21 @@ func (b *Backend) bucketHasNoLock(ctx context.Context) (dest.WormStatus, error) 
 		return dest.WormStatus{
 			Verdict: dest.VerdictUnknown,
 			Details: fmt.Sprintf("could not verify immutability: the bucket answered %s", dest.ShapedCode(api.ErrorCode())),
-			Refusal: err,
+			Refusal: markMissingBucket(err),
 		}, nil
 	}
 	return dest.WormStatus{}, fmt.Errorf("s3: confirm the bucket exists: %w", err)
+}
+
+// markMissingBucket wraps a refusal that is S3's NoSuchBucket in dest.ErrNoSuchBucket, so a backup
+// stops before it copies anything into a bucket that is not there, and doctor fails the check. The
+// store's error stays inside, for its code and for the log. Any other refusal is returned as it is.
+func markMissingBucket(err error) error {
+	var api smithy.APIError
+	if errors.As(err, &api) && api.ErrorCode() == "NoSuchBucket" {
+		return fmt.Errorf("%w: %w", dest.ErrNoSuchBucket, err)
+	}
+	return err
 }
 
 // PutImmutable creates key, create-only, never overwriting or deleting. Object Lock

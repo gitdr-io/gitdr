@@ -171,6 +171,18 @@ Two answers are not taken at their word, on S3, by `backup` and `doctor` alike.
 *Changed 2026-10-03. `gitdr.manifest/v5` is unchanged; these inputs now give it `unknown` and
 `not-checked` where they gave `not-immutable` and `absent`.*
 
+**A bucket that does not exist stops a backup.** It is not a WORM question: there is nothing to
+lock and nothing to write into. When the store answers `NoSuchBucket`, to the listing above or to
+the lock question itself, which is AWS's answer about a missing bucket, `backup` stops at the WORM
+check, before it lists or clones a repository, and exits 1 with or without `--require-worm`. It
+writes nothing, so there is no manifest and nothing on stdout under `--output json`, as when
+`--require-worm` refuses a bucket. It used to warn that it could not read the bucket's
+immutability, clone every repository and fail each one at its first upload. Every other answer
+keeps its meaning: `not-immutable`, and `unknown` for any other reason, warn and proceed unless
+`--require-worm` is set. doctor fails its `worm` check on the same answer (§11).
+
+*Changed 2026-10-04. `gitdr.manifest/v5` and `--output json` are unchanged.*
+
 ### Azure
 
 A container is immutable only under a time-based retention policy that is **locked**. An
@@ -1188,7 +1200,8 @@ field that is absent is not the same as one that is null.
 
 `ok` and the exit code mean what they meant before v1. `ok` is false, and the exit code 1, when a
 check failed, and a check fails only on what would fail a backup. So a bucket that locks nothing
-passes unless `worm.require` is set. **To learn what a bucket locks, read `verdict`, never `ok`.**
+passes unless `worm.require` is set, and a bucket that does not exist fails. **To learn what a
+bucket locks, read `verdict`, never `ok`.**
 
 A reader finds a check by its `name`: `git`, `git-lfs`, `config`, `encryption key` when encryption
 is on, `source` or `source auth`, `destination` when the destination could not be set up, `worm`
@@ -1222,6 +1235,13 @@ nothing to say.
 A bucket that does not exist reads `unknown` with `NoSuchBucket` even on a store that answers its
 lock question as if it were there, since the code comes from the listing that tells the two
 apart (§4). *Changed 2026-10-03.*
+
+A bucket that does not exist also fails the `worm` check, with or without `worm.require`: `ok` is
+false, `verdict` stays `unknown` and `code` is `NoSuchBucket`, the detail says the bucket does not
+exist, and doctor exits 1. A backup stops on the same answer before it copies anything (§4), and
+there is nothing to lock or to write into, so this is not a verdict on what the bucket locks. It
+used to pass, `ok: true` and exit 0, unless `worm.require` was set. *Changed 2026-10-04. The keys
+of `gitdr.doctor/v1` are unchanged.*
 
 The `retention` check is there when the `worm` check says `immutable` and the destination can be
 asked. It has `observed`.

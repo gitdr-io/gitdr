@@ -67,10 +67,11 @@ func TestVerifyWormTellsAMissingBucketFromAnUnlockedOne(t *testing.T) {
 		bucket  string
 		verdict dest.WormVerdict
 		code    string // the code of the refusal behind an unknown verdict
+		absent  bool   // the refusal says the bucket does not exist, which stops a backup
 	}{
-		{locked, dest.VerdictImmutable, ""},
-		{open, dest.VerdictNotImmutable, ""},
-		{missing, dest.VerdictUnknown, "NoSuchBucket"},
+		{locked, dest.VerdictImmutable, "", false},
+		{open, dest.VerdictNotImmutable, "", false},
+		{missing, dest.VerdictUnknown, "NoSuchBucket", true},
 	} {
 		t.Run(tc.bucket, func(t *testing.T) {
 			backend, err := s3backend.New(ctx, s3backend.Options{Bucket: tc.bucket, Region: region, Endpoint: endpoint, UsePathStyle: true}, nil)
@@ -87,6 +88,9 @@ func TestVerifyWormTellsAMissingBucketFromAnUnlockedOne(t *testing.T) {
 			var api smithy.APIError
 			if tc.code != "" && (!errors.As(st.Refusal, &api) || api.ErrorCode() != tc.code) {
 				t.Errorf("Refusal = %v, want MinIO's %s", st.Refusal, tc.code)
+			}
+			if got := errors.Is(st.Refusal, dest.ErrNoSuchBucket); got != tc.absent {
+				t.Errorf("Refusal %v: marked as a missing bucket = %v, want %v", st.Refusal, got, tc.absent)
 			}
 		})
 	}

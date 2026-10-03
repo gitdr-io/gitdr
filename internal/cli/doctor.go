@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -238,6 +239,13 @@ func checkWorm(ctx context.Context, dst dest.Destination, require bool, log *slo
 		code := errorCode(st.Refusal)
 		log.Warn("doctor: the destination would not say what it locks", "code", code, "err", st.Refusal)
 		c.Code = &code
+	}
+	// Not a WORM question: there is nothing to lock or to write into, and a backup stops before it
+	// copies anything. So the check fails, worm.require or not, as a check fails on what would fail
+	// a backup. The verdict stays unknown, since the store never said what it locks.
+	if errors.Is(st.Refusal, dest.ErrNoSuchBucket) {
+		c.OK, c.Detail = false, "the bucket does not exist: "+failure(*c.Code)+"; backup stops before it copies anything"
+		return c, st
 	}
 	switch {
 	case st.Verdict.Immutable():
