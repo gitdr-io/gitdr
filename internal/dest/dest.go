@@ -72,14 +72,17 @@ func (v WormVerdict) Wire() string {
 func (v WormVerdict) Immutable() bool { return v == VerdictImmutable }
 
 type WormStatus struct {
-	// Verdict replaces the Enabled/Locked pair. Two booleans that had to agree could express
-	// a state neither of them meant, and nothing outside a test ever read Enabled.
-	Verdict WormVerdict
 	// Period is how long the store's own policy holds every object, when the store said: a GCS
 	// bucket's retention period, or an Azure container's immutability period as Resource Manager
 	// reports it. Zero when it did not say, and always on S3, where gitdr locks each object itself
 	// for the configured days. A skip never relies on a copy past a third of the shorter of the two.
-	Period  time.Duration
+	//
+	// It comes first, with Verdict's comment below it, so gofmt aligns it with no other field and
+	// a change to the fields below cannot realign it.
+	Period time.Duration
+	// Verdict replaces the Enabled/Locked pair. Two booleans that had to agree could express
+	// a state neither of them meant, and nothing outside a test ever read Enabled.
+	Verdict WormVerdict
 	Mode    string // observed default mode, if any (e.g. "COMPLIANCE")
 	Details string // human-readable detail for logs and `gitdr doctor`
 }
