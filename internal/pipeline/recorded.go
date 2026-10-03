@@ -187,29 +187,27 @@ func (s *copySearch) list(ctx context.Context, prefix string) ([]dest.Object, er
 	return objs, nil
 }
 
-// load reads the manifest at key once per search, through the one loader, and keeps the entries
-// of the repositories the search keeps. Called with s.mu held.
+// load reads the manifest at key once per search, with the loader's checks, and keeps the entries
+// of the repositories the search keeps and nothing else. Called with s.mu held.
 func (s *copySearch) load(ctx context.Context, key string) *searchedManifest {
 	if m, ok := s.loaded[key]; ok {
 		return m
 	}
-	out := &searchedManifest{entries: map[string]RepoEntry{}}
-	m, err := loadManifest(ctx, s.dst, s.pub, key)
-	if err != nil {
-		out.err = err
-		s.log.Warn("skipping a manifest that cannot be relied on", "manifest", key, "err", err)
-	} else {
-		out.finishedAt = m.FinishedAt
-		for _, e := range m.Repos {
-			if s.keep != nil && !s.keep(e.Slug) {
-				continue
-			}
-			// One entry per repository is what a run writes. A second is not believed over the
-			// first.
-			if _, dup := out.entries[e.Slug]; !dup {
-				out.entries[e.Slug] = e
-			}
+	entries := map[string]RepoEntry{}
+	head, err := readManifestEntries(ctx, s.dst, s.pub, key, func(e RepoEntry) {
+		if s.keep != nil && !s.keep(e.Slug) {
+			return
 		}
+		// One entry per repository is what a run writes. A second is not believed over the
+		// first.
+		if _, dup := entries[e.Slug]; !dup {
+			entries[e.Slug] = e
+		}
+	})
+	out := &searchedManifest{finishedAt: head.FinishedAt, entries: entries}
+	if err != nil {
+		out = &searchedManifest{err: err}
+		s.log.Warn("skipping a manifest that cannot be relied on", "manifest", key, "err", err)
 	}
 	s.loaded[key] = out
 	return out

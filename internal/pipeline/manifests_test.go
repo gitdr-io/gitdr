@@ -4,7 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
+	"io"
 	"log/slog"
+	"maps"
 	"slices"
 	"strings"
 	"testing"
@@ -177,10 +180,11 @@ func TestTheNextBackupReadsTheNewestManifestItCanTrust(t *testing.T) {
 		},
 		{
 			// A copy of the old manifest under a name later than the newest and not in the future is
-			// picked, and then refused by its name: every repository is copied, and the log says why.
+			// tried first, refused by its name with a warning that says why, and passed over. What it
+			// says is not believed, and the newest manifest that can be trusted is read instead.
 			name:    "a copy under a later name is refused",
 			plant:   map[string][]byte{"github.com/octo/manifests/20260902T000000Z.manifest.json": old},
-			want:    "",
+			want:    "new",
 			warning: []string{"is named for a run that finished at 2026-09-02T00:00:00Z, but it records finishedAt 2026-08-31T12:00:00Z"},
 		},
 		{
@@ -188,7 +192,7 @@ func TestTheNextBackupReadsTheNewestManifestItCanTrust(t *testing.T) {
 			plant: map[string][]byte{
 				"github.com/octo/manifests/20260902T000000Z.manifest.json": []byte(`{"schema":"gitdr.drill/v1","finishedAt":"2026-09-02T00:00:00Z"}`),
 			},
-			want:    "",
+			want:    "new",
 			warning: []string{"gitdr.drill/v1", "document, not a run-manifest"},
 		},
 	} {
@@ -205,7 +209,7 @@ func TestTheNextBackupReadsTheNewestManifestItCanTrust(t *testing.T) {
 				dst: &stubDest{objs: objs}, log: slog.New(slog.NewTextHandler(&logged, nil)),
 				now: func() time.Time { return sept(2, 12) },
 			}
-			got := r.loadPrevious(context.Background(), "github.com/octo/manifests")
+			got := r.loadPrevious(context.Background(), "github.com/octo/manifests", nil)
 			if commit := got["octo/x"].refs["refs/heads/main"]; commit != tc.want {
 				t.Errorf("read %q, want %q", commit, tc.want)
 			}
@@ -220,6 +224,157 @@ func TestTheNextBackupReadsTheNewestManifestItCanTrust(t *testing.T) {
 			}
 			if !warned {
 				t.Errorf("no warning saying %q:\n%s", tc.warning, logged.String())
+			}
+		})
+	}
+}
+
+// previousManifests is one manifest per element, each finished an hour before the one after it,
+// the last at newest. Each names the repositories in its map, with the commit as their one ref; a
+// commit of "failed" records the repository as failed.
+func previousManifests(t *testing.T, newest time.Time, runs ...map[string]string) map[string][]byte {
+	t.Helper()
+	objs := map[string][]byte{}
+	for i, run := range runs {
+		finished := newest.Add(-time.Duration(len(runs)-1-i) * time.Hour)
+		m := Manifest{Schema: ManifestSchema, FinishedAt: finished}
+		for _, slug := range slices.Sorted(maps.Keys(run)) {
+			e := RepoEntry{Slug: slug, Status: StatusSuccess, Refs: []RefEntry{{Name: "refs/heads/main", Commit: run[slug]}}}
+			if run[slug] == "failed" {
+				e = RepoEntry{Slug: slug, Status: StatusFailed, Error: "it failed"}
+			}
+			m.Repos = append(m.Repos, e)
+		}
+		raw, err := json.Marshal(&m)
+		if err != nil {
+			t.Fatal(err)
+		}
+		objs["github.com/octo/manifests/"+finished.Format(manifestStamp)+manifestSuffix] = raw
+	}
+	return objs
+}
+
+// The next run reads the recent manifests newest first, and each repository is decided by the
+// newest one that has an entry for it. A failed entry decides too: its repository has no copy to
+// rely on, and an older copy of it is not believed over that.
+func TestThePreviousReadMergesTheRecentManifestsNewestFirst(t *testing.T) {
+	r := &backupRun{log: slog.New(slog.DiscardHandler), now: func() time.Time { return now }}
+	r.dst = &stubDest{objs: previousManifests(t, now.Add(-time.Hour),
+		map[string]string{"octo/z": "z1", "octo/y": "y1", "octo/gone": "g1"},
+		map[string]string{"octo/y": "y2", "octo/x": "x2", "octo/gone": "failed"},
+		map[string]string{"octo/x": "x3"},
+	)}
+	got := r.loadPrevious(context.Background(), "github.com/octo/manifests",
+		map[string]bool{"octo/x": true, "octo/y": true, "octo/z": true, "octo/gone": true})
+	for slug, want := range map[string]string{"octo/x": "x3", "octo/y": "y2", "octo/z": "z1"} {
+		if c := got[slug].refs["refs/heads/main"]; c != want {
+			t.Errorf("%s: read %q, want %q, the newest manifest's", slug, c, want)
+		}
+	}
+	if c, ok := got["octo/gone"]; ok {
+		t.Errorf("octo/gone failed in a newer run, and its older copy %v was read anyway", c.refs)
+	}
+}
+
+// Only the selected repositories are kept, and the read stops once they are all decided.
+func TestThePreviousReadKeepsOnlyTheSelectedRepositories(t *testing.T) {
+	counted := &countingStub{stubDest: stubDest{objs: previousManifests(t, now.Add(-time.Hour),
+		map[string]string{"octo/x": "x1", "octo/other": "o1"},
+		map[string]string{"octo/x": "x2", "octo/y": "y2"},
+	)}}
+	r := &backupRun{dst: counted, log: slog.New(slog.DiscardHandler), now: func() time.Time { return now }}
+	got := r.loadPrevious(context.Background(), "github.com/octo/manifests", map[string]bool{"octo/x": true, "octo/y": true})
+	if len(got) != 2 || got["octo/x"].refs["refs/heads/main"] != "x2" || got["octo/y"].refs["refs/heads/main"] != "y2" {
+		t.Errorf("read %v, want octo/x and octo/y from the newest manifest", got)
+	}
+	if counted.gets != 1 {
+		t.Errorf("read %d manifests, want 1: both repositories were decided by the newest", counted.gets)
+	}
+}
+
+// The read goes back at most maxPreviousManifests, and never past the refresh bound: every copy a
+// manifest older than that records would be refreshed anyway.
+func TestThePreviousReadIsBounded(t *testing.T) {
+	var runs []map[string]string
+	selected := map[string]bool{}
+	for i := 12; i > 0; i-- { // r12 in the oldest manifest, r1 in the newest
+		slug := fmt.Sprintf("octo/r%d", i)
+		runs = append(runs, map[string]string{slug: "c"})
+		selected[slug] = true
+	}
+	r := &backupRun{
+		dst: &stubDest{objs: previousManifests(t, now.Add(-time.Hour), runs...)},
+		log: slog.New(slog.DiscardHandler), now: func() time.Time { return now },
+	}
+	got := r.loadPrevious(context.Background(), "github.com/octo/manifests", selected)
+	for i := 1; i <= 12; i++ {
+		slug := fmt.Sprintf("octo/r%d", i)
+		if _, ok := got[slug]; ok != (i <= maxPreviousManifests) {
+			t.Errorf("%s read: %v, want %v: only the %d newest manifests are read", slug, ok, i <= maxPreviousManifests, maxPreviousManifests)
+		}
+	}
+
+	// A manifest finished before the refresh bound is not read, however few came before it.
+	objs := previousManifests(t, now.Add(-time.Hour), map[string]string{"octo/fresh": "f"})
+	for k, v := range previousManifests(t, now.Add(-refreshBound(0)-time.Hour), map[string]string{"octo/stale": "s"}) {
+		objs[k] = v
+	}
+	r.dst = &stubDest{objs: objs}
+	got = r.loadPrevious(context.Background(), "github.com/octo/manifests", map[string]bool{"octo/fresh": true, "octo/stale": true})
+	if _, ok := got["octo/fresh"]; !ok {
+		t.Error("the manifest inside the refresh bound was not read")
+	}
+	if _, ok := got["octo/stale"]; ok {
+		t.Error("a manifest older than the refresh bound was read")
+	}
+}
+
+// countingStub counts the objects read out of a stubDest.
+type countingStub struct {
+	stubDest
+	gets int
+}
+
+func (c *countingStub) Get(ctx context.Context, key string) (io.ReadCloser, error) {
+	c.gets++
+	return c.stubDest.Get(ctx, key)
+}
+
+// The streaming reader decodes what json.Unmarshal decodes, one repository at a time, and refuses
+// what it refuses.
+func TestTheStreamingReaderAgreesWithUnmarshal(t *testing.T) {
+	for _, tc := range []struct {
+		name, doc string
+		bad       bool
+	}{
+		{name: "a manifest", doc: `{"schema":"gitdr.manifest/v5","runId":"r1","tool":{"name":"gitdr"},"startedAt":"2026-06-13T12:00:00Z","finishedAt":"2026-06-13T12:03:00Z","status":"success","repos":[{"slug":"octo/a","status":"success","artifacts":[{"kind":"bundle","key":"k","size":1,"sha256":"h","retainUntil":"2026-07-13T12:00:00Z"}],"refs":[{"name":"refs/heads/main","commit":"c1"}],"copiedAt":"2026-06-13T12:01:00Z"},{"slug":"octo/b","status":"failed","error":"e"}]}`},
+		{name: "repositories before the head, and keys in other cases", doc: `{"Repos":[{"slug":"octo/a","status":"skipped","reason":"repository has no commits"}],"FINISHEDAT":"2026-06-13T12:03:00Z","schema":"gitdr.manifest/v2","extra":{"nested":[1,2,3]}}`},
+		{name: "no repositories", doc: `{"schema":"gitdr.manifest/v5","finishedAt":"2026-06-13T12:03:00Z","repos":null}`},
+		{name: "data after the document", doc: `{"schema":"gitdr.manifest/v5","repos":[]} {}`, bad: true},
+		{name: "repositories that are not an array", doc: `{"schema":"gitdr.manifest/v5","repos":{"slug":"octo/a"}}`, bad: true},
+		{name: "not an object", doc: `["gitdr.manifest/v5"]`, bad: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var want Manifest
+			wantErr := json.Unmarshal([]byte(tc.doc), &want)
+			var got []RepoEntry
+			head, err := decodeManifestStream([]byte(tc.doc), func(e RepoEntry) { got = append(got, e) })
+			if (err != nil) != tc.bad || (wantErr != nil) != tc.bad {
+				t.Fatalf("stream err = %v, unmarshal err = %v, want an error: %v", err, wantErr, tc.bad)
+			}
+			if tc.bad {
+				return
+			}
+			if head.Schema != want.Schema || head.RunID != want.RunID || !head.FinishedAt.Equal(want.FinishedAt) {
+				t.Errorf("head = %+v, want schema %q, runId %q, finishedAt %s", head, want.Schema, want.RunID, want.FinishedAt)
+			}
+			gotJSON, _ := json.Marshal(got)
+			wantJSON, _ := json.Marshal(want.Repos)
+			if len(got) == 0 && len(want.Repos) == 0 {
+				return
+			}
+			if !bytes.Equal(gotJSON, wantJSON) {
+				t.Errorf("entries\n got %s\nwant %s", gotJSON, wantJSON)
 			}
 		})
 	}

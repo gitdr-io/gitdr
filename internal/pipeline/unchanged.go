@@ -86,11 +86,7 @@ func decideUnchanged(previous, current map[string]string, copiedAt, now time.Tim
 	if age < 0 {
 		return unchangedDecision{skip: false}
 	}
-	limit := retention / refreshFloor
-	if max := time.Duration(maxSkipDays) * 24 * time.Hour; limit > max || limit <= 0 {
-		limit = max
-	}
-	if age >= limit {
+	if age >= refreshBound(retention) {
 		return unchangedDecision{
 			skip:   false,
 			reason: fmt.Sprintf("unchanged, but the last copy is %d days old and is being refreshed", int(age.Hours()/24)),
@@ -101,6 +97,17 @@ func decideUnchanged(previous, current map[string]string, copiedAt, now time.Tim
 		skip:   true,
 		reason: fmt.Sprintf("%s %s", ReasonUnchanged, copiedAt.UTC().Format("2006-01-02")),
 	}
+}
+
+// refreshBound is how old a copy may get before it is written again, however unchanged the
+// repository: a third of the retention, capped at maxSkipDays, and maxSkipDays when the retention
+// is unknown.
+func refreshBound(retention time.Duration) time.Duration {
+	limit := retention / refreshFloor
+	if max := time.Duration(maxSkipDays) * 24 * time.Hour; limit > max || limit <= 0 {
+		limit = max
+	}
+	return limit
 }
 
 // sameRefs compares two ref maps exactly: same names, same objects, no extras on either side.

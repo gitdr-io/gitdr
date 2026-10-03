@@ -1,10 +1,12 @@
 package pipeline
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"path"
@@ -162,6 +164,23 @@ func refuseManifest(format string, args ...any) error {
 // picked the old run. Every manifest gitdr has written is named for its finishedAt, so one named
 // for anything else is a copy.
 func loadManifest(ctx context.Context, d dest.Destination, pub ed25519.PublicKey, key string) (*Manifest, error) {
+	raw, err := readManifestBytes(ctx, d, pub, key)
+	if err != nil {
+		return nil, err
+	}
+	var m Manifest
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return nil, fmt.Errorf("parse manifest %s: %w", key, err)
+	}
+	if err := checkManifestHead(key, m.Schema, m.FinishedAt); err != nil {
+		return nil, err
+	}
+	return &m, nil
+}
+
+// readManifestBytes reads at most maxManifestBytes of the manifest at key and, with a public key,
+// refuses it unless its detached signature holds over exactly those bytes. Nothing is parsed.
+func readManifestBytes(ctx context.Context, d dest.Destination, pub ed25519.PublicKey, key string) ([]byte, error) {
 	raw, err := readCapped(ctx, d, key, maxManifestBytes)
 	if err != nil {
 		return nil, fmt.Errorf("read manifest %s: %w", key, err)
@@ -179,18 +198,128 @@ func loadManifest(ctx context.Context, d dest.Destination, pub ed25519.PublicKey
 			return nil, refuseManifest("manifest %s does not match its signature: %v", key, err)
 		}
 	}
-	var m Manifest
-	if err := json.Unmarshal(raw, &m); err != nil {
-		return nil, fmt.Errorf("parse manifest %s: %w", key, err)
+	return raw, nil
+}
+
+// checkManifestHead refuses a document that is not a run-manifest, and one not named for its own
+// finishedAt. See loadManifest for why each.
+func checkManifestHead(key, schema string, finished time.Time) error {
+	if !strings.HasPrefix(schema, manifestSchemaPrefix) {
+		return refuseManifest("%s is a %q document, not a run-manifest: refusing it", key, schema)
 	}
-	if !strings.HasPrefix(m.Schema, manifestSchemaPrefix) {
-		return nil, refuseManifest("%s is a %q document, not a run-manifest: refusing it", key, m.Schema)
+	if path.Base(key) != finished.UTC().Format(manifestStamp)+manifestSuffix {
+		return refuseManifest("%s is named for a run that finished at %s, but it records finishedAt %s: it is not the manifest its name says; refusing it",
+			key, namedFinish(key), finished.UTC().Format(time.RFC3339))
 	}
-	if path.Base(key) != m.FinishedAt.UTC().Format(manifestStamp)+manifestSuffix {
-		return nil, refuseManifest("%s is named for a run that finished at %s, but it records finishedAt %s: it is not the manifest its name says; refusing it",
-			key, namedFinish(key), m.FinishedAt.UTC().Format(time.RFC3339))
+	return nil
+}
+
+// manifestHead is what the readers below need of a manifest besides its repositories.
+type manifestHead struct {
+	Schema     string
+	RunID      string
+	FinishedAt time.Time
+}
+
+// readManifestEntries is loadManifest for a reader that needs a few repositories out of a large
+// manifest: the same read, the same signature check and the same refusals, with the repositories
+// decoded one at a time and handed to each, which keeps what it needs.
+//
+// A manifest of a large organisation is mostly ref maps, and decoded whole it costs several times
+// its size in memory. The next run reads up to maxPreviousManifests of them, and a same-day rerun
+// reads every manifest of the date, each for the few fields a skip needs.
+//
+// each sees the entries before the head is checked, because a document may carry its finishedAt
+// after its repositories. A caller keeps what each gave it only when the error is nil.
+func readManifestEntries(ctx context.Context, d dest.Destination, pub ed25519.PublicKey, key string, each func(RepoEntry)) (manifestHead, error) {
+	raw, err := readManifestBytes(ctx, d, pub, key)
+	if err != nil {
+		return manifestHead{}, err
 	}
-	return &m, nil
+	head, err := decodeManifestStream(raw, each)
+	if err != nil {
+		return manifestHead{}, fmt.Errorf("parse manifest %s: %w", key, err)
+	}
+	if err := checkManifestHead(key, head.Schema, head.FinishedAt); err != nil {
+		return manifestHead{}, err
+	}
+	return head, nil
+}
+
+// decodeManifestStream decodes a manifest's head fields and hands each of its repository entries
+// to each, holding one entry at a time. It accepts what json.Unmarshal into a Manifest accepts:
+// keys matched without regard to case, unknown keys ignored, nothing after the document.
+func decodeManifestStream(raw []byte, each func(RepoEntry)) (manifestHead, error) {
+	var head manifestHead
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	if err := expectDelim(dec, '{'); err != nil {
+		return head, err
+	}
+	for dec.More() {
+		tok, err := dec.Token()
+		if err != nil {
+			return head, err
+		}
+		name, _ := tok.(string)
+		switch {
+		case strings.EqualFold(name, "repos"):
+			if err := decodeRepos(dec, each); err != nil {
+				return head, err
+			}
+		case strings.EqualFold(name, "schema"):
+			err = dec.Decode(&head.Schema)
+		case strings.EqualFold(name, "runId"):
+			err = dec.Decode(&head.RunID)
+		case strings.EqualFold(name, "finishedAt"):
+			err = dec.Decode(&head.FinishedAt)
+		default:
+			var skip json.RawMessage
+			err = dec.Decode(&skip)
+		}
+		if err != nil {
+			return head, err
+		}
+	}
+	if err := expectDelim(dec, '}'); err != nil {
+		return head, err
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		return head, errors.New("data after the end of the manifest")
+	}
+	return head, nil
+}
+
+// decodeRepos reads the value of "repos": null, or an array of entries handed to each in order.
+func decodeRepos(dec *json.Decoder, each func(RepoEntry)) error {
+	tok, err := dec.Token()
+	if err != nil {
+		return err
+	}
+	if tok == nil {
+		return nil
+	}
+	if delim, ok := tok.(json.Delim); !ok || delim != '[' {
+		return fmt.Errorf("repos is %v, not an array", tok)
+	}
+	for dec.More() {
+		var e RepoEntry
+		if err := dec.Decode(&e); err != nil {
+			return err
+		}
+		each(e)
+	}
+	return expectDelim(dec, ']')
+}
+
+func expectDelim(dec *json.Decoder, want json.Delim) error {
+	tok, err := dec.Token()
+	if err != nil {
+		return err
+	}
+	if got, ok := tok.(json.Delim); !ok || got != want {
+		return fmt.Errorf("want %q, got %v", want, tok)
+	}
+	return nil
 }
 
 // namedFinish is the finish time a manifest's name claims, for a refusal to quote.

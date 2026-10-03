@@ -205,6 +205,32 @@ func TestTheNextRunFindsThePreviousManifestWhateverTheListingOrder(t *testing.T)
 	}
 }
 
+// A run over one repository does not hide the rest of the organisation from the next run.
+//
+// The next run read the newest manifest alone. A run over a single repository files its manifest
+// in the organisation's directory too, so the organisation's next run found one repository in it,
+// and copied every other one in full although nothing had changed.
+func TestARunOverOneRepositoryDoesNotHideTheOthers(t *testing.T) {
+	t.Chdir(t.TempDir())
+	md := newMemDest(true)
+	_, signer := drillKeys(t)
+	org := slugRepos("github.com", initFixtureRepo(t), "octo/a", "octo/b", "octo/c")
+	day1 := time.Date(2026, 6, 13, 9, 0, 0, 0, time.UTC)
+
+	backupAt(t, md, signer, day1, org)
+	one := backupAt(t, md, signer, day1.AddDate(0, 0, 1), org[:1])
+	if path.Dir(one.ManifestKey) != "github.com/octo/manifests" {
+		t.Fatalf("the single-repository run filed its manifest at %s, beside the organisation's", one.ManifestKey)
+	}
+
+	third := backupAt(t, md, signer, day1.AddDate(0, 0, 2), org)
+	for _, e := range third.Manifest.Repos {
+		if e.Status != pipeline.StatusSkipped || e.Reason != pipeline.ReasonUnchanged+" 2026-06-13" {
+			t.Errorf("%s: %s %q, want skipped as unchanged since the organisation's copy of 2026-06-13", e.Slug, e.Status, e.Reason)
+		}
+	}
+}
+
 // stoppedClock is a clock a test moves by hand, safe to read from the backup's goroutines.
 type stoppedClock struct {
 	mu sync.Mutex

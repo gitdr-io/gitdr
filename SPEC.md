@@ -484,6 +484,18 @@ protects an object until its retain-until date and not one second longer, so ski
 correct while the copy being relied on still exists. gitdr refreshes after a third of the
 retention period, capped at thirty days. See `internal/pipeline/unchanged.go`.
 
+**Which runs the comparison reads, from v0.1.21.** The next run reads the recent manifests filed
+in its own manifests directory, newest first, and each repository is decided by the newest one
+that has an entry for it, whatever the entry says: after a failed entry the repository is copied,
+and an older copy of it is not believed over that. The read stops once every repository the run
+selected is decided, after ten manifests, or at the first manifest that finished longer ago than
+the refresh bound, whose copies would all be refreshed anyway. A manifest that cannot be read, or
+that the loader refuses, is passed over with a warning, and nothing in it is believed. Each
+manifest is decoded one repository at a time, keeping only the selected repositories' refs and
+`copiedAt`. Up to v0.1.20 only the newest manifest was read, so one run over a single
+repository, which files its manifest in the organisation's directory, made the organisation's
+next run copy every other repository in full. *Changed in v0.1.21.*
+
 Skipping is reported as `status: "skipped"` with a `reason`, the same shape already used for a
 repository with no commits — additive, and a consumer switching on `status` sees a value it
 already knows.

@@ -133,14 +133,14 @@ func (r *backupRun) run(ctx context.Context) (*BackupResult, error) {
 		r.log.Warn("git-lfs not installed; LFS objects will not be backed up")
 	}
 
-	// One List and one Get for the whole run, before any repository is touched. What it
-	// returns decides which repositories can be left alone; see unchanged.go for the rules,
+	// One List and a few Gets for the whole run, before any repository is touched. What they
+	// return decides which repositories can be left alone; see unchanged.go for the rules,
 	// including the one that refreshes a copy before its object lock expires.
-	r.previous = r.loadPrevious(work, manifestDir(repos))
 	selected := make(map[string]bool, len(repos))
 	for _, repo := range repos {
 		selected[repo.Slug()] = true
 	}
+	r.previous = r.loadPrevious(work, manifestDir(repos), selected)
 	r.copies = newCopySearch(r.dst, nil, r.log, func(slug string) bool { return selected[slug] })
 
 	entries := r.fanOut(work, repos, ret)
@@ -497,6 +497,15 @@ func baseNames(keys []string) []string {
 // and not one second longer.
 func (r *backupRun) retentionWindow() time.Duration {
 	return time.Duration(r.cfg.Destination.Retention.Days) * 24 * time.Hour
+}
+
+// refreshBound is how old a copy may get before this run writes it again; see unchanged.go.
+func (r *backupRun) refreshBound() time.Duration {
+	var retention time.Duration
+	if r.cfg != nil {
+		retention = r.retentionWindow()
+	}
+	return refreshBound(retention)
 }
 
 func (r *backupRun) retention() dest.Retention {
