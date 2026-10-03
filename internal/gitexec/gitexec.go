@@ -467,16 +467,45 @@ const (
 	lowSpeedTime  = "600"  // seconds
 )
 
+// memoryBounds hold git's memory to what a container has, where git's defaults suit a
+// workstation.
+//
+// git maps a pack a gibibyte at a time, with no limit short of 32 TiB, so a pack it reads end to
+// end stays resident. Bundling a 6 GiB pack, pack-objects held 3.7 GiB of it in a container
+// limited to 4 GiB. core.packedGitWindowSize and core.packedGitLimit, set to git's own values on
+// 32-bit machines, bring that down to 256 MiB of pack.
+//
+// git also runs a thread for every CPU it sees, and in a pod without a CPU limit it sees the
+// node's. index-pack, under every clone and restore, resolves deltas on half of them, up to 20,
+// each holding whole blobs and 96 MiB of cached bases: a clone of eight 48 MiB files stored as
+// deltas took 1 GiB on 14 CPUs. pack-objects searches for deltas on all of them, each thread
+// holding a window of blobs with nothing to limit its memory. pack.threads makes them two, which
+// took that clone to 297 MiB, pack.windowMemory limits each window, and pack.deltaCacheSize
+// halves the deltas pack-objects keeps for writing. Over core.bigFileThreshold a blob gets no
+// delta search, and index-pack streams it instead of reading it whole.
+//
+// None of this changes the objects, refs or deltas git fetches and bundles. The pairs outrank
+// every git configuration file, so an operator's ~/.gitconfig cannot raise them.
+var memoryBounds = []gitConfig{
+	{key: "pack.threads", value: "2"},
+	{key: "pack.windowMemory", value: "256m"},
+	{key: "pack.deltaCacheSize", value: "128m"},
+	{key: "core.bigFileThreshold", value: "64m"},
+	{key: "core.packedGitWindowSize", value: "32m"},
+	{key: "core.packedGitLimit", value: "256m"},
+}
+
 // commandEnv is the environment of every git command: what baseEnv lets through from the
 // caller's, then extra, then gitdr's own configuration as GIT_CONFIG_* pairs, the low-speed
-// limits first and then cfg. The auth header is one of cfg's entries, and it travels in
-// GIT_CONFIG_VALUE_n rather than on the command line, where `ps` would show it to every other
-// process on the machine.
+// limits first, the memory bounds next and then cfg. The auth header is one of cfg's entries,
+// and it travels in GIT_CONFIG_VALUE_n rather than on the command line, where `ps` would show it
+// to every other process on the machine.
 func commandEnv(cfg []gitConfig, extra []string) []string {
 	all := append([]gitConfig{
 		{key: "http.lowSpeedLimit", value: lowSpeedLimit},
 		{key: "http.lowSpeedTime", value: lowSpeedTime},
-	}, cfg...)
+	}, memoryBounds...)
+	all = append(all, cfg...)
 	env := append(baseEnv(), extra...)
 	env = append(env, fmt.Sprintf("GIT_CONFIG_COUNT=%d", len(all)))
 	for i, c := range all {

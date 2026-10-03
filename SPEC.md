@@ -362,6 +362,17 @@ or a SAS. See §4, Azure.
   storage client is built. A process a cloud SDK starts for credentials, such as an AWS
   `credential_process` or the Azure CLI, runs with gitdr's environment, the cloud's own variables
   included, and without these. *Changed in v0.1.21.*
+- Bounded memory. gitdr runs git with `pack.threads=2`, `pack.windowMemory=256m`,
+  `pack.deltaCacheSize=128m`, `core.bigFileThreshold=64m`, `core.packedGitWindowSize=32m` and
+  `core.packedGitLimit=256m`. git's defaults suit a workstation. It maps packs a gibibyte at a
+  time with no limit short of 32 TiB, so `git pack-objects`, bundling a 6 GiB pack, kept 3.7 GiB
+  of it resident in a container limited to 4 GiB, where it now keeps 265 MiB. And it sizes its
+  threads by the CPUs it sees, the node's in a pod without a CPU limit. `git index-pack`, under
+  every clone and restore, takes half of them, up to 20, each holding whole blobs and 96 MiB of
+  cached bases, so a clone of large files stored as deltas took 1 GiB on 14 CPUs, and takes 297
+  MiB on two threads. The settings change how much memory git uses, not the objects, refs or
+  deltas it fetches and bundles. gitdr has no setting for them, and as `GIT_CONFIG_*` pairs they
+  outrank any git configuration file. *Added in v0.1.22.*
 - No telemetry.
 
 ## 7. Restore

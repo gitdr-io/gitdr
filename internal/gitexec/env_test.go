@@ -245,8 +245,9 @@ func removeLog(t *testing.T, logPath string) {
 	}
 }
 
-// Every git command gitdr starts carries the low-speed limits, and the ones that talk to the
-// source carry the credential beside them, in the environment and nowhere on the command line.
+// Every git command gitdr starts carries the low-speed limits and the memory bounds, and the ones
+// that talk to the source carry the credential beside them, in the environment and nowhere on the
+// command line.
 func TestEveryGitCommandCarriesTheLowSpeedLimits(t *testing.T) {
 	bin, logPath := fake(t, "git")
 	g := &Git{bin: bin, logger: slog.New(slog.DiscardHandler)}
@@ -260,6 +261,11 @@ func TestEveryGitCommandCarriesTheLowSpeedLimits(t *testing.T) {
 				if cfg["http.lowSpeedLimit"] != "1000" || cfg["http.lowSpeedTime"] != "600" {
 					t.Errorf("git %v started with lowSpeedLimit %q and lowSpeedTime %q, want 1000 and 600",
 						inv.Args, cfg["http.lowSpeedLimit"], cfg["http.lowSpeedTime"])
+				}
+				for _, b := range memoryBounds {
+					if cfg[b.key] != b.value {
+						t.Errorf("git %v started with %s = %q, want %q", inv.Args, b.key, cfg[b.key], b.value)
+					}
 				}
 
 				switch got, ok := cfg[fakeScoped]; {
@@ -498,7 +504,8 @@ func TestGitLFSSeesNoSecret(t *testing.T) {
 }
 
 // What the environment is made of, in order: what passedThrough lets through from the caller's
-// own, which is never a GIT_CONFIG_* it carried, then gitdr's pairs, the limits first. git's
+// own, which is never a GIT_CONFIG_* it carried, then gitdr's pairs, the limits first and the
+// memory bounds next. git's
 // GIT_HTTP_LOW_SPEED_* variables survive, because they are how an operator overrides the limits.
 func TestCommandEnv(t *testing.T) {
 	t.Setenv("GIT_CONFIG_COUNT", "1")
@@ -517,13 +524,25 @@ func TestCommandEnv(t *testing.T) {
 	}
 
 	want := map[string]string{
-		"GIT_CONFIG_COUNT":         "3",
+		"GIT_CONFIG_COUNT":         "9",
 		"GIT_CONFIG_KEY_0":         "http.lowSpeedLimit",
 		"GIT_CONFIG_VALUE_0":       "1000",
 		"GIT_CONFIG_KEY_1":         "http.lowSpeedTime",
 		"GIT_CONFIG_VALUE_1":       "600",
-		"GIT_CONFIG_KEY_2":         "http.https://h/.extraHeader",
-		"GIT_CONFIG_VALUE_2":       "Authorization: Basic ours",
+		"GIT_CONFIG_KEY_2":         "pack.threads",
+		"GIT_CONFIG_VALUE_2":       "2",
+		"GIT_CONFIG_KEY_3":         "pack.windowMemory",
+		"GIT_CONFIG_VALUE_3":       "256m",
+		"GIT_CONFIG_KEY_4":         "pack.deltaCacheSize",
+		"GIT_CONFIG_VALUE_4":       "128m",
+		"GIT_CONFIG_KEY_5":         "core.bigFileThreshold",
+		"GIT_CONFIG_VALUE_5":       "64m",
+		"GIT_CONFIG_KEY_6":         "core.packedGitWindowSize",
+		"GIT_CONFIG_VALUE_6":       "32m",
+		"GIT_CONFIG_KEY_7":         "core.packedGitLimit",
+		"GIT_CONFIG_VALUE_7":       "256m",
+		"GIT_CONFIG_KEY_8":         "http.https://h/.extraHeader",
+		"GIT_CONFIG_VALUE_8":       "Authorization: Basic ours",
 		"GIT_TERMINAL_PROMPT":      "0",
 		"GIT_HTTP_LOW_SPEED_LIMIT": "5",
 		"GIT_HTTP_LOW_SPEED_TIME":  "7",
