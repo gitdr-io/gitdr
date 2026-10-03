@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 )
 
@@ -493,4 +494,31 @@ var passedThrough = map[string]bool{
 	"SSL_CERT_FILE": true, "SSL_CERT_DIR": true,
 	// The operator's override of the low-speed limits above (SPEC §6).
 	"GIT_HTTP_LOW_SPEED_LIMIT": true, "GIT_HTTP_LOW_SPEED_TIME": true,
+}
+
+// Withheld names the variables in gitdr's environment that would change what git does and that
+// git does not get: every GIT_* variable passedThrough leaves out, XDG_CONFIG_HOME and
+// SSH_ASKPASS, which git reads, and LD_PRELOAD and LD_LIBRARY_PATH, which change how it runs. Up
+// to v0.1.20 git got all of them, so a run that relied on one now behaves differently, and this
+// is how it gets to say so. Names only, sorted: a value can carry a credential, as
+// GIT_CONFIG_PARAMETERS's can.
+//
+// Not the locale. Nearly every environment sets one, and all it changes is the language of git's
+// messages.
+func Withheld() []string {
+	var names []string
+	for _, kv := range os.Environ() {
+		name, _, _ := strings.Cut(kv, "=")
+		if passedThrough[name] {
+			continue
+		}
+		switch {
+		case strings.HasPrefix(name, "GIT_"),
+			name == "XDG_CONFIG_HOME", name == "SSH_ASKPASS",
+			name == "LD_PRELOAD", name == "LD_LIBRARY_PATH":
+			names = append(names, name)
+		}
+	}
+	slices.Sort(names)
+	return slices.Compact(names)
 }

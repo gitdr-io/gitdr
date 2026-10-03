@@ -15,6 +15,7 @@ import (
 	azurebackend "gitdr.io/gitdr/internal/dest/azure"
 	gcsbackend "gitdr.io/gitdr/internal/dest/gcs"
 	s3backend "gitdr.io/gitdr/internal/dest/s3"
+	"gitdr.io/gitdr/internal/gitexec"
 	"gitdr.io/gitdr/internal/logging"
 	"gitdr.io/gitdr/internal/source"
 	ghsrc "gitdr.io/gitdr/internal/source/github"
@@ -80,6 +81,10 @@ func registerCommon(fs *flag.FlagSet) *commonOpts {
 	return o
 }
 
+// withheldWarning is logged once per run, with the names, when gitdr's environment holds variables
+// that would change what git does and that git no longer gets (SPEC §6).
+const withheldWarning = "git does not get these variables from gitdr's environment; configure git in /etc/gitconfig"
+
 func (o *commonOpts) load() (*config.Config, *slog.Logger, error) {
 	cfg, err := config.Load(o.configPath)
 	if err != nil {
@@ -91,7 +96,11 @@ func (o *commonOpts) load() (*config.Config, *slog.Logger, error) {
 	if o.logFormat != "" {
 		cfg.Log.Format = o.logFormat
 	}
-	return cfg, logging.Default(cfg.Log.Level, cfg.Log.Format), nil
+	log := logging.Default(cfg.Log.Level, cfg.Log.Format)
+	if names := gitexec.Withheld(); len(names) > 0 {
+		log.Warn(withheldWarning, "vars", names)
+	}
+	return cfg, log, nil
 }
 
 func buildSource(cfg *config.Config, log *slog.Logger) (source.Source, error) {

@@ -333,6 +333,38 @@ func TestGitSeesOnlyTheEnvironmentItNeeds(t *testing.T) {
 	}
 }
 
+// Withheld names what is in gitdr's environment, would change what git does, and no longer reaches
+// it, so an operator who relied on one hears about it. What git does get is not named, and neither
+// is the locale, which nearly every environment sets.
+func TestWithheldNamesWhatGitNoLongerGets(t *testing.T) {
+	for k, v := range map[string]string{
+		"GIT_CONFIG_PARAMETERS": "'http.extraheader'='Authorization: Basic c2VjcmV0'",
+		"GIT_PROXY_SSL_CAINFO":  "/etc/proxy-ca.pem",
+		"XDG_CONFIG_HOME":       "/home/op/.config",
+		"SSH_ASKPASS":           "/usr/bin/ksshaskpass",
+		"LD_LIBRARY_PATH":       "/opt/git/lib",
+		"GIT_SSL_CAINFO":        "/etc/gitdr/ca.pem",
+		"HTTPS_PROXY":           "http://proxy.example.test:3128",
+		"LANG":                  "de_DE.UTF-8",
+	} {
+		t.Setenv(k, v)
+	}
+	got := Withheld()
+	for _, want := range []string{"GIT_CONFIG_PARAMETERS", "GIT_PROXY_SSL_CAINFO", "XDG_CONFIG_HOME", "SSH_ASKPASS", "LD_LIBRARY_PATH"} {
+		if !slices.Contains(got, want) {
+			t.Errorf("Withheld() = %v, and it does not name %s", got, want)
+		}
+	}
+	for _, passed := range []string{"GIT_SSL_CAINFO", "HTTPS_PROXY", "LANG"} {
+		if slices.Contains(got, passed) {
+			t.Errorf("Withheld() = %v names %s, which it should not", got, passed)
+		}
+	}
+	if !slices.IsSorted(got) {
+		t.Errorf("Withheld() = %v, not sorted", got)
+	}
+}
+
 // git-lfs is started by git, not by gitdr, so it gets what git passes on. Proven with the real git
 // and a git-lfs that writes down its environment: the secrets are set, and none of them reaches
 // it. The credential does, in the scoped header git-lfs fetches with, and so does the proxy.
