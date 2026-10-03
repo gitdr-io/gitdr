@@ -245,7 +245,9 @@ or a SAS. See §4, Azure.
 - Integrity. SHA-256 per artifact plus a signed run-manifest, checked by `gitdr verify`.
 - Hardened container. Wolfi/Chainguard base, non-root, read-only rootfs, no shell, plus
   `git` and `git-lfs`, pinned by digest.
-- Fail closed, bounded concurrency, resumable.
+- Fail closed, bounded concurrency. A same-day rerun skips the copies a manifest records and
+  fails by name any repository whose copy that day did not finish (§11). A run does not yet
+  resume a copy another run left unfinished, so "resumable" is not claimed. *Changed in v0.1.21.*
 - Rate limits. A GitHub API request refused for the primary rate limit waits until the reset
   GitHub names. The wait is measured from the `Date` of the refusal, so a host clock that is off
   from GitHub's neither retries early nor waits too long. A refusal go-github makes itself, without
@@ -385,6 +387,13 @@ it, then `{host}/manifests/`, for a manifest that finished on the backup's date 
 after. That finds every run from v0.1.20 on that finished within a day of its copy. It does not
 find a manifest an older engine filed under another namespace, or a run that took longer than
 that. Use `-manifest` for those.
+
+The manifest has to record the bundle as part of a copy its run finished: a `success` entry for
+the repository that lists it. Up to v0.1.20 any entry that listed the bundle was taken, so a
+repository that failed after its bundle was stored, on its metadata for example, restored by date
+as if it had been copied, while `-manifest` refused the same entry. Both refuse it now, and a
+same-day rerun uses this same search to decide what is already backed up (§11). *Changed in
+v0.1.21.*
 
 `-repo` splits at the last slash, so `acme/platform/api` is the project `api` in the group
 `acme/platform`. It used to split at the first, and a project in a GitLab subgroup could not be
@@ -664,7 +673,8 @@ request, and `destination.wormVerdict` as the only statement about whether it sa
 - `repos[].error` is present only when that repo's `status` is `failed`.
 - `repos[].reason` is present only when that repo's `status` is `skipped`, and says which of
   two cases applies:
-  - `already backed up for this date` — the resume path found the artifacts already written.
+  - `already backed up for this date` — a manifest records a complete copy of the repository
+    under this run's date, made by an earlier run that day. *Narrowed in v0.1.21*, see below.
   - `repository has no commits` — nothing to bundle. A repository created and never pushed to
     has no refs, and `git bundle create` refuses to write an empty bundle. Skipping it is what
     keeps one unused project in an organisation from failing every backup of it for ever.
@@ -677,6 +687,24 @@ request, and `destination.wormVerdict` as the only statement about whether it sa
 
   `reason` is a **prefix**, not a whole string: the unchanged path emits
   `unchanged since <RFC 3339>`, so a consumer matching this field matches on the prefix.
+
+  **What `already backed up for this date` means, from v0.1.21.** The string is unchanged and its
+  meaning narrows to "a recorded, complete copy exists". A same-day rerun skips a repository only
+  when a manifest records the copy under the run's date, found the way a restore by date finds
+  one (§7): in the repository's namespace, one above it or at the host, named for the date or the
+  day after, with an entry for the repository that is a `success` listing the bundle, or for a
+  repository with no commits a `repository has no commits` skip listing its metadata. Every object
+  filed under the date has to be one that entry lists, and every artifact it lists has to be
+  there. The skip then carries the copy's `refs` and `copiedAt`, as an unchanged skip does, so
+  the next day still skips a repository that has not moved.
+
+  Anything else under the date fails the repository, and is never skipped. Its `error` starts
+  `an incomplete copy for <date> exists` and ends `its keys are create-only, so the next copy is
+  on <date + 1>`, with what was found in between. Up to v0.1.20 any bundle under the date, or for
+  a repository with no commits any metadata, counted as a finished copy. A copy whose checksum,
+  metadata or LFS archive never landed was then reported as backed up, the run exited 0, and the
+  skip carried no `refs`, so the next day copied the repository in full. The narrower meaning is
+  a fix and not a break: the wider one reported copies that did not exist.
 - `artifacts[].kind`: `bundle`, `meta`, `sha256`, or `lfs`.
 
 **What v3 added, and why the version moved.** Two optional fields on a repo entry:

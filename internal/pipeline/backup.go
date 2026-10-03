@@ -14,6 +14,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -85,6 +86,9 @@ type backupRun struct {
 	// when there was no previous run or its manifest could not be read, in which case every
 	// repository is copied in full. See previous.go.
 	previous map[string]previousCopy
+	// copies finds the manifest that records a copy under this run's date, for a repository a
+	// same-day rerun finds objects for. See recorded.go.
+	copies *copySearch
 }
 
 func (r *backupRun) run(ctx context.Context) (*BackupResult, error) {
@@ -133,6 +137,11 @@ func (r *backupRun) run(ctx context.Context) (*BackupResult, error) {
 	// returns decides which repositories can be left alone; see unchanged.go for the rules,
 	// including the one that refreshes a copy before its object lock expires.
 	r.previous = r.loadPrevious(work, manifestDir(repos))
+	selected := make(map[string]bool, len(repos))
+	for _, repo := range repos {
+		selected[repo.Slug()] = true
+	}
+	r.copies = newCopySearch(r.dst, nil, r.log, func(slug string) bool { return selected[slug] })
 
 	entries := r.fanOut(work, repos, ret)
 	allOK := true
@@ -275,9 +284,15 @@ func (r *backupRun) fanOut(ctx context.Context, repos []source.Repo, ret dest.Re
 
 // backupOne adds resume-skip and logging around backupRepo.
 func (r *backupRun) backupOne(ctx context.Context, repo source.Repo, ret dest.Retention) RepoEntry {
-	if r.cfg.Backup.Resume && r.alreadyBackedUp(ctx, repo) {
-		r.log.Info("repo skipped (already backed up)", "repo", repo.Slug())
-		return RepoEntry{Slug: repo.Slug(), Status: StatusSkipped, Reason: ReasonResume}
+	if r.cfg.Backup.Resume {
+		if entry, ok := r.resumed(ctx, repo); ok {
+			if entry.Status == StatusFailed {
+				r.log.Error("repo backup failed", "repo", repo.Slug(), "err", entry.Error)
+			} else {
+				r.log.Info("repo skipped (already backed up)", "repo", repo.Slug())
+			}
+			return entry
+		}
 	}
 
 	// Ask the source what it has, and skip a repository whose refs have not moved since the
@@ -329,24 +344,103 @@ func (r *backupRun) backupOne(ctx context.Context, repo source.Repo, ret dest.Re
 	return entry
 }
 
-// alreadyBackedUp reports whether this repo already has a copy for the run date: its bundle, or
-// for a repository with no commits, which has no bundle, its metadata alone.
+// resumed decides what a same-day rerun does with a repository that already has objects under
+// this run's date. It returns the entry to record and true, or false when nothing is under the
+// date and the repository is copied as usual.
 //
-// Both are recognised the same way. Looking for the bundle only sent an empty repository round
-// again on a rerun, and its second metadata write failed on the key the first run had created.
-func (r *backupRun) alreadyBackedUp(ctx context.Context, repo source.Repo) bool {
+// A repository is skipped as already backed up only when a manifest records the copy under the
+// date (recorded.go), and every object under the date is one that manifest lists for it. The skip
+// carries the copy's refs and copiedAt, as an unchanged skip does, so the next day can still tell
+// whether anything moved since.
+//
+// Anything else under the date fails the repository by name, and it is never skipped. Up to
+// v0.1.20 any bundle, or for a repository with no commits any metadata, counted as a finished
+// copy, so a copy whose checksum or LFS archive never landed was reported as backed up and
+// counted as protected. The date cannot be finished either: its keys are create-only, so the
+// next copy is made on the next UTC date.
+func (r *backupRun) resumed(ctx context.Context, repo source.Repo) (RepoEntry, bool) {
+	slug := repo.Slug()
 	dir := path.Join(repo.Host, repo.Owner, repo.Name, r.date)
-	objs, err := r.dst.List(ctx, path.Join(dir, repo.Name+"."))
+	objs, err := r.dst.List(ctx, dir+"/")
 	if err != nil {
-		return false
+		// Not knowing is no reason to skip. The copy goes ahead, and if anything is under the
+		// date already the destination refuses the first key that exists.
+		r.log.Warn("could not list what is stored under this run's date; copying the repository", "repo", slug, "err", err)
+		return RepoEntry{}, false
 	}
+	// Only what is filed directly in the date's folder. A listing is by prefix and reaches into
+	// any deeper folder, such as a GitLab subgroup named like the repository.
+	stored := map[string]bool{}
+	var under []string
 	for _, o := range objs {
-		switch o.Key {
-		case path.Join(dir, repo.Name+".bundle"), path.Join(dir, repo.Name+".meta.json"):
-			return true
+		if path.Dir(o.Key) == dir {
+			stored[o.Key] = true
+			under = append(under, o.Key)
 		}
 	}
-	return false
+	if len(under) == 0 {
+		return RepoEntry{}, false
+	}
+	sort.Strings(under)
+
+	day, err := time.Parse("2006-01-02", r.date)
+	if err != nil {
+		return failedEntry(slug, fmt.Errorf("the run's date %q: %w", r.date, err)), true
+	}
+	next := day.AddDate(0, 0, 1).Format("2006-01-02")
+	incomplete := func(detail string) (RepoEntry, bool) {
+		return failedEntry(slug, fmt.Errorf("an incomplete copy for %s exists (%s); its keys are create-only, so the next copy is on %s",
+			r.date, detail, next)), true
+	}
+
+	bundleKey, _, _ := artifactKeys(repo.Host, repo.Owner, repo.Name, r.date)
+	metaKey := path.Join(dir, repo.Name+".meta.json")
+	found, rep, err := r.copies.find(ctx, manifestSearchDirs(repo.Host, repo.Owner), day, slug, []string{bundleKey, metaKey}, r.now())
+	if err != nil {
+		return failedEntry(slug, fmt.Errorf("a copy for %s exists, and finding the manifest that records it failed: %w", r.date, err)), true
+	}
+	if found == nil {
+		detail := fmt.Sprintf("no manifest records %s as a copy", strings.Join(baseNames(under), ", "))
+		if rep.named != nil {
+			detail = fmt.Sprintf("%s records it as %s", rep.namedIn, rep.named.Status)
+		}
+		return incomplete(detail)
+	}
+
+	listed := map[string]bool{}
+	for _, a := range found.entry.Artifacts {
+		listed[a.Key] = true
+		if !stored[a.Key] {
+			return incomplete(fmt.Sprintf("%s records %s, and the destination does not have it", found.manifestKey, a.Key))
+		}
+	}
+	for _, key := range under {
+		if !listed[key] {
+			return incomplete(fmt.Sprintf("%s is under the date, and %s does not record it", key, found.manifestKey))
+		}
+	}
+
+	return RepoEntry{
+		Slug:     slug,
+		Status:   StatusSkipped,
+		Reason:   ReasonResume,
+		Refs:     found.entry.Refs,
+		CopiedAt: copiedAtOf(found.entry, found.finishedAt),
+	}, true
+}
+
+// failedEntry is a repository this run failed with err before writing anything of it.
+func failedEntry(slug string, err error) RepoEntry {
+	return RepoEntry{Slug: slug, Status: StatusFailed, Error: err.Error()}
+}
+
+// baseNames is each key's last path segment, for an error that names objects of one folder.
+func baseNames(keys []string) []string {
+	out := make([]string, len(keys))
+	for i, k := range keys {
+		out[i] = path.Base(k)
+	}
+	return out
 }
 
 // retentionWindow is how long a copy is kept, as a duration.

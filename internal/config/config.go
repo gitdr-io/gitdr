@@ -108,7 +108,7 @@ type RetentionConfig struct {
 // BackupConfig configures fan-out across repositories.
 type BackupConfig struct {
 	Concurrency int  `yaml:"concurrency"` // parallel repos; default 4
-	Resume      bool `yaml:"resume"`      // skip repos already backed up for the run date
+	Resume      bool `yaml:"resume"`      // skip repos a manifest records as copied on the run date
 	LFS         bool `yaml:"lfs"`         // fetch Git LFS objects; default true
 }
 

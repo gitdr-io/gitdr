@@ -417,15 +417,16 @@ func checksFromManifest(ctx context.Context, d RestoreDeps, req RestoreRequest) 
 }
 
 // findRestoreChecks is restore without -manifest. It finds the signed manifest of the run that
-// wrote this bundle and returns the checksums it records.
+// made this copy and returns the checksums it records.
 //
-// It looks where backup files one. A run files its manifest under the deepest namespace holding
-// every repository it copied, which is this repository's own namespace or one above it, and names
-// it for the moment it finished, which is the day of the copy or, for a run that crossed midnight
-// UTC, the day after. So the search goes through the repository's namespace, each one above it and
-// then the host, and in each through the manifests of the date and of the next day. That finds
-// every run from v0.1.20 on that finished within a day of its copy. A manifest an older engine
-// filed under another namespace, or a longer run's, takes -manifest.
+// The search is the one a same-day rerun uses, in recorded.go: the repository's namespace, each
+// one above it and then the host, and in each the manifests of the date and of the next day. That
+// finds every run from v0.1.20 on that finished within a day of its copy. A manifest an older
+// engine filed under another namespace, or a longer run's, takes -manifest.
+//
+// Only a copy counts: an entry that records the bundle as part of a copy its run finished. Up to
+// v0.1.20 any entry that named the bundle did, so a repository that failed after its bundle was
+// stored restored by date as if it had been copied, while -manifest refused the same entry.
 //
 // Artifact keys are create-only, so exactly one run wrote this bundle and only that run's
 // manifest records it. Newest first only makes the common case cheap. The search stops at the
@@ -444,40 +445,37 @@ func findRestoreChecks(ctx context.Context, d dest.Destination, pub ed25519.Publ
 	next := day.AddDate(0, 0, 1)
 	bundleKey, _, lfsKey := artifactKeys(req.Host, req.Owner, req.Name, req.Date)
 	dirs := manifestSearchDirs(req.Host, req.Owner)
+	slug := req.Owner + "/" + req.Name
 
-	seen, passed := 0, 0
-	for _, dir := range dirs {
-		for _, on := range []time.Time{day, next} {
-			prefix := path.Join(dir, on.Format("20060102"))
-			objs, err := d.List(ctx, prefix)
-			if err != nil {
-				return nil, fmt.Errorf("list manifests under %s: %w", prefix, err)
-			}
-			for _, key := range filedManifests(objs, dir) {
-				seen++
-				m, err := loadManifest(ctx, d, pub, key)
-				if err != nil {
-					passed++
-					log.Warn("skipping a manifest this restore cannot rely on", "manifest", key, "err", err)
-					continue
-				}
-				for _, entry := range m.Repos {
-					if c := recordedChecks(key, pub, entry, bundleKey, lfsKey); c.bundleSHA != "" {
-						return &c, nil
-					}
-				}
-			}
-		}
+	search := newCopySearch(d, pub, log, func(s string) bool { return s == slug })
+	found, rep, err := search.find(ctx, dirs, day, slug, []string{bundleKey}, time.Time{})
+	if err != nil {
+		return nil, err
+	}
+	if found != nil {
+		c := recordedChecks(found.manifestKey, pub, found.entry, bundleKey, lfsKey)
+		return &c, nil
 	}
 
 	searched := fmt.Sprintf("manifests that finished on %s or %s, under %s/",
 		day.Format("2006-01-02"), next.Format("2006-01-02"), strings.Join(dirs, "/, "))
-	if passed > 0 {
+	if rep.named != nil {
+		why := rep.named.Reason
+		if why == "" {
+			why = rep.named.Error
+		}
+		if why != "" {
+			why = " (" + why + ")"
+		}
+		return nil, fmt.Errorf("no signed manifest records %s as a copy: %s records %q as %s%s, so that run holds no copy of it to restore. A copy is recorded by the manifest of the run that finished it",
+			bundleKey, rep.namedIn, slug, rep.named.Status, why)
+	}
+	if rep.passed > 0 {
 		return nil, fmt.Errorf("no signed manifest records %s: %d of the %d %s did not verify with the configured public key or could not be used, as the warnings above say. If the signing key was rotated, point manifest.publicKeyPath at the key that signed this backup; otherwise pass -manifest <key>, the manifestKey the backup printed",
-			bundleKey, passed, seen, searched)
+			bundleKey, rep.passed, rep.seen, searched)
 	}
 	return nil, fmt.Errorf("no signed manifest records %s: looked through %d %s. The manifest of a run that finished more than a day after the copy, or one an engine older than v0.1.20 filed under another namespace, is reached only by its key: pass -manifest <key>, the manifestKey the backup printed",
-		bundleKey, seen, searched)
+		bundleKey, rep.seen, searched)
 }
 
 // fileIsEncrypted reports whether the file at p begins with the gitdr envelope magic.

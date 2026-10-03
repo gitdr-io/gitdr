@@ -47,7 +47,7 @@ destination:
 
 backup:
   concurrency: 4               # repositories backed up in parallel
-  resume: true                 # skip repos already backed up for the run date
+  resume: true                 # skip repos a manifest records as copied on the run date
   lfs: true                    # fetch Git LFS objects (stored as a separate .lfs.tar artifact)
 
 manifest:
