@@ -108,21 +108,19 @@ func New(ctx context.Context, opts Options, logger *slog.Logger) (*Backend, erro
 	}, nil
 }
 
-// VerifyWorm probes bucket Object Lock. A missing lock config is reported as
-// not-locked (so the operator can override); other failures are returned as errors.
+// VerifyWorm probes bucket Object Lock. A missing lock config is reported as not-locked once a
+// listing shows the bucket exists (so the operator can override); other failures, an answer that
+// is not S3's among them, are returned as errors.
 func (b *Backend) VerifyWorm(ctx context.Context) (dest.WormStatus, error) {
 	out, err := b.client.GetObjectLockConfiguration(ctx, &awss3.GetObjectLockConfigurationInput{
 		Bucket: aws.String(b.bucket),
-	})
+	}, answers("ObjectLockConfiguration"))
 	if err != nil {
 		var apiErr smithy.APIError
 		if errors.As(err, &apiErr) && apiErr.ErrorCode() == "ObjectLockConfigurationNotFoundError" {
 			// The store implements the call and said no. That negative is earned, and it is
-			// one of the most useful things this tool prints.
-			return dest.WormStatus{
-				Verdict: dest.VerdictNotImmutable,
-				Details: "bucket has no Object Lock configuration",
-			}, nil
+			// one of the most useful things this tool prints, once the bucket is known to exist.
+			return b.bucketHasNoLock(ctx)
 		}
 		/*
 		 * Any other API error means the store refused the question, and a refusal is not a no.
@@ -165,6 +163,34 @@ func (b *Backend) VerifyWorm(ctx context.Context) (dest.WormStatus, error) {
 		st.Details = fmt.Sprintf("Object Lock enabled; default retention %s", dest.ShapedCode(st.Mode))
 	}
 	return st, nil
+}
+
+// bucketHasNoLock takes the store at its word that the bucket has no Object Lock configuration,
+// once a listing has shown the bucket is there.
+//
+// MinIO gives that answer about a bucket that does not exist, and gitdr reported a bucket nobody
+// had created as not immutable. A listing of one key tells the two apart, and for a missing
+// bucket its answer is S3's own NoSuchBucket. It needs s3:ListBucket on AWS and listFiles on
+// Backblaze, which the policies in docs/QUICKSTART.md grant for the listings a backup makes
+// anyway. HeadBucket would not do: it answers without a body, so a missing bucket and a refused
+// one look alike, and on Backblaze it needs listBuckets, which those keys do not have.
+func (b *Backend) bucketHasNoLock(ctx context.Context) (dest.WormStatus, error) {
+	_, _, err := b.ListPage(ctx, "", 1)
+	if err == nil {
+		return dest.WormStatus{
+			Verdict: dest.VerdictNotImmutable,
+			Details: "bucket has no Object Lock configuration",
+		}, nil
+	}
+	var api smithy.APIError
+	if errors.As(err, &api) {
+		return dest.WormStatus{
+			Verdict: dest.VerdictUnknown,
+			Details: fmt.Sprintf("could not verify immutability: the bucket answered %s", dest.ShapedCode(api.ErrorCode())),
+			Refusal: err,
+		}, nil
+	}
+	return dest.WormStatus{}, fmt.Errorf("s3: confirm the bucket exists: %w", err)
 }
 
 // PutImmutable creates key, create-only, never overwriting or deleting. Object Lock
@@ -401,7 +427,7 @@ func (b *Backend) ListPage(ctx context.Context, prefix string, limit int) ([]des
 		Bucket:  aws.String(b.bucket),
 		Prefix:  aws.String(prefix),
 		MaxKeys: aws.Int32(int32(limit)),
-	})
+	}, answers("ListBucketResult"))
 	if err != nil {
 		return nil, false, fmt.Errorf("s3: list %q: %w", prefix, err)
 	}
@@ -466,7 +492,7 @@ func (b *Backend) ObserveRetention(ctx context.Context, key string) (dest.Retent
 	out, err := b.client.GetObjectRetention(ctx, &awss3.GetObjectRetentionInput{
 		Bucket: aws.String(b.bucket),
 		Key:    aws.String(key),
-	})
+	}, answers("Retention"))
 	if err != nil {
 		var api smithy.APIError
 		if errors.As(err, &api) && objectHoldsNoRetention(api.ErrorCode()) {
@@ -477,8 +503,8 @@ func (b *Backend) ObserveRetention(ctx context.Context, key string) (dest.Retent
 		return dest.RetentionNotChecked, time.Time{}, err
 	}
 	if out.Retention == nil || out.Retention.RetainUntilDate == nil {
-		// A 200 with nothing in it is the store answering "none", which is the same earned
-		// negative as the error code above.
+		// A Retention document with nothing in it is the store answering "none", which is the
+		// same earned negative as the error code above. answers() has seen to it that it is one.
 		return dest.RetentionAbsent, time.Time{}, nil
 	}
 	return dest.RetentionPresent, out.Retention.RetainUntilDate.UTC(), nil

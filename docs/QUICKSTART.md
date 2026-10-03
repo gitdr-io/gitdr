@@ -81,7 +81,7 @@ storage calls the engine makes (`internal/dest/s3/s3.go`) for `backup`, `verify`
 
 | Action | S3 call | Why |
 |---|---|---|
-| `s3:GetBucketObjectLockConfiguration` | `GetObjectLockConfiguration` | the WORM check before every backup, and `doctor`. Without it the verdict is `unknown` and backups are written without retention |
+| `s3:GetBucketObjectLockConfiguration` | `GetObjectLockConfiguration` | the WORM check before every backup, and `doctor`. Without it the verdict is `unknown` and backups are written without retention. A bucket that says it has no Object Lock configuration is believed once a listing of one key, under `s3:ListBucket`, shows it exists |
 | `s3:ListBucket` | `ListObjectsV2` | the previous manifest, the resume check, the manifest a drill or restore looks up, the LFS archive |
 | `s3:GetObject` | `GetObject`, `HeadObject` | reading manifests, signatures and artifacts back. `HeadObject` is the create-only check before each write when `endpoint` is set, and how a write whose answer was lost is settled |
 | `s3:GetObjectRetention` | `GetObjectRetention` | confirming that a run's objects hold their lock, on the smallest it wrote and the largest, so a single PUT and an upload in parts are both checked. Optional: without it the manifest says `not-checked` |
@@ -120,7 +120,7 @@ b2 key create --bucket my-worm-bucket gitdr-backup \
 | Capability | S3 call | Why |
 |---|---|---|
 | `readBucketRetentions` | `GetObjectLockConfiguration` | the WORM check |
-| `listFiles` | `ListObjectsV2` | as `s3:ListBucket` above |
+| `listFiles` | `ListObjectsV2` | as `s3:ListBucket` above, the WORM check included |
 | `readFiles` | `GetObject`, `HeadObject` | reading back. B2 answers `If-None-Match` with 501, so gitdr checks every key with `HeadObject` before it writes |
 | `writeFiles` | `PutObject`; `CreateMultipartUpload`, `UploadPart`, `CompleteMultipartUpload` | artifacts, manifests, drill reports. An artifact over 4 GiB goes in parts |
 | `writeFileRetentions` | `PutObject` or `CreateMultipartUpload` with Object Lock headers | Backblaze documents it as required to set a retention on upload (for its native upload call; its S3 page does not say either way) |

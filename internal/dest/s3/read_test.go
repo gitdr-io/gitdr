@@ -59,6 +59,7 @@ func newReaderBackend(t *testing.T, endpoint string) *s3backend.Backend {
 	}
 	t.Setenv("AWS_ACCESS_KEY_ID", "AKIDREADERTEST")
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "reader-test-secret")
+	t.Setenv("AWS_MAX_ATTEMPTS", "1") // a fake answers the same every time, so a retry only adds time
 	t.Setenv("AWS_EC2_METADATA_DISABLED", "true")
 	t.Setenv("AWS_CONFIG_FILE", filepath.Join(t.TempDir(), "absent"))
 	t.Setenv("AWS_SHARED_CREDENTIALS_FILE", filepath.Join(t.TempDir(), "absent"))
@@ -182,7 +183,8 @@ func TestVerifyWormKeepsTheRefusalAndShapesWhatItWrites(t *testing.T) {
 			"Object Lock enabled; default retention unnamed", "", "gitdr-marker"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			b := newReaderBackend(t, newReaderStore(t, xmlAnswer(tc.status, tc.body)).URL)
+			// The bucket lists, so a lock configuration it says it lacks is believed.
+			b := newReaderBackend(t, newReaderStore(t, byCall(xmlAnswer(tc.status, tc.body), xmlAnswer(http.StatusOK, emptyListing), nil)).URL)
 			st, err := b.VerifyWorm(context.Background())
 			if err != nil {
 				t.Fatal(err)

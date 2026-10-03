@@ -413,6 +413,9 @@ func TestDoctorKeepsTheStoresWordsOffStdout(t *testing.T) {
 		name  string
 		setup func(*doctorStore)
 		check func(t *testing.T, rep doctorReport)
+		// page is an answer that is not the store's API. It is refused at its first element, so
+		// the log says it was refused rather than carrying anything written inside it.
+		page bool
 	}{
 		{
 			"an HTML page for the lock configuration",
@@ -422,6 +425,7 @@ func TestDoctorKeepsTheStoresWordsOffStdout(t *testing.T) {
 					t.Errorf("worm = verdict %s, code %s; want null, not-s3", text(w.Verdict), text(w.Code))
 				}
 			},
+			true,
 		},
 		{
 			"an HTML error page for a retention",
@@ -431,6 +435,7 @@ func TestDoctorKeepsTheStoresWordsOffStdout(t *testing.T) {
 					t.Errorf("retention = %+v, want unreadable, not-s3", r)
 				}
 			},
+			true,
 		},
 		{
 			"an S3 error with the marker in its message and ids, for a retention",
@@ -440,6 +445,7 @@ func TestDoctorKeepsTheStoresWordsOffStdout(t *testing.T) {
 					t.Errorf("retention = %+v, want unreadable, naming AccessDenied", r)
 				}
 			},
+			false,
 		},
 		{
 			"an S3 error with the marker in its message, for the listing",
@@ -449,6 +455,7 @@ func TestDoctorKeepsTheStoresWordsOffStdout(t *testing.T) {
 					t.Errorf("retention = %+v, want unreadable, naming AccessDenied", r)
 				}
 			},
+			false,
 		},
 		{
 			"the marker as the error code, for the lock configuration",
@@ -458,6 +465,7 @@ func TestDoctorKeepsTheStoresWordsOffStdout(t *testing.T) {
 					t.Errorf("worm = verdict %s, code %s; want unknown, unnamed", text(w.Verdict), text(w.Code))
 				}
 			},
+			false,
 		},
 		{
 			"the marker in the request id headers, for a retention",
@@ -474,6 +482,8 @@ func TestDoctorKeepsTheStoresWordsOffStdout(t *testing.T) {
 					t.Errorf("retention = %+v, want unreadable", r)
 				}
 			},
+			// A page too, but the request ids come from headers, which the SDK puts in its error.
+			false,
 		},
 	} {
 		for _, scope := range doctorScopes {
@@ -489,8 +499,12 @@ func TestDoctorKeepsTheStoresWordsOffStdout(t *testing.T) {
 						t.Errorf("the store's words reached stdout:\n%s", out)
 					}
 					// Not lost, either: the whole error goes to the log, on stderr.
-					if !strings.Contains(stderr, marker) {
-						t.Errorf("the store's error is not on stderr either:\n%s", stderr)
+					logged := marker
+					if tc.page {
+						logged = "did not answer as the storage API does"
+					}
+					if !strings.Contains(stderr, logged) {
+						t.Errorf("the error on stderr does not carry %q:\n%s", logged, stderr)
 					}
 					if output == "json" {
 						tc.check(t, decodeDoctor(t, out))
@@ -813,5 +827,84 @@ func TestDoctorSaysWhatRetentionIsOnAnObject(t *testing.T) {
 					text(r.Observed), r.OK, r.Detail, tc.observed, tc.ok, tc.detail)
 			}
 		})
+	}
+}
+
+// A bucket that does not exist is never reported as one that locks nothing. MinIO answers the lock
+// question about a missing bucket with ObjectLockConfigurationNotFoundError, the answer an
+// unlocked bucket gets, and doctor called a mistyped bucket name "NOT immutable".
+func TestDoctorNeverCallsAMissingBucketUnlocked(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		list          http.HandlerFunc
+		verdict, code string
+	}{
+		{"a bucket that is not there", answer(http.StatusNotFound,
+			`<Error><Code>NoSuchBucket</Code><Message>The specified bucket does not exist</Message></Error>`), "unknown", "NoSuchBucket"},
+		{"a bucket that is there", nil, "not-immutable", "null"},
+	} {
+		for _, scope := range doctorScopes {
+			t.Run(tc.name+", "+scope.name, func(t *testing.T) {
+				doctorEnv(t)
+				store := newDoctorStore(t)
+				store.lock = answer(http.StatusNotFound, noLockConfiguration)
+				if tc.list != nil {
+					store.list = tc.list
+				}
+				args := append(slices.Clone(scope.args), "-config", bucketConfig(t, store.URL, ""), "-output", "json")
+				code, out, _ := runDoctorCLI(context.Background(), t, args...)
+				w := decodeDoctor(t, out).check(t, "worm")
+				if text(w.Verdict) != tc.verdict || text(w.Code) != tc.code {
+					t.Errorf("worm = verdict %s, code %s; want %s, %s\n%s", text(w.Verdict), text(w.Code), tc.verdict, tc.code, out)
+				}
+				if destOnly(scope.args) && code != 0 {
+					t.Errorf("exit %d, want 0: neither is a failure unless worm.require is set", code)
+				}
+			})
+		}
+	}
+}
+
+// An endpoint that answers with a web page has not answered the question, so it gets no verdict
+// and the code not-s3. Read as XML, a well-formed page was a lock configuration with nothing in it
+// ("NOT immutable"), a 404 page a store's NotFound ("could not read"), and a 200 page in place of
+// a retention an object holding none.
+func TestDoctorTakesNoPageForAnAnswer(t *testing.T) {
+	page := func(status int) http.HandlerFunc {
+		return func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "text/html")
+			w.WriteHeader(status)
+			_, _ = io.WriteString(w, `<!DOCTYPE html><html><head><title>Sign in</title></head><body><h1>Sign in to continue</h1></body></html>`)
+		}
+	}
+	noAnswer := func(t *testing.T, rep doctorReport) {
+		if w := rep.check(t, "worm"); w.Verdict != nil || text(w.Code) != "not-s3" {
+			t.Errorf("worm = verdict %s, code %s; want null, not-s3", text(w.Verdict), text(w.Code))
+		}
+	}
+	for _, tc := range []struct {
+		name  string
+		setup func(*doctorStore)
+		check func(*testing.T, doctorReport)
+	}{
+		{"a page with a 200 for the lock configuration", func(s *doctorStore) { s.lock = page(http.StatusOK) }, noAnswer},
+		{"a page with a 404 for the lock configuration", func(s *doctorStore) { s.lock = page(http.StatusNotFound) }, noAnswer},
+		{"a page with a 200 for a retention", func(s *doctorStore) { s.retention = page(http.StatusOK) },
+			func(t *testing.T, rep doctorReport) {
+				if r := rep.check(t, "retention"); text(r.Observed) != "unreadable" || !strings.Contains(r.Detail, "(not-s3)") {
+					t.Errorf("retention = %+v, want unreadable, not-s3", r)
+				}
+			}},
+	} {
+		for _, scope := range doctorScopes {
+			t.Run(tc.name+", "+scope.name, func(t *testing.T) {
+				doctorEnv(t)
+				store := newDoctorStore(t)
+				tc.setup(store)
+				args := append(slices.Clone(scope.args), "-config", bucketConfig(t, store.URL, ""), "-output", "json")
+				_, out, _ := runDoctorCLI(context.Background(), t, args...)
+				tc.check(t, decodeDoctor(t, out))
+			})
+		}
 	}
 }

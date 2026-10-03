@@ -8,6 +8,7 @@ package dest
 
 import (
 	"context"
+	"errors"
 	"io"
 	"regexp"
 	"time"
@@ -96,6 +97,10 @@ type WormStatus struct {
 
 // UnnamedCode is what ShapedCode returns for a code that does not have the shape of one.
 const UnnamedCode = "unnamed"
+
+// ErrNotStorageAPI is what a backend returns for an answer that is not its store's API at all: a
+// web page, an empty body, another call's document. It is no answer, and never a store's no.
+var ErrNotStorageAPI = errors.New("the endpoint did not answer as the storage API does")
 
 // The shape of an error code: a letter, then up to 63 letters, digits and dots. S3, Azure and
 // Cloud Storage name their errors with single words of this shape (AccessDenied,

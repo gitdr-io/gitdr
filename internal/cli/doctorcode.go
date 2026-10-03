@@ -34,12 +34,15 @@ const (
 // error code when it answered with one, through dest.ShapedCode, or one of the codes above.
 //
 // The order matters. A capped answer comes first, since what it cut short could have held
-// anything. The store's code comes before the network's words, since an answer is the better
-// fact. A context ending comes before the network as well, since a dial or a lookup cut short by
-// it reports itself as their own failure.
+// anything, and then an answer that was not the storage API's. The store's code comes before the
+// network's words, since an answer is the better fact. A context ending comes before the network
+// as well, since a dial or a lookup cut short by it reports itself as their own failure.
 func errorCode(err error) string {
 	if errors.Is(err, dest.ErrResponseTooLarge) {
 		return codeTooLarge
+	}
+	if errors.Is(err, dest.ErrNotStorageAPI) {
+		return codeNotS3
 	}
 	if code, ok := storeCode(err); ok {
 		return dest.ShapedCode(code)

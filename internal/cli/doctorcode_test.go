@@ -65,6 +65,9 @@ func TestErrorCodeNamesTheFailure(t *testing.T) {
 		{"HTTPS to a port that speaks HTTP", sdk(get(http.ErrSchemeMismatch)), "tls"},
 		{"an endpoint that does not speak TLS", sdk(get(tls.RecordHeaderError{Msg: "first record does not look like a TLS handshake"})), "tls"},
 		{"a page that is not XML", sdk(&smithy.DeserializationError{Err: errors.New("failed to decode response body, XML syntax error on line 1")}), "not-s3"},
+		{"a page the answer check refused", sdk(fmt.Errorf("%w: HTTP 200 and a document whose root is html", dest.ErrNotStorageAPI)), "not-s3"},
+		// An empty page ends in EOF, and the refusal outranks it, or it would read as a dropped connection.
+		{"an empty page the answer check refused", sdk(errors.Join(dest.ErrNotStorageAPI, io.EOF)), "not-s3"},
 		{"anything nobody named", errors.New("something else"), "not-s3"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

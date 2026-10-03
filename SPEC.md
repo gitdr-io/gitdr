@@ -150,6 +150,27 @@ immutability policy). If it can't confirm enabled-and-locked immutability, it wa
 proceeds. `--require-worm` (`worm.require`, off by default) makes the run fail closed instead,
 for people who want a hard immutability guarantee.
 
+Two answers are not taken at their word, on S3, by `backup` and `doctor` alike.
+
+- **`ObjectLockConfigurationNotFoundError` is believed once a listing shows the bucket exists.**
+  MinIO gives that same answer about a bucket that does not exist, so gitdr reported a bucket
+  nobody had created as `not-immutable`. Now such a bucket reads `unknown`, and the listing's own
+  answer, `NoSuchBucket`, is its code. The listing is one request for one key. It needs
+  `s3:ListBucket` on AWS and `listFiles` on Backblaze, which the credentials in
+  [`docs/QUICKSTART.md`](./docs/QUICKSTART.md) already hold. HeadBucket is not used: it answers
+  without a body, so a missing bucket and a refused one look alike, and on Backblaze it needs
+  `listBuckets`, which those keys do not have.
+- **An answer that is not S3's is no answer.** Where a lock configuration, a listing or an
+  object's retention belongs, a success has to be that document and a failure an S3 error
+  document. A web page, an empty body or another call's document fails the read instead. So a
+  backup records the verdict `unknown` and an object's retention `not-checked`, never the earned
+  negatives `not-immutable` and `absent`, and doctor gives no verdict and the code `not-s3`. A
+  well-formed page used to parse as a lock configuration with nothing in it, which read as
+  "Object Lock not enabled".
+
+*Changed 2026-10-03. `gitdr.manifest/v5` is unchanged; these inputs now give it `unknown` and
+`not-checked` where they gave `not-immutable` and `absent`.*
+
 ### Azure
 
 A container is immutable only under a time-based retention policy that is **locked**. An
@@ -1192,12 +1213,15 @@ nothing to say.
 | `tls` | the TLS handshake or the certificate was refused, or an `https` endpoint answered in plain HTTP |
 | `timeout` | no answer in time, or the run was stopped before one came |
 | `too-large` | an answer ran past 1 MiB, the most doctor reads of one |
-| `not-s3` | an answer that is not the storage API's, such as an HTML page or a body that does not parse, or a failure none of the other codes names |
+| `not-s3` | an answer that is not the storage API's, such as a web page, an empty body, another call's document or a body that does not parse, or a failure none of the other codes names |
 
 `unknown` with a code is a store that declined the question. That covers `AccessDenied` and
 `NotImplemented`, and codes that say the key, the bucket name or the region is wrong, such as
 `InvalidAccessKeyId`, `SignatureDoesNotMatch`, `NoSuchBucket`, `PermanentRedirect` and
 `AuthorizationHeaderMalformed`. `not-immutable` comes without a code, since the store answered.
+A bucket that does not exist reads `unknown` with `NoSuchBucket` even on a store that answers its
+lock question as if it were there, since the code comes from the listing that tells the two
+apart (§4). *Changed 2026-10-03.*
 
 The `retention` check is there when the `worm` check says `immutable` and the destination can be
 asked. It has `observed`.
