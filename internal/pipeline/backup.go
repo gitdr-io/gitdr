@@ -37,6 +37,9 @@ type BackupDeps struct {
 	Logger        *slog.Logger
 	Now           func() time.Time
 	RequireWORM   bool // --require-worm / worm.require: fail closed if not immutable
+	// Deadline, when set, is when the run's work stops: --deadline or GITDR_DEADLINE. The manifest
+	// is written after it all the same, recording what the run did and did not finish.
+	Deadline time.Time
 }
 
 // BackupResult carries the run-manifest and where it was stored. It is returned even
@@ -56,6 +59,7 @@ func Backup(ctx context.Context, d BackupDeps) (*BackupResult, error) {
 		cfg: d.Config, src: d.Source, dst: d.Dest, git: d.Git,
 		signer: d.SigningKey, encKey: d.EncryptionKey, toolVersion: d.ToolVersion,
 		log: orDefault(d.Logger), now: orNow(d.Now), requireWORM: d.RequireWORM,
+		deadline: d.Deadline,
 	}
 	return r.run(ctx)
 }
@@ -71,6 +75,7 @@ type backupRun struct {
 	log         *slog.Logger
 	now         func() time.Time
 	requireWORM bool
+	deadline    time.Time       // when the work stops; zero for none
 	wormStatus  dest.WormStatus // captured by wormCheck, recorded in the manifest
 	// What the last successful run recorded, by repository slug. Read once per run; empty
 	// when there was no previous run or its manifest could not be read, in which case every
@@ -81,11 +86,22 @@ type backupRun struct {
 func (r *backupRun) run(ctx context.Context) (*BackupResult, error) {
 	started := r.now().UTC()
 
-	if err := r.wormCheck(ctx); err != nil {
+	// The work stops at the deadline, and the manifest does not. It is written after the work
+	// with the run's own context, so a run that ran out of time still records what it did and the
+	// repositories it did not finish. A deadline on everything would have cut the manifest too,
+	// and a run that writes no manifest is the outcome the deadline exists to prevent.
+	work := ctx
+	if !r.deadline.IsZero() {
+		var cancel context.CancelFunc
+		work, cancel = context.WithDeadline(ctx, r.deadline)
+		defer cancel()
+	}
+
+	if err := r.wormCheck(work); err != nil {
 		return nil, err
 	}
 
-	repos, err := r.selectRepos(ctx)
+	repos, err := r.selectRepos(work)
 	if err != nil {
 		return nil, err
 	}
@@ -94,7 +110,7 @@ func (r *backupRun) run(ctx context.Context) (*BackupResult, error) {
 	// immediately before it starts, because a credential can change during a run: a token file
 	// is replaced, an App token expires after an hour. This stays so that a credential that
 	// cannot produce a header at all fails the run here, before any repository is touched.
-	if _, err := gitAuthHeader(ctx, r.src); err != nil {
+	if _, err := gitAuthHeader(work, r.src); err != nil {
 		return nil, fmt.Errorf("source auth: %w", err)
 	}
 	// Object Lock retention is only meaningful on an immutable destination. On the
@@ -111,9 +127,9 @@ func (r *backupRun) run(ctx context.Context) (*BackupResult, error) {
 	// One List and one Get for the whole run, before any repository is touched. What it
 	// returns decides which repositories can be left alone; see unchanged.go for the rules,
 	// including the one that refreshes a copy before its object lock expires.
-	r.previous = r.loadPrevious(ctx, manifestDir(repos))
+	r.previous = r.loadPrevious(work, manifestDir(repos))
 
-	entries := r.fanOut(ctx, repos, ret)
+	entries := r.fanOut(work, repos, ret)
 	allOK := true
 	for _, e := range entries {
 		if e.Status == StatusFailed {

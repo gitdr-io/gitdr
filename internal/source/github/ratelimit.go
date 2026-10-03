@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sync"
 	"time"
 
 	ghinstallation "github.com/bradleyfalzon/ghinstallation/v2"
@@ -43,9 +44,9 @@ const (
 
 // call sends one API request through fn, waiting out a rate limit and retrying a 5xx.
 //
-// A limit is waited for only when the context's deadline leaves room for the wait. When it does
-// not, the request fails now, and the error names the reset: a wait that ends past the deadline
-// only delays the same failure.
+// A limit is waited for only when the context's deadline leaves room for the wait, and the run's
+// budget for rate-limit waits covers it. When either does not, the request fails now, and the error
+// names the reset: a wait that ends past the deadline only delays the same failure.
 //
 // After a wait, fn is given a context carrying github.BypassRateLimitCheck. go-github remembers a
 // spent limit against its own clock and would refuse the retry without sending it; the wait just
@@ -78,6 +79,10 @@ func (s *Source) call(ctx context.Context, fn func(context.Context) error) error
 			if deadline, ok := ctx.Deadline(); ok && resume.After(deadline) {
 				return source.Transient(fmt.Errorf("rate limited until %s, past the deadline of %s: %w",
 					reset.UTC().Format(time.RFC3339), deadline.UTC().Format(time.RFC3339), err))
+			}
+			if !s.budget.reserve(now, resume) {
+				return source.Transient(fmt.Errorf("rate limited until %s, and waiting would take the run past the %s it may spend on rate limits: %w",
+					reset.UTC().Format(time.RFC3339), s.budget.max, err))
 			}
 			s.logger.Warn("github rate limit reached; waiting for it to lift",
 				"until", reset.UTC().Format(time.RFC3339), "err", err)
@@ -162,6 +167,39 @@ func jitter() time.Duration {
 	var b [8]byte
 	_, _ = rand.Read(b[:]) // never fails since Go 1.24
 	return time.Duration(binary.BigEndian.Uint64(b[:]) % uint64(time.Second))
+}
+
+// waitBudget is how long one run may spend waiting for rate limits, shared by all its requests.
+//
+// It measures the time the run spends with something waiting, not the sum of every request's
+// waits. The requests that meet one limit together wait for the same reset together, and charging
+// each of them would spend a four-request run's hour in fifteen minutes.
+type waitBudget struct {
+	max   time.Duration
+	mu    sync.Mutex
+	spent time.Duration
+	until time.Time // when the latest wait charged ends
+}
+
+// reserve charges a wait from now until resume to the budget, and reports false, charging
+// nothing, when the budget cannot cover it. Only the part of the wait after every wait already
+// charged is new: the rest the run was going to spend waiting anyway.
+func (b *waitBudget) reserve(now, resume time.Time) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	from := now
+	if b.until.After(from) {
+		from = b.until
+	}
+	charge := max(resume.Sub(from), 0)
+	if b.spent+charge > b.max {
+		return false
+	}
+	b.spent += charge
+	if resume.After(b.until) {
+		b.until = resume
+	}
+	return true
 }
 
 // sleepContext waits for d, or until ctx is done.

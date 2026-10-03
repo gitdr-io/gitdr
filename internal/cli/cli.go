@@ -115,17 +115,21 @@ func buildSource(cfg *config.Config, log *slog.Logger) (source.Source, error) {
 		}
 		if tokenPath != "" {
 			// appID and installationID are ignored: the token belongs to one installation.
-			return ghsrc.New(ghsrc.Options{BaseURL: cfg.Source.BaseURL, TokenPath: tokenPath}, log)
+			return ghsrc.New(ghsrc.Options{
+				BaseURL: cfg.Source.BaseURL, TokenPath: tokenPath,
+				MaxRateLimitWait: cfg.Source.GitHub.MaxRateLimitWait,
+			}, log)
 		}
 		key, err := cfg.ResolveGitHubPrivateKey()
 		if err != nil {
 			return nil, err
 		}
 		return ghsrc.New(ghsrc.Options{
-			BaseURL:        cfg.Source.BaseURL,
-			AppID:          cfg.Source.GitHub.AppID,
-			InstallationID: cfg.Source.GitHub.InstallationID,
-			PrivateKeyPEM:  key,
+			BaseURL:          cfg.Source.BaseURL,
+			AppID:            cfg.Source.GitHub.AppID,
+			InstallationID:   cfg.Source.GitHub.InstallationID,
+			PrivateKeyPEM:    key,
+			MaxRateLimitWait: cfg.Source.GitHub.MaxRateLimitWait,
 		}, log)
 	case "gitlab":
 		return glsrc.New(glsrc.Options{

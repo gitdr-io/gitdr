@@ -6,6 +6,8 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strings"
+	"time"
 
 	"gitdr.io/gitdr/internal/crypto"
 	"gitdr.io/gitdr/internal/gitexec"
@@ -18,12 +20,18 @@ func runBackup(ctx context.Context, args []string) int {
 	common := registerCommon(fs)
 	requireWORM := fs.Bool("require-worm", false, "fail if the destination is not WORM-immutable (default: warn and proceed)")
 	repo := fs.String("repo", "", "owner/name to back up (overrides config source.repo)")
+	deadlineFlag := fs.String("deadline", "", "RFC 3339 time the run's work stops by; the manifest is still written (default $GITDR_DEADLINE)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
 	cfg, log, err := common.load()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "config:", err)
+		return 1
+	}
+	deadline, err := runDeadline(*deadlineFlag, os.Getenv("GITDR_DEADLINE"), time.Now())
+	if err != nil {
+		log.Error("deadline", "err", err)
 		return 1
 	}
 	if *repo != "" {
@@ -69,6 +77,7 @@ func runBackup(ctx context.Context, args []string) int {
 		ToolVersion:   version(),
 		Logger:        log,
 		RequireWORM:   *requireWORM || cfg.WORM.Require,
+		Deadline:      deadline,
 	})
 	if res != nil && res.Manifest != nil {
 		emitBackup(common.output, res)
@@ -81,6 +90,28 @@ func runBackup(ctx context.Context, args []string) int {
 		log.Warn("metrics write failed", "err", werr)
 	}
 	return 0
+}
+
+// runDeadline is when the run's work stops: --deadline, or GITDR_DEADLINE when the flag is not
+// given, as an RFC 3339 time. Zero when neither is set. A value that is not such a time, and a
+// deadline already past, are errors: a run that cannot tell when to stop must not start as if it
+// had been told never to.
+func runDeadline(flagValue, envValue string, now time.Time) (time.Time, error) {
+	value, from := strings.TrimSpace(flagValue), "--deadline"
+	if value == "" {
+		value, from = strings.TrimSpace(envValue), "GITDR_DEADLINE"
+	}
+	if value == "" {
+		return time.Time{}, nil
+	}
+	deadline, err := time.Parse(time.RFC3339, value)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("%s %q is not an RFC 3339 time: %w", from, value, err)
+	}
+	if !deadline.After(now) {
+		return time.Time{}, fmt.Errorf("%s %s has already passed", from, deadline.UTC().Format(time.RFC3339))
+	}
+	return deadline, nil
 }
 
 // okRepoCount counts repos that ended up protected (backed up now or already present).

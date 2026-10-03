@@ -250,11 +250,21 @@ or a SAS. See §4, Azure.
   time already past, and a primary limit with no reset wait a minute, doubled for each wait
   already spent on the request: 1, 2, 4, 8 and 16 minutes. Every wait adds a second, and up to a
   second of jitter. A request still refused after five waits fails. When a wait would end after
-  the context's deadline, the request fails at once and the error names the reset. The CLI sets no
-  deadline of its own, and a stop signal ends a wait early. A 5xx is tried four times, about one,
-  two and four seconds apart, and so is a 5xx from the endpoint that mints the App's installation
-  token. This covers the repository listing and every metadata request. The GitLab client retries
-  a 429 and a 5xx itself. *Added in v0.1.21.*
+  the run's deadline, or take the run past its budget for waits (below), the request fails at once
+  and the error names the reset. A stop signal ends a wait early. A 5xx is tried four times, about
+  one, two and four seconds apart, and so is a 5xx from the endpoint that mints the App's
+  installation token. This covers the repository listing and every metadata request. The GitLab
+  client retries a 429 and a 5xx itself. *Added in v0.1.21.*
+- Run deadline. `gitdr backup --deadline <RFC 3339 time>`, or `GITDR_DEADLINE` when the flag is
+  not given, stops the run's work at that time. A rate-limit wait that would end later is not
+  started, and the repositories still in progress, or not yet reached, fail with the deadline as
+  their error. The manifest is written after the work stops, so it records them. Writing it is not
+  bounded by the deadline, so a caller that kills the process at a limit of its own should pass a
+  deadline that leaves a minute for it. A deadline already past, or a value that is not an RFC 3339
+  time, is refused before the run starts. Separately, `source.github.maxRateLimitWait`
+  (`GITDR_SOURCE_GITHUB_MAXRATELIMITWAIT`, a Go duration, one hour when unset) bounds how long one
+  run spends waiting for GitHub's rate limits. It counts the time something is waiting, once, however
+  many requests wait together. *Added in v0.1.21.*
 - Bounded transfers. gitdr runs git with `http.lowSpeedLimit=1000` and `http.lowSpeedTime=600`,
   so a clone, fetch or `ls-remote` that moves under 1000 bytes a second for ten minutes is
   aborted and its repository fails. Before this, a server that stopped sending while keeping the

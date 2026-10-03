@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"gitdr.io/gitdr/internal/redact"
 )
@@ -241,6 +242,47 @@ func TestGitHubTokenPathFromYAMLAndEnv(t *testing.T) {
 			}
 			if c.Source.GitHub.TokenPath != tc.want {
 				t.Errorf("tokenPath = %q, want %q", c.Source.GitHub.TokenPath, tc.want)
+			}
+		})
+	}
+}
+
+// How long a run may wait for GitHub's rate limits arrives like any other field, from YAML and
+// then env, as a Go duration. Unset is zero, which the source reads as its default of an hour. A
+// negative wait means nothing and is refused rather than read as one.
+func TestMaxRateLimitWaitFromYAMLAndEnv(t *testing.T) {
+	const yamlDoc = "source:\n  type: github\n  github:\n    maxRateLimitWait: 90m\n"
+	for _, tc := range []struct {
+		name, yaml, env string
+		want            time.Duration
+		wantErr         bool
+	}{
+		{name: "unset", yaml: "source:\n  type: github\n"},
+		{name: "from YAML", yaml: yamlDoc, want: 90 * time.Minute},
+		{name: "env over YAML", yaml: yamlDoc, env: "2h", want: 2 * time.Hour},
+		{name: "negative", yaml: yamlDoc, env: "-1m", want: -time.Minute, wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("GITDR_SOURCE_GITHUB_MAXRATELIMITWAIT", "")
+			if err := os.Unsetenv("GITDR_SOURCE_GITHUB_MAXRATELIMITWAIT"); err != nil {
+				t.Fatal(err)
+			}
+			if tc.env != "" {
+				t.Setenv("GITDR_SOURCE_GITHUB_MAXRATELIMITWAIT", tc.env)
+			}
+			path := filepath.Join(t.TempDir(), "gitdr.yaml")
+			if err := os.WriteFile(path, []byte(tc.yaml+"destination:\n  s3:\n    bucket: b\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			c, err := Load(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if c.Source.GitHub.MaxRateLimitWait != tc.want {
+				t.Errorf("maxRateLimitWait = %s, want %s", c.Source.GitHub.MaxRateLimitWait, tc.want)
+			}
+			if err := c.Validate(); (err != nil) != tc.wantErr {
+				t.Errorf("Validate = %v, want an error: %v", err, tc.wantErr)
 			}
 		})
 	}

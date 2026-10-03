@@ -652,6 +652,67 @@ func TestOnlyAFailureLikelyToPassIsTransient(t *testing.T) {
 	}
 }
 
+// The budget for rate-limit waits is the time the run spends with something waiting, not the sum
+// of every request's waits: four requests waiting together for the same reset are charged once.
+func TestTheWaitBudgetChargesTimeSpentWaitingOnce(t *testing.T) {
+	t0 := time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)
+	b := &waitBudget{max: time.Hour}
+	for i, step := range []struct {
+		from, until time.Duration // the wait, from t0
+		ok          bool
+	}{
+		{0, 40 * time.Minute, true},                 // forty minutes spent
+		{time.Minute, 40 * time.Minute, true},       // inside the first: nothing more
+		{time.Minute, 50 * time.Minute, true},       // ten minutes past it: fifty spent
+		{50 * time.Minute, 70 * time.Minute, false}, // twenty more would make seventy
+		{50 * time.Minute, 60 * time.Minute, true},  // ten more make the hour exactly
+		{60 * time.Minute, 61 * time.Minute, false}, // and nothing is left
+	} {
+		if got := b.reserve(t0.Add(step.from), t0.Add(step.until)); got != step.ok {
+			t.Errorf("wait %d, %s to %s: reserve = %v, want %v", i+1, step.from, step.until, got, step.ok)
+		}
+	}
+
+	s, err := New(Options{BaseURL: "http://127.0.0.1:1", AppID: 1, InstallationID: 1, PrivateKeyPEM: testKeyPEM(t)}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.budget.max != time.Hour {
+		t.Errorf("a source given no budget may wait %s, want an hour", s.budget.max)
+	}
+}
+
+// A run that has spent its budget fails the next request that would wait, at once and naming the
+// reset, instead of waiting through another window of the limit.
+func TestARunThatHasSpentItsWaitBudgetStopsWaiting(t *testing.T) {
+	clock := newFakeClock()
+	api := newFakeAPI(t, clock, func(_ *http.Request, n int) reply {
+		if n < 2 {
+			return primaryLimit(http.StatusForbidden, clock.now().Add(40*time.Minute))
+		}
+		return repoPage(0, "hello")
+	})
+	s, err := New(Options{BaseURL: api.URL, AppID: 1, InstallationID: 123, PrivateKeyPEM: testKeyPEM(t), MaxRateLimitWait: time.Hour}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.now, s.sleep = clock.now, clock.sleep
+
+	_, err = s.ListRepos(context.Background(), source.Filter{})
+	if err == nil {
+		t.Fatal("a second forty-minute wait went ahead on an hour's budget")
+	}
+	if !errors.Is(err, source.ErrTransient) {
+		t.Errorf("not marked transient: %v", err)
+	}
+	if reset := clock.now().Add(40 * time.Minute).UTC().Format(time.RFC3339); !strings.Contains(err.Error(), reset) {
+		t.Errorf("the error does not name the reset %s: %v", reset, err)
+	}
+	if n := len(clock.sleeps()); n != 1 {
+		t.Errorf("waited %d times, want only the wait the budget covered", n)
+	}
+}
+
 // The waits SPEC.md promises for a limit that names no time: a minute, doubled for each wait
 // already spent on the request, five of them, and then the request fails.
 func TestALimitThatNamesNoTimeWaitsLongerEachTime(t *testing.T) {

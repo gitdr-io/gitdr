@@ -17,6 +17,7 @@ source:
     installationID: 0
     privateKeyPath: ""         # or set GITDR_GITHUB_APP_PRIVATE_KEY
     tokenPath: ""              # or a file holding an installation token, re-read on every use (SPEC §3)
+    maxRateLimitWait: 1h       # most one run waits for GitHub rate limits, all told (SPEC §6)
   gitlab: {}                   # token is a secret: set GITDR_GITLAB_TOKEN (read_api, read_repository)
 
 destination:

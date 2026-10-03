@@ -33,7 +33,14 @@ type Options struct {
 	// TokenPath names a file holding an installation token. With it the source holds no key
 	// and mints nothing; it reads the file before every API request and every git command.
 	TokenPath string
+	// MaxRateLimitWait bounds how long the source spends waiting for GitHub's rate limits, over
+	// its whole life, which is one run. Zero means DefaultMaxRateLimitWait.
+	MaxRateLimitWait time.Duration
 }
+
+// DefaultMaxRateLimitWait is the most one run waits for rate limits unless told otherwise: one
+// hour, a full window of GitHub's primary limit.
+const DefaultMaxRateLimitWait = time.Hour
 
 // Source is a read-only GitHub backend.
 type Source struct {
@@ -46,6 +53,8 @@ type Source struct {
 	// hour's wait without serving it.
 	now   func() time.Time
 	sleep func(context.Context, time.Duration) error
+	// What the run may still spend waiting for rate limits; see waitBudget.
+	budget *waitBudget
 }
 
 var (
@@ -65,7 +74,11 @@ func newSource(opts Options, logger *slog.Logger, base http.RoundTripper) (*Sour
 	if logger == nil {
 		logger = slog.Default()
 	}
-	s := &Source{host: "github.com", logger: logger, now: time.Now, sleep: sleepContext}
+	maxWait := opts.MaxRateLimitWait
+	if maxWait <= 0 {
+		maxWait = DefaultMaxRateLimitWait
+	}
+	s := &Source{host: "github.com", logger: logger, now: time.Now, sleep: sleepContext, budget: &waitBudget{max: maxWait}}
 	apiHost := "api.github.com"
 	if opts.BaseURL != "" {
 		s.host = hostFromURL(opts.BaseURL)

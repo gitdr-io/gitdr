@@ -9,6 +9,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 
@@ -56,6 +57,9 @@ type GitHubConfig struct {
 	// is a path, not a secret: the file is read by the source before every request and never
 	// here, so a caller can replace it during a run. SPEC §3, "GitHub token file".
 	TokenPath string `yaml:"tokenPath"`
+	// MaxRateLimitWait bounds how long one run spends waiting for GitHub's rate limits, as a Go
+	// duration such as 90m. Zero, the default, means the source's own: one hour. SPEC §6.
+	MaxRateLimitWait time.Duration `yaml:"maxRateLimitWait"`
 }
 
 // DestinationConfig configures the storage destination.
@@ -186,6 +190,7 @@ func applyEnvOverrides(c *Config) {
 	envStr(&c.Source.GitHub.PrivateKeyPath, "SOURCE_GITHUB_PRIVATEKEYPATH")
 	envSecret(&c.Source.GitHub.PrivateKey, "GITHUB_APP_PRIVATE_KEY")
 	envStr(&c.Source.GitHub.TokenPath, "SOURCE_GITHUB_TOKENPATH")
+	envDuration(&c.Source.GitHub.MaxRateLimitWait, "SOURCE_GITHUB_MAXRATELIMITWAIT")
 	envSecret(&c.Source.GitLab.Token, "GITLAB_TOKEN")
 
 	envStr(&c.Destination.Type, "DESTINATION_TYPE")
@@ -254,6 +259,9 @@ func (c *Config) Validate() error {
 	}
 	if c.Destination.Retention.Days <= 0 {
 		return fmt.Errorf("destination.retention.days must be > 0 (got %d)", c.Destination.Retention.Days)
+	}
+	if c.Source.GitHub.MaxRateLimitWait < 0 {
+		return fmt.Errorf("source.github.maxRateLimitWait must not be negative (got %s)", c.Source.GitHub.MaxRateLimitWait)
 	}
 	return nil
 }
@@ -380,6 +388,14 @@ func envInt(dst *int, key string) {
 	if v, ok := os.LookupEnv(envPrefix + key); ok {
 		if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
 			*dst = n
+		}
+	}
+}
+
+func envDuration(dst *time.Duration, key string) {
+	if v, ok := os.LookupEnv(envPrefix + key); ok {
+		if d, err := time.ParseDuration(strings.TrimSpace(v)); err == nil {
+			*dst = d
 		}
 	}
 }
