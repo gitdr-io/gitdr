@@ -908,3 +908,135 @@ func TestDoctorTakesNoPageForAnAnswer(t *testing.T) {
 		}
 	}
 }
+
+// doctor stops at its own deadline and still prints its document, with the code timeout on the
+// check that ran out. A caller that stops doctor itself gets nothing, so the default, 45 seconds,
+// is under the 60 a caller might give it.
+func TestDoctorStopsAtItsOwnDeadline(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		at    string
+		check func(*testing.T, doctorReport)
+	}{
+		{"the lock question never answered", "lock", func(t *testing.T, rep doctorReport) {
+			if w := rep.check(t, "worm"); w.Verdict != nil || text(w.Code) != "timeout" {
+				t.Errorf("worm = verdict %s, code %s; want null, timeout", text(w.Verdict), text(w.Code))
+			}
+		}},
+		{"a retention never answered", "retention", func(t *testing.T, rep doctorReport) {
+			if text(rep.check(t, "worm").Verdict) != "immutable" {
+				t.Error("the lock question, answered in time, lost its verdict")
+			}
+			if r := rep.check(t, "retention"); text(r.Observed) != "unreadable" || !strings.Contains(r.Detail, "(timeout)") {
+				t.Errorf("retention = %+v, want unreadable, timeout", r)
+			}
+		}},
+	} {
+		for _, scope := range doctorScopes {
+			t.Run(tc.name+", "+scope.name, func(t *testing.T) {
+				doctorEnv(t)
+				store := newDoctorStore(t)
+				stop := make(chan struct{})
+				t.Cleanup(func() { close(stop) }) // runs before the fake's Close, which waits for this handler
+				hang := func(_ http.ResponseWriter, r *http.Request) {
+					select {
+					case <-r.Context().Done():
+					case <-stop:
+					}
+				}
+				switch tc.at {
+				case "lock":
+					store.lock = hang
+				case "retention":
+					store.retention = hang
+				}
+
+				start := time.Now()
+				args := append(slices.Clone(scope.args), "-config", bucketConfig(t, store.URL, ""), "-output", "json", "-timeout", "1s")
+				code, out, stderr := runDoctorCLI(context.Background(), t, args...)
+				if took := time.Since(start); took > 15*time.Second {
+					t.Errorf("doctor took %s with a 1s deadline", took)
+				}
+				if destOnly(scope.args) && code != 0 {
+					t.Errorf("exit %d, want 0: running out of time is not a failure unless worm.require is set\n%s", code, stderr)
+				}
+				tc.check(t, decodeDoctor(t, out))
+			})
+		}
+	}
+}
+
+// The deadline is a flag, 45 seconds unless set, and a negative one is a command line that makes
+// no sense: exit 2, nothing on stdout.
+func TestDoctorTimeoutFlag(t *testing.T) {
+	var code int
+	help := captureStderr(t, func() { code = Run(context.Background(), []string{"doctor", "-h"}) })
+	if !strings.Contains(help, "-timeout duration") || !strings.Contains(help, "(default 45s)") {
+		t.Errorf("doctor -h (exit %d) does not show a -timeout defaulting to 45s:\n%s", code, help)
+	}
+
+	doctorEnv(t)
+	store := newDoctorStore(t)
+	code, out, stderr := runDoctorCLI(context.Background(), t, "-config", bucketConfig(t, store.URL, ""), "-only", "destination", "-timeout", "-1s")
+	if code != 2 || out != "" || !strings.Contains(stderr, "-timeout") {
+		t.Errorf("-timeout -1s: exit %d, stdout %q, stderr %q; want 2, nothing, a word about -timeout", code, out, stderr)
+	}
+}
+
+// A config that cannot be loaded still gets a v1 document under --output json: one failed config
+// check, with the code config, and the same exit code as before. The error stays on stderr, since
+// a parse error can quote the file.
+func TestDoctorReportsAConfigItCannotLoad(t *testing.T) {
+	const marker = "mk-7c21a" // yaml.v3 shortens a value over 10 bytes in its errors
+	dir := t.TempDir()
+	write := func(name, doc string) string {
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte(doc), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	for _, tc := range []struct {
+		name, path string
+		stderr     string // what the error on stderr names
+	}{
+		{"YAML that does not parse", write("broken.yaml", "destination: [s3\n"), "parse config"},
+		{"a value of the wrong type", write("typed.yaml", "backup:\n  concurrency: "+marker+"\n"), marker},
+		{"no file at the path", filepath.Join(dir, "absent.yaml"), "read config"},
+	} {
+		for _, scope := range doctorScopes {
+			t.Run(tc.name+", "+scope.name, func(t *testing.T) {
+				doctorEnv(t)
+				args := append(slices.Clone(scope.args), "-config", tc.path, "-output", "json")
+				code, out, stderr := runDoctorCLI(context.Background(), t, args...)
+				if code != 1 {
+					t.Errorf("exit %d, want 1, as before", code)
+				}
+				if strings.Contains(out, marker) {
+					t.Errorf("the config's text reached stdout:\n%s", out)
+				}
+				if !strings.Contains(stderr, tc.stderr) {
+					t.Errorf("stderr does not carry the error (%q):\n%s", tc.stderr, stderr)
+				}
+				rep := decodeDoctor(t, out)
+				if rep.Schema != "gitdr.doctor/v1" || rep.OK || len(rep.Checks) != 1 {
+					t.Fatalf("document = %+v, want v1, not ok, with one check", rep)
+				}
+				c := rep.Checks[0]
+				if c.Name != "config" || c.OK || text(c.Code) != "config" {
+					t.Errorf("check = %+v, want config, failed, with the code config", c)
+				}
+				if want := []string{"code", "detail", "name", "ok"}; !slices.Equal(c.keys, want) {
+					t.Errorf("the check has keys %v, want %v", c.keys, want)
+				}
+			})
+		}
+	}
+
+	// Text output is as it was: the error on stderr and nothing on stdout.
+	doctorEnv(t)
+	code, out, _ := runDoctorCLI(context.Background(), t, "-config", filepath.Join(dir, "absent.yaml"))
+	if code != 1 || out != "" {
+		t.Errorf("text output: exit %d, stdout %q; want 1 and nothing", code, out)
+	}
+}

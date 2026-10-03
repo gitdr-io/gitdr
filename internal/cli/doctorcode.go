@@ -28,6 +28,9 @@ const (
 	codeTimeout  = "timeout"   // no answer in time, or the run was stopped first
 	codeTooLarge = "too-large" // an answer ran past doctorResponseLimit
 	codeNotS3    = "not-s3"    // an answer that is not the storage API's, or a failure none of these names
+
+	// codeConfig is on the config check alone: the config could not be read or parsed.
+	codeConfig = "config"
 )
 
 // errorCode says what a failed store call was, in a word that is safe to print: the store's own

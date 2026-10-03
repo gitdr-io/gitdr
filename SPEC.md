@@ -1251,6 +1251,19 @@ What doctor guarantees about its reads and writes:
 git-lfs, so a bucket can be checked before anything is connected to back up into it. `-only`
 takes no other value, and any other exits 2.
 
+doctor stops its checks after 45 seconds, or after `-timeout`, a duration such as `20s`. `0`
+waits for the checks, and a negative value exits 2. A check that runs out of time ends with the
+code `timeout`, and the document still goes out. A caller that stops doctor itself gets no
+document at all, so the default is under the 60 seconds such a caller is likely to give it.
+
+Under `--output json`, a config that cannot be read or parsed still gets a document. It has one
+check, `config`, with `ok: false` and `code: "config"`, and that is the only time the `config`
+check carries a `code`. doctor still exits 1, and the error goes to stderr and nowhere else,
+since a parse error can quote the file. Text output is as it was.
+
+*Added 2026-10-03: the deadline and the `config` code. Both add to `gitdr.doctor/v1` and change
+nothing already in it.*
+
 Before v1 the `worm` check said what it found only in `detail`, so a reader had to match prose.
 The change is additive: every key an older reader used is where it was, with the value it had.
 The one exception is `detail` where it quoted the store's error, which it now names by its code.

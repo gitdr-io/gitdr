@@ -23,6 +23,11 @@ const doctorSchema = "gitdr.doctor/v1"
 // "1 MiB" in words, so the two change together.
 const doctorResponseLimit = 1 << 20
 
+// doctorDeadline is how long doctor gives its checks unless -timeout says otherwise. A caller
+// that stops doctor itself gets no document at all, so this stays under the 60 seconds such a
+// caller is likely to allow.
+const doctorDeadline = 45 * time.Second
+
 type checkResult struct {
 	Name   string `json:"name"`
 	OK     bool   `json:"ok"`
@@ -66,6 +71,7 @@ func runDoctor(ctx context.Context, args []string) int {
 	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
 	common := registerCommon(fs)
 	only := fs.String("only", "", `run one group of checks: "destination" checks the bucket alone, with no source, git or git-lfs`)
+	timeout := fs.Duration("timeout", doctorDeadline, "stop the checks after this long and report what they found; 0 waits for them")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -74,10 +80,24 @@ func runDoctor(ctx context.Context, args []string) int {
 		fmt.Fprintln(os.Stderr, err)
 		return 2
 	}
+	if *timeout < 0 {
+		fmt.Fprintf(os.Stderr, "doctor: -timeout %s is negative\n", *timeout)
+		return 2
+	}
 	cfg, log, err := common.load()
 	if err != nil {
+		// The error goes to stderr and nowhere else: a parse error can quote the file.
 		fmt.Fprintln(os.Stderr, "config:", err)
+		if common.output == "json" {
+			emitUnloadedConfig()
+		}
 		return 1
+	}
+	// A check that runs out of time ends with the code timeout, and the document still goes out.
+	if *timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, *timeout)
+		defer cancel()
 	}
 
 	var checks []checkResult
@@ -347,6 +367,23 @@ func emitDoctor(output string, checks []checkResult) int {
 		return 1
 	}
 	return 0
+}
+
+// emitUnloadedConfig prints the document for a config doctor could not read or parse: one failed
+// config check with the code config. The error itself is on stderr.
+func emitUnloadedConfig() {
+	type check struct {
+		Name   string `json:"name"`
+		OK     bool   `json:"ok"`
+		Detail string `json:"detail"`
+		Code   string `json:"code"`
+	}
+	b, _ := json.MarshalIndent(struct {
+		Schema string  `json:"schema"`
+		OK     bool    `json:"ok"`
+		Checks []check `json:"checks"`
+	}{doctorSchema, false, []check{{"config", false, "could not read or parse the config; the error is on stderr", codeConfig}}}, "", "  ")
+	fmt.Println(string(b))
 }
 
 // An object already under the configured prefix, from the first page of the listing, or "" when

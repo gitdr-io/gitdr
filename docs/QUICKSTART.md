@@ -222,7 +222,8 @@ gitdr doctor --config config.yaml --only destination
 
 It reads the destination block and nothing else, so the config needs no source and the machine
 needs no git. Add `--output json` for a document a script can read. Its `verdict` says what the
-bucket locks, see [`../SPEC.md`](../SPEC.md) §11.
+bucket locks, see [`../SPEC.md`](../SPEC.md) §11. doctor gives up after 45 seconds, or the
+`--timeout` you give it, and says which check ran out of time.
 
 ## 8. Verify
 
