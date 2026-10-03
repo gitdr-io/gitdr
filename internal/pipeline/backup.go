@@ -308,12 +308,24 @@ func (r *backupRun) backupOne(ctx context.Context, repo source.Repo, ret dest.Re
 	return entry
 }
 
-// alreadyBackedUp reports whether this repo's bundle for the run date already exists.
+// alreadyBackedUp reports whether this repo already has a copy for the run date: its bundle, or
+// for a repository with no commits, which has no bundle, its metadata alone.
+//
+// Both are recognised the same way. Looking for the bundle only sent an empty repository round
+// again on a rerun, and its second metadata write failed on the key the first run had created.
 func (r *backupRun) alreadyBackedUp(ctx context.Context, repo source.Repo) bool {
-	date := r.now().UTC().Format("2006-01-02")
-	key := path.Join(repo.Host, repo.Owner, repo.Name, date, repo.Name+".bundle")
-	objs, err := r.dst.List(ctx, key)
-	return err == nil && len(objs) > 0
+	dir := path.Join(repo.Host, repo.Owner, repo.Name, r.now().UTC().Format("2006-01-02"))
+	objs, err := r.dst.List(ctx, path.Join(dir, repo.Name+"."))
+	if err != nil {
+		return false
+	}
+	for _, o := range objs {
+		switch o.Key {
+		case path.Join(dir, repo.Name+".bundle"), path.Join(dir, repo.Name+".meta.json"):
+			return true
+		}
+	}
+	return false
 }
 
 // retentionWindow is how long a copy is kept, as a duration.
