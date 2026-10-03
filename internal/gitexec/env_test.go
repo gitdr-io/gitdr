@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -250,14 +251,16 @@ var gitdrsOwn = regexp.MustCompile(`^(GIT_TERMINAL_PROMPT|GIT_LFS_SKIP_SMUDGE|GI
 // git is started with the variables it needs from gitdr's environment, and no others.
 //
 // Every variable git needs is set below with a value of its own, and has to arrive unchanged; so
-// is every secret in runSecrets, and none may arrive. What arrives is compared whole, so anything
-// else in the environment this test runs in, CI or GOPATH, fails it just the same.
+// is every secret in runSecrets, and every variable gitdr withholds on purpose, and none of those
+// may arrive. What arrives is compared whole, so anything else in the environment this test runs
+// in, CI or GOPATH, fails it just the same.
 func TestGitSeesOnlyTheEnvironmentItNeeds(t *testing.T) {
 	bin, logPath := fake(t, "git")
 	home, tmp := t.TempDir(), t.TempDir()
 
 	// passedThrough's list, written out again rather than read from it, each with a value of its
-	// own. One dropped from there fails this test.
+	// own. One dropped from there fails this test, and so does one added there and not here,
+	// whether or not the machine running the test happens to set it.
 	needed := map[string]string{
 		"PATH":                     "/usr/local/bin:/usr/bin:/bin",
 		"HOME":                     home,
@@ -277,11 +280,27 @@ func TestGitSeesOnlyTheEnvironmentItNeeds(t *testing.T) {
 		"GIT_HTTP_LOW_SPEED_LIMIT": "500",
 		"GIT_HTTP_LOW_SPEED_TIME":  "1200",
 	}
-	for k, v := range needed {
-		t.Setenv(k, v)
+	if got, want := slices.Sorted(maps.Keys(passedThrough)), slices.Sorted(maps.Keys(needed)); !slices.Equal(got, want) {
+		t.Fatalf("passedThrough lets through %v, and this test checks %v", got, want)
 	}
-	for k, v := range runSecrets {
-		t.Setenv(k, v)
+	// What gitexec.go leaves out on purpose: each would point git at another configuration,
+	// repository, program or library, turn TLS verification off, or change its language.
+	withheld := map[string]string{
+		"GIT_SSL_NO_VERIFY":     "true",
+		"GIT_ASKPASS":           "/canary/askpass",
+		"SSH_ASKPASS":           "/canary/ssh-askpass",
+		"GIT_CONFIG_GLOBAL":     "/canary/gitconfig",
+		"GIT_CONFIG_PARAMETERS": "'canary.key'='canary'",
+		"GIT_DIR":               "/canary/git-dir",
+		"XDG_CONFIG_HOME":       "/canary/xdg",
+		"LD_PRELOAD":            "/canary/preload.so",
+		"LANG":                  "canary_LANG.UTF-8",
+		"LC_ALL":                "canary_LC_ALL.UTF-8",
+	}
+	for _, env := range []map[string]string{needed, runSecrets, withheld} {
+		for k, v := range env {
+			t.Setenv(k, v)
+		}
 	}
 
 	g := &Git{bin: bin, logger: slog.New(slog.DiscardHandler)}
@@ -420,13 +439,16 @@ func TestAStalledTransferIsAborted(t *testing.T) {
 		}
 		t.Skip("git is not installed")
 	}
-	// Nothing from the machine's own git setup: no credential helper, no proxy, and no askpass
-	// program, which an editor's terminal sets and GIT_TERMINAL_PROMPT=0 does not stop.
-	t.Setenv("HOME", t.TempDir())
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
-	t.Setenv("GIT_ASKPASS", "")
-	t.Setenv("SSH_ASKPASS", "")
+	// Nothing from the machine's own git setup. Of what isolates git from it, only HOME reaches
+	// the git gitdr runs (passedThrough), and no askpass variable does, so an editor's askpass
+	// program, which GIT_TERMINAL_PROMPT=0 does not stop, cannot run. The system configuration is
+	// still read, as it is in production; the empty credential helper in this HOME's .gitconfig
+	// clears one it names, such as osxkeychain. Same as isolateGit in the pipeline tests.
+	home := t.TempDir()
+	if err := os.WriteFile(filepath.Join(home, ".gitconfig"), []byte("[credential]\n\thelper =\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
 	t.Setenv("GIT_HTTP_LOW_SPEED_TIME", "1")
 	t.Setenv("GIT_HTTP_LOW_SPEED_LIMIT", "")
 	if err := os.Unsetenv("GIT_HTTP_LOW_SPEED_LIMIT"); err != nil {
