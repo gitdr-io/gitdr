@@ -13,6 +13,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 )
 
 // prGetDumpable is PR_GET_DUMPABLE from <linux/prctl.h>.
@@ -197,7 +198,18 @@ func TestGitCannotReadTheEngine(t *testing.T) {
 		_ = target.Process.Kill()
 		_ = target.Wait()
 	})
-	if out, err := readEnviron(target.Process.Pid); err != nil || !strings.Contains(out, "PATH=") {
+	// Start returns when the child's close-on-exec descriptors close, part way through its exec:
+	// the kernel may not have made the new program dumpable or laid out its environment yet, so
+	// an early read can be refused or come back empty. Poll until it works.
+	var out string
+	var err error
+	for range 200 {
+		if out, err = readEnviron(target.Process.Pid); err == nil && strings.Contains(out, "PATH=") {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if err != nil || !strings.Contains(out, "PATH=") {
 		t.Fatalf("control: a child could not read a dumpable process's environment either (%v), so this test proves nothing", err)
 	}
 }
