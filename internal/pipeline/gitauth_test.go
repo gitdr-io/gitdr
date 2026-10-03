@@ -155,9 +155,18 @@ func serveBare(t *testing.T, root, workdir, owner, name string) string {
 // tests answer 401 on purpose, and GIT_TERMINAL_PROMPT=0 stops git prompting on a terminal but
 // not running GIT_ASKPASS, which an editor's terminal sets and which then waits for a person. An
 // empty GIT_ASKPASS also stops git falling back to core.askPass and SSH_ASKPASS.
+//
+// Those variables reach only the git these tests run to build fixtures. The git gitdr runs gets
+// HOME and none of the rest (gitexec's passedThrough), so it reads the system configuration, as
+// it does in production, and the empty credential helper in this HOME is what clears a helper
+// that configuration names, such as osxkeychain.
 func isolateGit(t *testing.T) {
 	t.Helper()
-	t.Setenv("HOME", t.TempDir())
+	home := t.TempDir()
+	if err := os.WriteFile(filepath.Join(home, ".gitconfig"), []byte("[credential]\n\thelper =\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
 	t.Setenv("GIT_ASKPASS", "")

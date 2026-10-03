@@ -238,6 +238,16 @@ or a SAS. See §4, Azure.
   `GIT_HTTP_LOW_SPEED_TIME` override both values, as git documents, and gitdr has no setting of
   its own for them. git-lfs keeps its own inactivity timeout, `lfs.activitytimeout`, 30 seconds
   by default. *Added in v0.1.20.*
+- What git sees. git and git-lfs parse whatever the source sends, so from gitdr's environment
+  they get only `PATH`, `HOME`, `TMPDIR`, the proxy variables (`HTTPS_PROXY`, `HTTP_PROXY`,
+  `ALL_PROXY` and `NO_PROXY`, in either case), the CA variables (`SSL_CERT_FILE`,
+  `SSL_CERT_DIR`, `GIT_SSL_CAINFO` and `GIT_SSL_CAPATH`), and `GIT_HTTP_LOW_SPEED_LIMIT` and
+  `GIT_HTTP_LOW_SPEED_TIME`. They also get gitdr's own `GIT_*` settings, which carry the source
+  credential. The destination's credentials and the signing and encryption keys never reach
+  them. Up to v0.1.20 git got the whole environment. Any other variable that changed what git
+  does, `GIT_CONFIG_GLOBAL` for instance, no longer reaches it, so configure git in
+  `~/.gitconfig` instead. git's messages are in English whatever the locale.
+  *Changed in v0.1.21.*
 - No telemetry.
 
 ## 7. Restore

@@ -497,12 +497,14 @@ func TestCompareRestoredRefsRealGit(t *testing.T) {
 		// renames that namespace. Left to the machine's own gitconfig, a restore would
 		// report every branch but the checked-out one as missing -- a check failing on a
 		// perfect restore, which is worse than no check. CloneFromBundle pins --origin so
-		// this cannot happen; the config below is set exactly as an operator's would be.
-		cfg := filepath.Join(t.TempDir(), "gitconfig")
-		if err := os.WriteFile(cfg, []byte("[clone]\n\tdefaultRemoteName = upstream\n"), 0o600); err != nil {
+		// this cannot happen; the config below is where an operator's would be, in
+		// ~/.gitconfig. Not GIT_CONFIG_GLOBAL, which gitdr does not pass to git, so a test
+		// that set it would pass without --origin.
+		home := t.TempDir()
+		if err := os.WriteFile(filepath.Join(home, ".gitconfig"), []byte("[clone]\n\tdefaultRemoteName = upstream\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		t.Setenv("GIT_CONFIG_GLOBAL", cfg)
+		t.Setenv("HOME", home)
 
 		bundle, restored := build(t, func(work string) {
 			commit(t, work, "a.txt", "one")

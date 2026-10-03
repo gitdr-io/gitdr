@@ -1,6 +1,7 @@
 // Package gitexec wraps the system git binary. gitdr shells out to real git for
 // faithful clone/bundle semantics (and later git-lfs). Auth is injected via
-// GIT_CONFIG_* env, scoped to the clone host, so tokens never reach argv.
+// GIT_CONFIG_* env, scoped to the clone host, so tokens never reach argv, and git
+// gets no other part of gitdr's environment than what passedThrough names.
 package gitexec
 
 import (
@@ -415,8 +416,8 @@ const (
 	lowSpeedTime  = "600"  // seconds
 )
 
-// commandEnv is the environment of every git command: the caller's, without any GIT_CONFIG_*
-// it carried, then extra, then gitdr's own configuration as GIT_CONFIG_* pairs, the low-speed
+// commandEnv is the environment of every git command: what baseEnv lets through from the
+// caller's, then extra, then gitdr's own configuration as GIT_CONFIG_* pairs, the low-speed
 // limits first and then cfg. The auth header is one of cfg's entries, and it travels in
 // GIT_CONFIG_VALUE_n rather than on the command line, where `ps` would show it to every other
 // process on the machine.
@@ -445,18 +446,51 @@ func extraHeaderKey(raw string) string {
 	return "http.extraHeader"
 }
 
-// baseEnv is os.Environ minus any inherited GIT_CONFIG_* so our injected config can't
-// collide with the caller's.
+// baseEnv is the part of gitdr's own environment that git and git-lfs are started with: the
+// variables passedThrough names, and nothing else.
 func baseEnv() []string {
-	src := os.Environ()
-	out := make([]string, 0, len(src))
-	for _, e := range src {
-		if strings.HasPrefix(e, "GIT_CONFIG_COUNT=") ||
-			strings.HasPrefix(e, "GIT_CONFIG_KEY_") ||
-			strings.HasPrefix(e, "GIT_CONFIG_VALUE_") {
-			continue
+	var out []string
+	for _, kv := range os.Environ() {
+		if name, _, _ := strings.Cut(kv, "="); passedThrough[name] {
+			out = append(out, kv)
 		}
-		out = append(out, e)
 	}
 	return out
+}
+
+// passedThrough names every variable of gitdr's environment that git and git-lfs receive, and
+// why they need it.
+//
+// git and git-lfs parse whatever the source sends, so a flaw in either is reached through a
+// repository's content. The rest of gitdr's environment is where a run keeps its secrets: the
+// destination's AWS_*, GOOGLE_* and AZURE_* credentials, GITDR_MANIFEST_SIGNING_KEY,
+// GITDR_ENCRYPTION_KEY, the GitHub App key. git needs none of them. The only credential gitdr
+// hands git is the source's, as the scoped header in commandEnv, because fetching is its job.
+//
+// Named one by one, never by prefix, so a variable gitdr's environment gains later stays out
+// until somebody adds it here with its reason. Left out on purpose: the locale, so that git's
+// messages, which end up in errors and in the manifest, read the same on every machine;
+// GIT_SSL_NO_VERIFY, which turns TLS verification off; and every other GIT_* variable, such as
+// GIT_DIR, GIT_ASKPASS or GIT_CONFIG_GLOBAL, which would point git at another repository,
+// program or configuration than the one gitdr runs it with.
+var passedThrough = map[string]bool{
+	// Where git finds git-remote-https and git-lfs, and git-lfs finds git.
+	"PATH": true,
+	// Where git finds ~/.gitconfig, the operator's own git configuration.
+	"HOME": true,
+	// Where git and git-lfs write temporary files.
+	"TMPDIR": true,
+	// A proxy to the source, in each spelling the two read: libcurl, under git, reads
+	// http_proxy only in lower case and the rest in either; git-lfs reads every one but
+	// ALL_PROXY, in either case.
+	"HTTPS_PROXY": true, "https_proxy": true,
+	"HTTP_PROXY": true, "http_proxy": true,
+	"ALL_PROXY": true, "all_proxy": true,
+	"NO_PROXY": true, "no_proxy": true,
+	// The CA certificates a source behind a private CA is trusted by: git's own variables,
+	// which git-lfs reads as well, and the ones OpenSSL and Go read.
+	"GIT_SSL_CAINFO": true, "GIT_SSL_CAPATH": true,
+	"SSL_CERT_FILE": true, "SSL_CERT_DIR": true,
+	// The operator's override of the low-speed limits above (SPEC §6).
+	"GIT_HTTP_LOW_SPEED_LIMIT": true, "GIT_HTTP_LOW_SPEED_TIME": true,
 }

@@ -10,6 +10,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -18,17 +20,38 @@ import (
 
 // The fake git.
 //
-// With fakeGitLog set, the test binary is git: it appends one JSON line naming its argv and every
-// GIT_* variable in its environment to the file the variable names, and exits 0 having done
-// nothing. What a command was started with is otherwise visible only to `ps` and /proc, and it is
-// the thing under test here.
-const fakeGitLog = "GITDR_TEST_FAKE_GIT_LOG"
+// Started under the name git or git-lfs, through a link fake makes, the test binary is that
+// program: it appends one JSON line naming its argv and its whole environment to the log beside
+// the link, and exits 0 having done nothing. What a command was started with is otherwise visible
+// only to `ps` and /proc, and it is the thing under test here.
+//
+// It knows it is the fake by its name and not by a variable, because which variables reach git is
+// what these tests check, and one that told the test binary to act as git would have to be let
+// through for that.
+const fakeLog = "invocations.jsonl"
 
 func TestMain(m *testing.M) {
-	if path := os.Getenv(fakeGitLog); path != "" {
-		os.Exit(fakeGit(path))
+	switch filepath.Base(os.Args[0]) {
+	case "git", "git-lfs":
+		os.Exit(fakeGit(filepath.Join(filepath.Dir(os.Args[0]), fakeLog)))
 	}
 	os.Exit(m.Run())
+}
+
+// fake links name, git or git-lfs, to this test binary in a directory of its own, and returns the
+// link and the log the fake writes to.
+func fake(t *testing.T, name string) (bin, logPath string) {
+	t.Helper()
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	bin = filepath.Join(dir, name)
+	if err := os.Symlink(exe, bin); err != nil {
+		t.Fatal(err)
+	}
+	return bin, filepath.Join(dir, fakeLog)
 }
 
 type invocation struct {
@@ -39,7 +62,7 @@ type invocation struct {
 func fakeGit(logPath string) int {
 	inv := invocation{Args: os.Args[1:], Env: map[string]string{}}
 	for _, kv := range os.Environ() {
-		if k, v, ok := strings.Cut(kv, "="); ok && strings.HasPrefix(k, "GIT_") {
+		if k, v, ok := strings.Cut(kv, "="); ok {
 			inv.Env[k] = v
 		}
 	}
@@ -96,41 +119,36 @@ func configPairs(t *testing.T, env map[string]string) map[string]string {
 	return pairs
 }
 
-// Every git command gitdr starts carries the low-speed limits, and the ones that talk to the
-// source carry the credential beside them, in the environment and nowhere on the command line.
+// The source and the credential every fake command is started for.
+const (
+	fakeRemote = "https://git.example.test/octo/hello.git"
+	fakeCred   = "eC1hY2Nlc3MtdG9rZW46Z2hzX2Zha2VfdG9rZW4=" // base64 of x-access-token:ghs_fake_token
+	fakeHeader = "Authorization: Basic " + fakeCred
+	// The config key the credential travels under, scoped to fakeRemote's host.
+	fakeScoped = "http.https://git.example.test/.extraHeader"
+)
+
+// gitCommand is one of the ways gitdr starts git.
+type gitCommand struct {
+	name string
+	run  func()
+	// Talks to the source, and so is handed the credential, scoped to its host.
+	network bool
+}
+
+// everyGitCommand calls each method that starts git once, against g, with dir as the repository
+// and the source credential on the commands that talk to the source.
 //
-// Each method is called against the fake git, which prints nothing, so the ones that parse git's
-// output return errors here. Those are ignored: what is under test is what the process was
-// started with, not what it said.
-func TestEveryGitCommandCarriesTheLowSpeedLimits(t *testing.T) {
-	exe, err := os.Executable()
-	if err != nil {
-		t.Fatal(err)
-	}
-	logPath := filepath.Join(t.TempDir(), "invocations.jsonl")
-	t.Setenv(fakeGitLog, logPath)
-
-	g := &Git{bin: exe, logger: slog.New(slog.DiscardHandler)}
+// Against the fake git, which prints nothing, the methods that parse git's output return errors.
+// Those are ignored: what is under test is what the process was started with, not what it said.
+func everyGitCommand(g *Git, dir string) []gitCommand {
 	ctx := context.Background()
-	dir := t.TempDir()
 	bundle := filepath.Join(dir, "r.bundle")
-
-	const (
-		remote = "https://git.example.test/octo/hello.git"
-		cred   = "eC1hY2Nlc3MtdG9rZW46Z2hzX2Zha2VfdG9rZW4=" // base64 of x-access-token:ghs_fake_token
-		header = "Authorization: Basic " + cred
-	)
-	auth := Options{AuthHeader: header}
-
-	for _, tc := range []struct {
-		name string
-		run  func()
-		// Talks to the source, and so is handed the credential, scoped to its host.
-		network bool
-	}{
-		{name: "clone --mirror", network: true, run: func() { _ = g.CloneMirror(ctx, remote, filepath.Join(dir, "m.git"), auth) }},
-		{name: "ls-remote", network: true, run: func() { _, _ = g.LsRemote(ctx, remote, auth) }},
-		{name: "lfs fetch", network: true, run: func() { _ = g.LFSFetchAll(ctx, dir, remote, auth) }},
+	auth := Options{AuthHeader: fakeHeader}
+	return []gitCommand{
+		{name: "clone --mirror", network: true, run: func() { _ = g.CloneMirror(ctx, fakeRemote, filepath.Join(dir, "m.git"), auth) }},
+		{name: "ls-remote", network: true, run: func() { _, _ = g.LsRemote(ctx, fakeRemote, auth) }},
+		{name: "lfs fetch", network: true, run: func() { _ = g.LFSFetchAll(ctx, dir, fakeRemote, auth) }},
 		{name: "for-each-ref, HasRefs", run: func() { _, _ = g.HasRefs(ctx, dir) }},
 		{name: "for-each-ref, ListRefs", run: func() { _, _ = g.ListRefs(ctx, dir) }},
 		{name: "rev-parse", run: func() { _, _ = g.HeadOID(ctx, dir) }},
@@ -140,11 +158,26 @@ func TestEveryGitCommandCarriesTheLowSpeedLimits(t *testing.T) {
 		{name: "clone from a bundle", run: func() { _ = g.CloneFromBundle(ctx, bundle, filepath.Join(dir, "restored")) }},
 		{name: "lfs install", run: func() { _ = g.LFSInstallLocal(ctx, dir) }},
 		{name: "lfs checkout", run: func() { _ = g.LFSCheckout(ctx, dir) }},
-	} {
+	}
+}
+
+// removeLog clears the fake's log, so what is read next is one command's.
+func removeLog(t *testing.T, logPath string) {
+	t.Helper()
+	if err := os.Remove(logPath); err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+}
+
+// Every git command gitdr starts carries the low-speed limits, and the ones that talk to the
+// source carry the credential beside them, in the environment and nowhere on the command line.
+func TestEveryGitCommandCarriesTheLowSpeedLimits(t *testing.T) {
+	bin, logPath := fake(t, "git")
+	g := &Git{bin: bin, logger: slog.New(slog.DiscardHandler)}
+
+	for _, tc := range everyGitCommand(g, t.TempDir()) {
 		t.Run(tc.name, func(t *testing.T) {
-			if err := os.Remove(logPath); err != nil && !os.IsNotExist(err) {
-				t.Fatal(err)
-			}
+			removeLog(t, logPath)
 			tc.run()
 			for _, inv := range readInvocations(t, logPath) {
 				cfg := configPairs(t, inv.Env)
@@ -153,23 +186,22 @@ func TestEveryGitCommandCarriesTheLowSpeedLimits(t *testing.T) {
 						inv.Args, cfg["http.lowSpeedLimit"], cfg["http.lowSpeedTime"])
 				}
 
-				const scoped = "http.https://git.example.test/.extraHeader"
-				switch got, ok := cfg[scoped]; {
-				case tc.network && got != header:
-					t.Errorf("git %v: %s = %q, want the credential header", inv.Args, scoped, got)
+				switch got, ok := cfg[fakeScoped]; {
+				case tc.network && got != fakeHeader:
+					t.Errorf("git %v: %s = %q, want the credential header", inv.Args, fakeScoped, got)
 				case !tc.network && ok:
 					t.Errorf("git %v talks to no remote and was handed a credential anyway", inv.Args)
 				}
 
 				// The credential is in exactly one place: the config value above.
 				for _, a := range inv.Args {
-					if strings.Contains(a, cred) || strings.Contains(a, "ghs_fake_token") || strings.Contains(a, "Authorization") {
+					if strings.Contains(a, fakeCred) || strings.Contains(a, "ghs_fake_token") || strings.Contains(a, "Authorization") {
 						t.Errorf("the credential reached argv: %q", a)
 					}
 				}
 				holders := 0
 				for _, v := range inv.Env {
-					if strings.Contains(v, cred) {
+					if strings.Contains(v, fakeCred) {
 						holders++
 					}
 				}
@@ -181,9 +213,160 @@ func TestEveryGitCommandCarriesTheLowSpeedLimits(t *testing.T) {
 	}
 }
 
-// What the environment is made of, in order: the caller's own, without any GIT_CONFIG_* it
-// carried, then gitdr's pairs, the limits first. git's GIT_HTTP_LOW_SPEED_* variables survive,
-// because they are how an operator overrides the limits.
+// runSecrets is what a run keeps in gitdr's environment and git must never see, each with a value
+// that cannot occur by accident: what the hosted agent puts there (the destination's keys, the
+// manifest signing key, a GitLab token), and what an operator's run can hold besides.
+var runSecrets = map[string]string{
+	"AWS_ACCESS_KEY_ID":                        "canary-aws-access-key-id",
+	"AWS_SECRET_ACCESS_KEY":                    "canary-aws-secret-access-key",
+	"AWS_SESSION_TOKEN":                        "canary-aws-session-token",
+	"GOOGLE_APPLICATION_CREDENTIALS":           "canary-google-application-credentials",
+	"AZURE_CLIENT_SECRET":                      "canary-azure-client-secret",
+	"AZURE_STORAGE_KEY":                        "canary-azure-storage-key",
+	"GITDR_MANIFEST_SIGNING_KEY":               "canary-manifest-signing-key",
+	"GITDR_ENCRYPTION_KEY":                     "canary-encryption-key",
+	"GITDR_GITHUB_APP_PRIVATE_KEY":             "canary-github-app-private-key",
+	"GITDR_GITLAB_TOKEN":                       "canary-gitlab-token",
+	"GITDR_DESTINATION_AZURE_CONNECTIONSTRING": "canary-azure-connection-string",
+}
+
+// secretsIn names every variable of env that holds one of runSecrets.
+func secretsIn(env map[string]string) []string {
+	var found []string
+	for k, v := range env {
+		for _, secret := range runSecrets {
+			if strings.Contains(v, secret) {
+				found = append(found, k)
+			}
+		}
+	}
+	slices.Sort(found)
+	return found
+}
+
+// gitdrsOwn matches the variables gitdr itself sets on git, as opposed to passing through.
+var gitdrsOwn = regexp.MustCompile(`^(GIT_TERMINAL_PROMPT|GIT_LFS_SKIP_SMUDGE|GIT_CONFIG_COUNT|GIT_CONFIG_(KEY|VALUE)_[0-9]+)$`)
+
+// git is started with the variables it needs from gitdr's environment, and no others.
+//
+// Every variable git needs is set below with a value of its own, and has to arrive unchanged; so
+// is every secret in runSecrets, and none may arrive. What arrives is compared whole, so anything
+// else in the environment this test runs in, CI or GOPATH, fails it just the same.
+func TestGitSeesOnlyTheEnvironmentItNeeds(t *testing.T) {
+	bin, logPath := fake(t, "git")
+	home, tmp := t.TempDir(), t.TempDir()
+
+	// passedThrough's list, written out again rather than read from it, each with a value of its
+	// own. One dropped from there fails this test.
+	needed := map[string]string{
+		"PATH":                     "/usr/local/bin:/usr/bin:/bin",
+		"HOME":                     home,
+		"TMPDIR":                   tmp,
+		"HTTPS_PROXY":              "http://proxy.example.test:3128",
+		"https_proxy":              "http://proxy.example.test:3129",
+		"HTTP_PROXY":               "http://proxy.example.test:3130",
+		"http_proxy":               "http://proxy.example.test:3131",
+		"ALL_PROXY":                "socks5://proxy.example.test:1080",
+		"all_proxy":                "socks5://proxy.example.test:1081",
+		"NO_PROXY":                 ".internal.example.test",
+		"no_proxy":                 "localhost",
+		"GIT_SSL_CAINFO":           "/etc/gitdr/ca.pem",
+		"GIT_SSL_CAPATH":           "/etc/gitdr/ca.d",
+		"SSL_CERT_FILE":            "/etc/ssl/gitdr.pem",
+		"SSL_CERT_DIR":             "/etc/ssl/gitdr.d",
+		"GIT_HTTP_LOW_SPEED_LIMIT": "500",
+		"GIT_HTTP_LOW_SPEED_TIME":  "1200",
+	}
+	for k, v := range needed {
+		t.Setenv(k, v)
+	}
+	for k, v := range runSecrets {
+		t.Setenv(k, v)
+	}
+
+	g := &Git{bin: bin, logger: slog.New(slog.DiscardHandler)}
+	for _, tc := range everyGitCommand(g, t.TempDir()) {
+		t.Run(tc.name, func(t *testing.T) {
+			removeLog(t, logPath)
+			tc.run()
+			for _, inv := range readInvocations(t, logPath) {
+				if found := secretsIn(inv.Env); len(found) > 0 {
+					t.Errorf("git %v was started with a run's secrets in %s", inv.Args, strings.Join(found, ", "))
+				}
+				var unneeded []string
+				for k := range inv.Env {
+					if _, ok := needed[k]; !ok && !gitdrsOwn.MatchString(k) {
+						unneeded = append(unneeded, k)
+					}
+				}
+				if len(unneeded) > 0 {
+					slices.Sort(unneeded)
+					t.Errorf("git %v was started with %d variables it does not need: %s",
+						inv.Args, len(unneeded), strings.Join(unneeded, ", "))
+				}
+				for k, want := range needed {
+					if got, ok := inv.Env[k]; !ok || got != want {
+						t.Errorf("git %v: %s = %q (set: %v), want %q", inv.Args, k, got, ok, want)
+					}
+				}
+			}
+		})
+	}
+}
+
+// git-lfs is started by git, not by gitdr, so it gets what git passes on. Proven with the real git
+// and a git-lfs that writes down its environment: the secrets are set, and none of them reaches
+// it. The credential does, in the scoped header git-lfs fetches with, and so does the proxy.
+func TestGitLFSSeesNoSecret(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		if os.Getenv("CI") != "" {
+			t.Fatal("git is not installed; in CI the git-lfs environment must be checked, not skipped")
+		}
+		t.Skip("git is not installed")
+	}
+	lfs, logPath := fake(t, "git-lfs")
+	// First on the PATH git searches, so the git-lfs it runs is the fake. There is no git in that
+	// directory, so the git gitdr runs is still the real one.
+	t.Setenv("PATH", filepath.Dir(lfs)+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("HOME", t.TempDir())
+	const proxy = "http://proxy.example.test:3128"
+	t.Setenv("HTTPS_PROXY", proxy)
+	for k, v := range runSecrets {
+		t.Setenv(k, v)
+	}
+
+	repo := t.TempDir()
+	git(t, repo, "init", "--quiet", "--bare", repo)
+	if err := New(nil).LFSFetchAll(context.Background(), repo, fakeRemote, Options{AuthHeader: fakeHeader}); err != nil {
+		t.Fatalf("git lfs fetch: %v", err)
+	}
+
+	for _, inv := range readInvocations(t, logPath) {
+		if !slices.Equal(inv.Args, []string{"fetch", "--all"}) {
+			t.Errorf("git started git-lfs with %v, want fetch --all", inv.Args)
+		}
+		if found := secretsIn(inv.Env); len(found) > 0 {
+			t.Errorf("git-lfs was started with a run's secrets in %s", strings.Join(found, ", "))
+		}
+		for k := range inv.Env {
+			for _, prefix := range []string{"AWS_", "GOOGLE_", "AZURE_", "GITDR_"} {
+				if strings.HasPrefix(k, prefix) {
+					t.Errorf("git-lfs was started with %s", k)
+				}
+			}
+		}
+		if got := configPairs(t, inv.Env)[fakeScoped]; got != fakeHeader {
+			t.Errorf("git-lfs: %s = %q, want the credential header it fetches with", fakeScoped, got)
+		}
+		if got := inv.Env["HTTPS_PROXY"]; got != proxy {
+			t.Errorf("git-lfs: HTTPS_PROXY = %q, want %q", got, proxy)
+		}
+	}
+}
+
+// What the environment is made of, in order: what passedThrough lets through from the caller's
+// own, which is never a GIT_CONFIG_* it carried, then gitdr's pairs, the limits first. git's
+// GIT_HTTP_LOW_SPEED_* variables survive, because they are how an operator overrides the limits.
 func TestCommandEnv(t *testing.T) {
 	t.Setenv("GIT_CONFIG_COUNT", "1")
 	t.Setenv("GIT_CONFIG_KEY_0", "http.extraHeader")
