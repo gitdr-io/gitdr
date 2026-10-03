@@ -779,6 +779,15 @@ restorable snapshot, see §7. Sections hold the raw upstream objects.
 - GitLab: `project`, `labels`, `milestones`, `issues`, `mergeRequests`, `releases`,
   `notes`.
 
+A section that was read and held nothing is `null`. On GitHub, a section endpoint that answers
+404 or 410 is a feature turned off for the repository: with pull requests off, GitHub answers 404
+for them, and with issues off as well, 404 for the issue comments. Such a section is `null` too,
+and the optional `unavailable` object names it, with GitHub's status and message, for example
+`"unavailable": {"pullRequests": "404 Not Found"}`. The object is absent when every section was
+read, so a v1 reader that ignores it sees the document it always did. Up to v0.1.20 such a
+repository failed on every run. Any other refusal, a permission the installation lacks among them,
+still fails the repository. *Added in v0.1.21. `gitdr.meta/v1` is unchanged.*
+
 Wikis are a separate git repository and are out of scope for the metadata dump.
 
 ### `--output json` (stdout, structured logs go to stderr)
