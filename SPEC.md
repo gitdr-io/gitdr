@@ -193,9 +193,22 @@ The Resource Manager read is opt-in: set `destination.azure.subscriptionID` and
   assigned on the container or the account.
 - The request goes to `management.azure.com`, which a locked-down network has to allow as well
   as the blob endpoint.
-- gitdr refuses a config whose blob endpoint belongs to a different account from `account`.
-  A lock read off another account's container would otherwise be reported as protecting this
-  one.
+- The blob endpoint has to be the account's own in Azure's public cloud, where Resource Manager
+  is read: `https://<account>.blob.core.windows.net/`, its `privatelink` name or its Azure DNS
+  zone endpoint, with no container in the path, or an emulator on this machine
+  (`http://127.0.0.1:10000/<account>`). gitdr refuses any other, because a lock read off another
+  account's container would be reported as protecting this one. Up to v0.1.20 any host whose
+  first label was the account passed, `https://acme.example.org/` included, and so did another
+  cloud's endpoint and a path naming another container. *Changed in v0.1.21.*
+
+`account` must be a storage account name, 3 to 24 lowercase letters and digits, because the blob
+endpoint's host is built from it and the credential is sent to that host. Up to v0.1.20 any value
+was taken, and `x@example.org/` sent the requests to `example.org`. *Changed in v0.1.21.*
+
+Blobs are uploaded in 1 MiB blocks until a blob would need more than Azure's 50,000, at
+48.8 GiB, and above that in the smallest whole number of MiB that fits, so a blob can reach
+Azure's limit of about 190.7 TiB. Up to v0.1.20 every blob went in 1 MiB blocks, and one over
+48.8 GiB failed after all of it had been sent. *Changed in v0.1.21.*
 
 After a write, on a version-level container, gitdr reads the first blob's policy back. A blob
 that carries none is the earned negative of v5. Blobs under a container-level policy never carry
@@ -905,6 +918,24 @@ The field is `omitempty` and is never written empty, so a v2 or v3 manifest re-r
 re-signed still produces identical bytes. **Absent must not be read as `unknown`**: absent means
 the engine was too old to say, which is a different answer from the engine saying it cannot
 tell, and only the version number separates them.
+
+**Off S3 the destination block says where the copies went, from v0.1.21 (2026-10-03).** Values
+changed and fields did not, so `gitdr.manifest/v5` is unchanged: each field means what v5 says,
+and off S3 the values were wrong. Up to v0.1.20 the block was S3's wherever a run wrote.
+
+- `destination.bucket` names the GCS bucket or the Azure container. It was empty off S3.
+- `destination.wormMode` is absent off S3. It is the mode gitdr sets on each object, and gitdr
+  sets one on S3 alone: on GCS and Azure the bucket's or the container's own policy locks every
+  copy. A locked GCS bucket signed the configured `COMPLIANCE`, a mode Google was never sent.
+- `artifacts[].size` on Azure is the size of the stored blob. It was 0.
+- `destination.wormDetails` on GCS reads `bucket retention policy Locked, 30 days`, with the
+  period the bucket reported, where it read `bucket retention 720h0m0s, locked=true`. Like every
+  `wormDetails` it is a sentence for people, not a value to parse.
+
+On a GCS or Azure manifest written before 0.1.21, read `wormMode` as absent whatever it carries,
+and an empty `bucket` or an Azure `size` of 0 as not recorded. The first word of `tool.version`
+names the engine, as it does for Azure's verdicts before 0.1.19.
+
 - Timestamps are RFC 3339 (UTC). The manifest is signed (Ed25519) over its exact stored
   bytes. The signature is base64 in the `.sig` sidecar and verified with the public key.
 

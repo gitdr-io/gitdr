@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -226,6 +227,9 @@ func applyEnvOverrides(c *Config) {
 	envStr(&c.Log.Format, "LOG_FORMAT")
 }
 
+// azureAccount is Azure's rule for a storage account name.
+var azureAccount = regexp.MustCompile(`^[a-z0-9]{3,24}$`)
+
 // Validate checks structural validity. Credential presence is checked by the source
 // and destination constructors at the point of use, and Validate opens no file: verify,
 // restore and drill call it and never build a source, so they never touch the GitHub token
@@ -248,6 +252,12 @@ func (c *Config) Validate() error {
 	case "azure":
 		if strings.TrimSpace(c.Destination.Azure.Container) == "" {
 			return fmt.Errorf("destination.azure.container is required")
+		}
+		// The account becomes the blob endpoint's host, <account>.blob.core.windows.net, and the
+		// credential goes to that host. The value is not quoted back: a connection string pasted
+		// into the wrong field would be.
+		if a := c.Destination.Azure.Account; a != "" && !azureAccount.MatchString(a) {
+			return errors.New("destination.azure.account must be a storage account name: 3 to 24 lowercase letters and digits")
 		}
 	default:
 		return fmt.Errorf("destination.type %q unsupported (s3 | gcs | azure)", c.Destination.Type)

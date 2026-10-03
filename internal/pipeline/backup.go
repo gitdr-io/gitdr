@@ -187,14 +187,9 @@ func (r *backupRun) run(ctx context.Context) (*BackupResult, error) {
 		RunID:  newRunID(started),
 		Tool:   ToolInfo{Name: "gitdr", Version: r.toolVersion},
 		Source: SourceInfo{Type: r.cfg.Source.Type, Host: repos[0].Host},
-		Destination: DestInfo{
-			Type: r.cfg.Destination.Type, Bucket: r.cfg.Destination.S3.Bucket, WormMode: string(ret.Mode),
-			WormImmutable: verdict.Immutable(),
-			WormVerdict:   verdict.Wire(),
-			WormDetails:   r.wormStatus.Details,
 
-			RetentionObserved: string(observed),
-		},
+		Destination: r.destInfo(ret, verdict, observed),
+
 		StartedAt:  started,
 		FinishedAt: r.now().UTC(),
 		Status:     statusString(allOK),
@@ -211,6 +206,33 @@ func (r *backupRun) run(ctx context.Context) (*BackupResult, error) {
 		return res, errors.New("backup completed with failures")
 	}
 	return res, nil
+}
+
+// destInfo is the manifest's destination block.
+//
+// bucket names what the copies were written to: the S3 or GCS bucket, or the Azure container.
+// wormMode is the mode gitdr set on each object, and it sets one on S3 alone. On GCS and Azure the
+// bucket's or the container's own policy locks every copy, so there is no mode to record. Up to
+// v0.1.20 the block was S3's wherever a run wrote: off S3 the bucket was empty, and a locked GCS
+// bucket signed the configured COMPLIANCE, a mode Google was never sent.
+func (r *backupRun) destInfo(ret dest.Retention, verdict dest.WormVerdict, observed dest.RetentionObservation) DestInfo {
+	d := DestInfo{
+		Type:              r.cfg.Destination.Type,
+		WormImmutable:     verdict.Immutable(),
+		WormVerdict:       verdict.Wire(),
+		WormDetails:       r.wormStatus.Details,
+		RetentionObserved: string(observed),
+	}
+	switch r.cfg.Destination.Type {
+	case "s3":
+		d.Bucket = r.cfg.Destination.S3.Bucket
+		d.WormMode = string(ret.Mode)
+	case "gcs":
+		d.Bucket = r.cfg.Destination.GCS.Bucket
+	case "azure":
+		d.Bucket = r.cfg.Destination.Azure.Container
+	}
+	return d
 }
 
 // wormCheck verifies destination immutability. WORM is recommended, not required:

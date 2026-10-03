@@ -31,7 +31,7 @@ destination:
     bucket: ""                 # GCS bucket with a LOCKED retention policy (Bucket Lock)
     endpoint: ""               # empty = real GCS; set for an emulator
   azure:
-    account: ""                # storage account (real Azure; uses DefaultAzureCredential)
+    account: ""                # storage account name, 3 to 24 lowercase letters and digits (real Azure; uses DefaultAzureCredential)
     container: ""              # blob container with a LOCKED time-based retention policy
     endpoint: ""               # optional service URL override
     # connection string is a secret: set GITDR_DESTINATION_AZURE_CONNECTIONSTRING (e.g. Azurite)

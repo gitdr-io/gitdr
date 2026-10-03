@@ -9,7 +9,9 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 
@@ -18,6 +20,7 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/storage/armstorage"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/blob"
+	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/blockblob"
 	azcontainer "github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/container"
 
 	"gitdr.io/gitdr/internal/dest"
@@ -57,7 +60,15 @@ type Backend struct {
 
 	account       string
 	resourceGroup string
+
+	// maxBlocks is how many blocks a blob may be committed in. Zero is Azure's own limit,
+	// blockblob.MaxBlocks; tests lower it, so a blob that needs larger blocks fits in megabytes.
+	maxBlocks int
 }
+
+// accountName is Azure's rule for a storage account name: 3 to 24 lowercase letters and digits.
+// The account becomes the first label of the blob endpoint's host.
+var accountName = regexp.MustCompile(`^[a-z0-9]{3,24}$`)
 
 // containerProps is the data-plane read: what the blob endpoint says about the container.
 type containerProps interface {
@@ -76,6 +87,11 @@ var _ dest.Destination = (*Backend)(nil)
 func New(_ context.Context, opts Options, logger *slog.Logger) (*Backend, error) {
 	if strings.TrimSpace(opts.Container) == "" {
 		return nil, errors.New("azure: container is required")
+	}
+	// Refused before anything is built from it: the account is the host the credential is sent
+	// to. Not quoted, because a value pasted into the wrong field can be a connection string.
+	if opts.Account != "" && !accountName.MatchString(opts.Account) {
+		return nil, errors.New("azure: the account is not a storage account name, which is 3 to 24 lowercase letters and digits")
 	}
 	readPolicy := opts.SubscriptionID != "" || opts.ResourceGroup != ""
 	if readPolicy && (opts.SubscriptionID == "" || opts.ResourceGroup == "" || opts.Account == "") {
@@ -124,11 +140,11 @@ func New(_ context.Context, opts Options, logger *slog.Logger) (*Backend, error)
 	if readPolicy {
 		// The policy read and the writes must be about the same container. With neither an
 		// endpoint nor a connection string the blob URL is built from Account, so they agree by
-		// construction; with either, the URL has to name the account Resource Manager is asked
-		// about, or a locked policy on some other account's container would be reported as
-		// protecting this one. The URL is not printed: a SAS connection string puts the token in it.
+		// construction; with either, the URL has to be that account's own endpoint in the cloud
+		// Resource Manager is asked in, or a locked policy on some other container would be reported
+		// as protecting this one. The URL is not printed: a SAS connection string puts the token in it.
 		if !namesAccount(client.URL(), opts.Account) {
-			return nil, fmt.Errorf("azure: the blob endpoint does not belong to account %q, which is where the immutability policy would be read", opts.Account)
+			return nil, fmt.Errorf("azure: the blob endpoint is not account %q's own in Azure's public cloud, where the immutability policy would be read", opts.Account)
 		}
 		rm, err := armstorage.NewBlobContainersClient(opts.SubscriptionID, cred, nil)
 		if err != nil {
@@ -323,26 +339,70 @@ func responseCode(re *azcore.ResponseError) string {
 func isTrue(b *bool) bool  { return b != nil && *b }
 func isFalse(b *bool) bool { return b != nil && !*b }
 
-// namesAccount reports whether a blob service URL is the storage account's own endpoint: the
-// account as the first label of the host (account.blob.core.windows.net, a private endpoint, a
-// sovereign cloud) or as the first path segment (an emulator, 127.0.0.1:10000/devstoreaccount1).
+// dnsZone is the zone label of an Azure DNS zone endpoint, <account>.z<N>.blob.storage.azure.net,
+// where Microsoft documents N from 1 to 50.
+var dnsZone = regexp.MustCompile(`^z([1-9]|[1-4][0-9]|50)$`)
+
+// namesAccount reports whether a blob service URL is the storage account's own endpoint in Azure's
+// public cloud, which is the cloud Resource Manager is read in, with no container in its path:
+//
+//	https://<account>.blob.core.windows.net/
+//	https://<account>.privatelink.blob.core.windows.net/
+//	https://<account>.z<N>.blob.storage.azure.net/   an Azure DNS zone endpoint
+//	http://127.0.0.1:10000/<account>                  an emulator on this machine
+//
+// Up to v0.1.20 any host whose first label was the account passed, and any URL whose first path
+// segment was. Anyone can name a host acme.example.org, so a config could send the writes there while
+// the lock was read off acme's container. A sovereign cloud's endpoint is another account however it
+// is named, and a path past the account is another container.
 func namesAccount(serviceURL, account string) bool {
 	u, err := url.Parse(serviceURL)
-	if err != nil || account == "" {
+	if err != nil || !accountName.MatchString(account) {
 		return false
 	}
-	if label, _, ok := strings.Cut(u.Hostname(), "."); ok && strings.EqualFold(label, account) {
+	host := strings.ToLower(u.Hostname())
+	path := strings.TrimSuffix(u.Path, "/")
+	if rest, ok := strings.CutPrefix(host, account+"."); ok && path == "" {
+		switch rest {
+		case "blob.core.windows.net", "privatelink.blob.core.windows.net":
+			return true
+		}
+		zone, ok := strings.CutSuffix(rest, ".blob.storage.azure.net")
+		return ok && dnsZone.MatchString(zone)
+	}
+	return isLoopback(host) && path == "/"+account
+}
+
+func isLoopback(host string) bool {
+	if host == "localhost" {
 		return true
 	}
-	segment, _, _ := strings.Cut(strings.TrimPrefix(u.Path, "/"), "/")
-	return strings.EqualFold(segment, account)
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // PutImmutable uploads key create-only (If-None-Match: *); immutability is enforced by
 // the container's immutability policy. Never overwrites, never deletes.
-func (b *Backend) PutImmutable(ctx context.Context, key string, r io.Reader, _ int64, _ dest.Retention) (dest.PutResult, error) {
+//
+// The blocks are sized from size, so that no blob needs more of them than Azure commits. Up to
+// v0.1.20 every blob went in the SDK's 1 MiB blocks, and one over 48.8 GiB, 50,000 of them, failed
+// at Put Block List, after all of it had been sent.
+//
+// The size recorded is what was read from r and committed, and it has to be size: a stream that ran
+// short or long is not the artifact that was checksummed. Up to v0.1.20 it recorded 0 for every blob.
+func (b *Backend) PutImmutable(ctx context.Context, key string, r io.Reader, size int64, _ dest.Retention) (dest.PutResult, error) {
+	maxBlocks := b.maxBlocks
+	if maxBlocks <= 0 {
+		maxBlocks = blockblob.MaxBlocks
+	}
+	blockSize, err := blockSizeFor(size, maxBlocks)
+	if err != nil {
+		return dest.PutResult{}, fmt.Errorf("azure: put %q: %w", key, err)
+	}
 	etagAny := azcore.ETagAny
-	_, err := b.client.UploadStream(ctx, b.container, key, r, &azblob.UploadStreamOptions{
+	sent := &countingReader{r: r}
+	_, err = b.client.UploadStream(ctx, b.container, key, sent, &azblob.UploadStreamOptions{
+		BlockSize: blockSize,
 		AccessConditions: &blob.AccessConditions{
 			ModifiedAccessConditions: &blob.ModifiedAccessConditions{IfNoneMatch: &etagAny},
 		},
@@ -350,7 +410,47 @@ func (b *Backend) PutImmutable(ctx context.Context, key string, r io.Reader, _ i
 	if err != nil {
 		return dest.PutResult{}, fmt.Errorf("azure: put %q: %w", key, err)
 	}
-	return dest.PutResult{Key: key}, nil
+	if sent.n != size {
+		return dest.PutResult{}, fmt.Errorf("azure: put %q: %d bytes were stored, and the artifact is %d", key, sent.n, size)
+	}
+	return dest.PutResult{Key: key, Size: sent.n}, nil
+}
+
+// blockSizeFor is the block size a blob of size bytes is sent in: the smallest whole number of MiB,
+// and 1 MiB at least, that commits it in at most maxBlocks blocks. That is the SDK's own 1 MiB up to
+// 48.8 GiB, so a blob below it goes as it always has. The upload holds as many blocks in memory as
+// it sends at once, which is why the block is no larger than it has to be.
+//
+// Azure takes no block over blockblob.MaxStageBlockBytes, 4000 MiB, so a blob larger than maxBlocks
+// of those, about 190.7 TiB, cannot be a block blob and is refused before anything is sent.
+func blockSizeFor(size int64, maxBlocks int) (int64, error) {
+	const mib = 1 << 20
+	if size < 0 {
+		return 0, fmt.Errorf("a size of %d bytes is not a length", size)
+	}
+	if maxBlocks < 1 {
+		return 0, fmt.Errorf("a blob of at most %d blocks holds nothing", maxBlocks)
+	}
+	perBlock := size / int64(maxBlocks)
+	if size%int64(maxBlocks) != 0 {
+		perBlock++
+	}
+	if perBlock > blockblob.MaxStageBlockBytes {
+		return 0, fmt.Errorf("%d bytes do not fit in a block blob of %d blocks of at most %d MiB", size, maxBlocks, blockblob.MaxStageBlockBytes/mib)
+	}
+	return max(1, (perBlock+mib-1)/mib) * mib, nil
+}
+
+// countingReader counts what is read through it. The upload reads its source from one goroutine.
+type countingReader struct {
+	r io.Reader
+	n int64
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.n += int64(n)
+	return n, err
 }
 
 // List returns blobs under prefix (read-only).

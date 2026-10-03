@@ -364,8 +364,22 @@ func TestNewBindsThePolicyReadToTheContainerItWritesTo(t *testing.T) {
 		{name: "no account to ask about", opts: Options{Container: "c", Endpoint: "https://acct.blob.core.windows.net/", SubscriptionID: "sub", ResourceGroup: "rg"}},
 		{name: "an endpoint for another account", opts: Options{Container: "c", Account: "acct", Endpoint: "https://other.blob.core.windows.net/", SubscriptionID: "sub", ResourceGroup: "rg"}},
 		{name: "an emulator for another account", opts: Options{Container: "c", Account: "acct", ConnectionString: emulator, SubscriptionID: "sub", ResourceGroup: "rg"}},
+		// A host is the account's only when Azure's domain says so. Its first label alone is a
+		// name anyone can register under a domain of their own.
+		{name: "a host of another domain that starts with the account", opts: Options{Container: "c", Account: "acct", Endpoint: "https://acct.example.org/", SubscriptionID: "sub", ResourceGroup: "rg"}},
+		{name: "a host that only starts with the account's endpoint", opts: Options{Container: "c", Account: "acct", Endpoint: "https://acct.blob.core.windows.net.example.org/", SubscriptionID: "sub", ResourceGroup: "rg"}},
+		{name: "the account as the path on a host that is not this machine", opts: Options{Container: "c", Account: "acct", Endpoint: "https://example.org/acct", SubscriptionID: "sub", ResourceGroup: "rg"}},
+		// A path under the service URL is a container: the writes would go to "other", while the
+		// policy is read for "c".
+		{name: "another container in the endpoint's path", opts: Options{Container: "c", Account: "acct", Endpoint: "https://acct.blob.core.windows.net/other/", SubscriptionID: "sub", ResourceGroup: "rg"}},
+		{name: "another container in the emulator's path", opts: Options{Container: "c", Account: "devstoreaccount1", ConnectionString: strings.Replace(emulator, "/devstoreaccount1;", "/devstoreaccount1/other;", 1), SubscriptionID: "sub", ResourceGroup: "rg"}},
+		// Resource Manager is read in Azure's public cloud. An account in another cloud is another
+		// account, whatever its name.
+		{name: "an endpoint in another Azure cloud", opts: Options{Container: "c", Account: "acct", Endpoint: "https://acct.blob.core.chinacloudapi.cn/", SubscriptionID: "sub", ResourceGroup: "rg"}},
 		{name: "the account's own endpoint", opts: Options{Container: "c", Account: "acct", SubscriptionID: "sub", ResourceGroup: "rg"}, ok: true},
+		{name: "the account's own endpoint, named in capitals", opts: Options{Container: "c", Account: "acct", Endpoint: "https://ACCT.Blob.Core.Windows.Net/", SubscriptionID: "sub", ResourceGroup: "rg"}, ok: true},
 		{name: "a private endpoint for the account", opts: Options{Container: "c", Account: "acct", Endpoint: "https://acct.privatelink.blob.core.windows.net/", SubscriptionID: "sub", ResourceGroup: "rg"}, ok: true},
+		{name: "an Azure DNS zone endpoint for the account", opts: Options{Container: "c", Account: "acct", Endpoint: "https://acct.z12.blob.storage.azure.net/", SubscriptionID: "sub", ResourceGroup: "rg"}, ok: true},
 		{name: "an emulator for the account", opts: Options{Container: "c", Account: "devstoreaccount1", ConnectionString: emulator, SubscriptionID: "sub", ResourceGroup: "rg"}, ok: true},
 		{name: "no Resource Manager at all", opts: Options{Container: "c", Account: "acct"}, ok: true},
 	} {

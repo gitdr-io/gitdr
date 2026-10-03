@@ -125,6 +125,53 @@ func TestAzureResourceManagerLocation(t *testing.T) {
 	}
 }
 
+// The Azure account becomes a hostname, <account>.blob.core.windows.net, and the credential goes
+// to whatever host that names. So it has to be a storage account name: 3 to 24 lowercase letters
+// and digits, Azure's own rule. "x@example.org/" made the blob URL
+// https://x@example.org/.blob.core.windows.net/, whose host is example.org.
+func TestAzureAccountIsAStorageAccountName(t *testing.T) {
+	for _, tc := range []struct {
+		account string
+		ok      bool
+	}{
+		{account: "", ok: true}, // a connection string or an endpoint names it instead
+		{account: "acme", ok: true},
+		{account: "devstoreaccount1", ok: true},
+		{account: "abc", ok: true},
+		{account: strings.Repeat("a", 24), ok: true},
+		{account: "x@example.org/"},
+		{account: "acme.evil.com"},
+		{account: "Acme"},
+		{account: "ab"},
+		{account: strings.Repeat("a", 25)},
+		{account: "acme-gitdr"},
+		{account: " acme"},
+		{account: "acme\n"},
+	} {
+		c := Default()
+		c.Destination.Type = "azure"
+		c.Destination.Azure.Container = "gitdr"
+		c.Destination.Azure.Account = tc.account
+		err := c.Validate()
+		if tc.ok && err != nil {
+			t.Errorf("account %q refused: %v", tc.account, err)
+		}
+		if !tc.ok {
+			if err == nil {
+				t.Errorf("account %q validates", tc.account)
+				continue
+			}
+			if !strings.Contains(err.Error(), "destination.azure.account") {
+				t.Errorf("the refusal of %q does not name the setting: %v", tc.account, err)
+			}
+			// The value is not quoted back: a mistake here can be a connection string.
+			if strings.ContainsAny(tc.account, ".@") && strings.Contains(err.Error(), tc.account) {
+				t.Errorf("the refusal quotes the value: %v", err)
+			}
+		}
+	}
+}
+
 func TestDefaultsRetained(t *testing.T) {
 	c, err := Load("")
 	if err != nil {

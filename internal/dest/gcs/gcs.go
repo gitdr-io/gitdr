@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"strconv"
 	"strings"
 	"time"
 
@@ -65,26 +66,78 @@ func (b *Backend) VerifyWorm(ctx context.Context) (dest.WormStatus, error) {
 	if err != nil {
 		return dest.WormStatus{}, fmt.Errorf("gcs: bucket attrs: %w", err)
 	}
-	rp := attrs.RetentionPolicy
-	if rp == nil {
+	return verdictFromPolicy(attrs.RetentionPolicy), nil
+}
+
+// verdictFromPolicy decides from the bucket's retention policy as Cloud Storage reported it, and
+// says it in the words Azure's check uses: "bucket retention policy Locked, 30 days". Up to v0.1.20
+// it said "bucket retention 720h0m0s, locked=true".
+//
+//	immutable      a locked policy, with its period
+//	not-immutable  no policy, or an unlocked one
+//	unknown        a locked policy with no period. Cloud Storage keeps every period above 0
+//	               seconds, so an answer without one has left the question out.
+func verdictFromPolicy(rp *storage.RetentionPolicy) dest.WormStatus {
+	switch {
+	case rp == nil:
 		// The native API answered and said there is no policy. An earned negative.
 		return dest.WormStatus{
 			Verdict: dest.VerdictNotImmutable,
 			Details: "no bucket retention policy",
-		}, nil
+		}
+	case !rp.IsLocked:
+		// An unlocked retention policy is also an earned negative, and the distinction matters:
+		// the bucket has a retention period and the project owner can shorten or remove it, so
+		// nothing here is enforced against the person most likely to be compromised.
+		details := "bucket retention policy Unlocked"
+		if rp.RetentionPeriod > 0 {
+			details += ", " + periodWords(rp.RetentionPeriod)
+		}
+		return dest.WormStatus{
+			Verdict: dest.VerdictNotImmutable,
+			Mode:    "RETENTION",
+			Details: details + "; an unlocked policy can be shortened or removed",
+		}
+	case rp.RetentionPeriod <= 0:
+		return dest.WormStatus{
+			Verdict: dest.VerdictUnknown,
+			Mode:    "RETENTION",
+			Details: "bucket retention policy Locked, with no retention period reported",
+		}
+	default:
+		return dest.WormStatus{
+			Verdict: dest.VerdictImmutable,
+			Mode:    "RETENTION",
+			Details: "bucket retention policy Locked, " + periodWords(rp.RetentionPeriod),
+		}
 	}
-	// An unlocked retention policy is also an earned negative, and the distinction matters:
-	// the bucket has a retention period and the project owner can shorten or remove it, so
-	// nothing here is enforced against the person most likely to be compromised.
-	verdict := dest.VerdictNotImmutable
-	if rp.IsLocked {
-		verdict = dest.VerdictImmutable
+}
+
+// periodWords says a retention period the way it was most likely set. Days, quarters of a day
+// included, because Google counts a year as 365.25 days; below a day, or off a quarter, the largest
+// unit that divides it.
+func periodWords(d time.Duration) string {
+	const day = 24 * time.Hour
+	switch {
+	case d == day:
+		return "1 day"
+	case d > day && d%(day/4) == 0:
+		quarters := int64(d / (day / 4))
+		return strconv.FormatInt(quarters/4, 10) + [...]string{"", ".25", ".5", ".75"}[quarters%4] + " days"
+	case d%time.Hour == 0:
+		return count(int64(d/time.Hour), "hour")
+	case d%time.Minute == 0:
+		return count(int64(d/time.Minute), "minute")
+	default:
+		return count(int64(d/time.Second), "second")
 	}
-	return dest.WormStatus{
-		Verdict: verdict,
-		Mode:    "RETENTION",
-		Details: fmt.Sprintf("bucket retention %s, locked=%v", rp.RetentionPeriod, rp.IsLocked),
-	}, nil
+}
+
+func count(n int64, unit string) string {
+	if n == 1 {
+		return "1 " + unit
+	}
+	return strconv.FormatInt(n, 10) + " " + unit + "s"
 }
 
 // PutImmutable creates key. Create-only via the DoesNotExist precondition; immutability
