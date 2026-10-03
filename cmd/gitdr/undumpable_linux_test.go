@@ -4,9 +4,11 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -15,6 +17,122 @@ import (
 
 // prGetDumpable is PR_GET_DUMPABLE from <linux/prctl.h>.
 const prGetDumpable = 3
+
+// The two programs this test binary becomes when TestTheKernelClosesTheStartupWindow copies it:
+// the engine, which starts as gitdr does, init included, and exits; and a reader, which starts
+// the engine and reads its environment for as long as it runs.
+func TestMain(m *testing.M) {
+	switch filepath.Base(os.Args[0]) {
+	case "gitdr":
+		os.Exit(0)
+	case "reader":
+		os.Exit(readWhileItStarts(os.Args[1]))
+	}
+	os.Exit(m.Run())
+}
+
+// startupCanary is the secret the reader gives the engine to keep in its environment.
+const startupCanary = "canary-startup-signing-key"
+
+// readWhileItStarts starts the engine at path with a secret in its environment, reads
+// /proc/<pid>/environ until the engine exits, and prints whether any read held the secret.
+func readWhileItStarts(path string) int {
+	cmd := exec.Command(path)
+	cmd.Env = []string{"GITDR_MANIFEST_SIGNING_KEY=" + startupCanary}
+	if err := cmd.Start(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 2
+	}
+	exited := make(chan struct{})
+	go func() { _ = cmd.Wait(); close(exited) }()
+	environ := fmt.Sprintf("/proc/%d/environ", cmd.Process.Pid)
+	for {
+		select {
+		case <-exited:
+			fmt.Print("clean")
+			return 0
+		default:
+		}
+		if b, err := os.ReadFile(environ); err == nil && bytes.Contains(b, []byte(startupCanary)) {
+			<-exited
+			fmt.Print("leaked")
+			return 0
+		}
+	}
+}
+
+// The kernel starts a program non-dumpable, before its first instruction, when the user running it
+// cannot read its file. init's prctl comes later: the Go runtime and every package's init run
+// first, and for those milliseconds any process with the engine's user can read the engine's
+// environment. So the image installs gitdr owned by root with mode 0711 (image_test.go), and this
+// is the proof that the mode closes the window.
+//
+// Twenty starts each way, by a reader that has the engine's user, as an exploited git would, and
+// reads the engine's environment for as long as it runs. The engine is this test binary, which
+// links package main and so starts as gitdr does. Readable, the window is there to be read, which
+// is the control; owned by root with mode 0711, no start may leak.
+func TestTheKernelClosesTheStartupWindow(t *testing.T) {
+	if os.Geteuid() != 0 {
+		if os.Getenv("CI") != "" {
+			t.Fatal("not root: this test gives the engine to root and runs it as another user, and CI runs as root")
+		}
+		t.Skip("needs root, to give the engine to root and run it as another user")
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir, err := os.MkdirTemp("", "gitdr-startup-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	reader, engine := filepath.Join(dir, "reader"), filepath.Join(dir, "gitdr")
+	for _, dst := range []string{reader, engine} {
+		b, err := os.ReadFile(exe)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(dst, b, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	leaks := func(mode os.FileMode) int {
+		t.Helper()
+		if err := os.Chmod(engine, mode); err != nil {
+			t.Fatal(err)
+		}
+		n := 0
+		for range 20 {
+			cmd := exec.Command(reader, engine)
+			cmd.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: 65532, Gid: 65532}}
+			out, err := cmd.Output()
+			if err != nil {
+				t.Fatalf("reader: %v", err)
+			}
+			switch string(out) {
+			case "leaked":
+				n++
+			case "clean":
+			default:
+				t.Fatalf("the reader said %q", out)
+			}
+		}
+		return n
+	}
+	readable, unreadable := leaks(0o755), leaks(0o711)
+	t.Logf("starts that leaked the engine's environment: %d of 20 readable, %d of 20 at 0711", readable, unreadable)
+	if readable == 0 {
+		t.Fatal("control: no start of a readable engine leaked, so this test cannot see the window it is about")
+	}
+	if unreadable != 0 {
+		t.Errorf("%d of 20 starts of an engine only root can read leaked its environment", unreadable)
+	}
+}
 
 // git, which runs as gitdr's own user, cannot read gitdr's environment, where a run keeps the
 // destination's keys and the manifest signing key.

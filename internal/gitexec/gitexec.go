@@ -465,8 +465,12 @@ func baseEnv() []string {
 // git and git-lfs parse whatever the source sends, so a flaw in either is reached through a
 // repository's content. The rest of gitdr's environment is where a run keeps its secrets: the
 // destination's AWS_*, GOOGLE_* and AZURE_* credentials, GITDR_MANIFEST_SIGNING_KEY,
-// GITDR_ENCRYPTION_KEY, the GitHub App key. git needs none of them. The only credential gitdr
-// hands git is the source's, as the scoped header in commandEnv, because fetching is its job.
+// GITDR_ENCRYPTION_KEY, the GitHub App key. git needs none of them, and this list keeps them out
+// of git's own environment. That is all it guarantees. What keeps git out of gitdr's environment
+// is that gitdr is not dumpable (cmd/gitdr), and nothing here closes what gitdr's user can read
+// anyway: a key given as a file, a cloud credentials file, the identity endpoints of the machine
+// or the pod. The only credential gitdr hands git is the source's, as the scoped header in
+// commandEnv, because fetching is its job.
 //
 // Named one by one, never by prefix, so a variable gitdr's environment gains later stays out
 // until somebody adds it here with its reason. Left out on purpose: the locale, so that git's

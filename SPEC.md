@@ -246,9 +246,16 @@ or a SAS. See §4, Azure.
   credential. The destination's credentials and the signing and encryption keys never reach
   them. Up to v0.1.20 git got the whole environment. Any other variable that changed what git
   does, `GIT_CONFIG_GLOBAL` for instance, no longer reaches it, so configure git in
-  `~/.gitconfig` instead. git's messages are in English whatever the locale. On Linux gitdr also
-  makes itself non-dumpable as it starts, so git, which runs as the same user, cannot read
-  gitdr's environment or memory through `/proc` or ptrace. *Changed in v0.1.21.*
+  `~/.gitconfig` instead. git's messages are in English whatever the locale.
+  *Changed in v0.1.21.*
+- Reading gitdr. git runs as gitdr's user, and a process can read the environment and memory of
+  another with the same user, through `/proc` or ptrace, unless that one is not dumpable. The
+  kernel starts gitdr non-dumpable when the user it runs as cannot read its binary: the image
+  installs `/usr/bin/gitdr` owned by root with mode 0711, and an install on a VM should do the
+  same (`deploy/README.md`). gitdr also makes itself non-dumpable in its init, which covers a
+  readable binary from then on but not the few milliseconds the Go runtime takes to get there.
+  On a host that sets `fs.suid_dumpable=1` the mode does not help, and only the init does.
+  Neither stops root, or a process holding `CAP_SYS_PTRACE`. *Changed in v0.1.21.*
 - gitdr's own secrets leave its environment. Once read, `GITDR_GITHUB_APP_PRIVATE_KEY`,
   `GITDR_GITLAB_TOKEN`, `GITDR_MANIFEST_SIGNING_KEY`, `GITDR_ENCRYPTION_KEY` and
   `GITDR_DESTINATION_AZURE_CONNECTIONSTRING` are taken out of gitdr's environment, before any

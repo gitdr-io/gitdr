@@ -31,7 +31,9 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
 FROM cgr.dev/chainguard/wolfi-base:latest@sha256:08df5982c3d27e70a4ce1607e3bb9af09d746f8722cf135a7694afef879fc5a2
 RUN apk add --no-cache git git-lfs ca-certificates-bundle && \
     git lfs install --system
-COPY --from=build /out/gitdr /usr/bin/gitdr
+# Owned by root, mode 0711: the user it runs as can execute it and not read it, so the kernel
+# starts it non-dumpable and git, which runs as that same user, cannot read its environment.
+COPY --from=build --chmod=0711 /out/gitdr /usr/bin/gitdr
 USER 65532:65532
 ENV GIT_TERMINAL_PROMPT=0
 ENTRYPOINT ["/usr/bin/gitdr"]

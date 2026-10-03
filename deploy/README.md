@@ -13,12 +13,17 @@ sudo useradd --system --no-create-home --shell /usr/sbin/nologin gitdr
 sudo install -d -m 0750 -o gitdr -g gitdr /etc/gitdr
 sudo install -m 0640 -o gitdr -g gitdr config.yaml /etc/gitdr/config.yaml
 sudo install -m 0600 -o gitdr -g gitdr gitdr.env  /etc/gitdr/gitdr.env   # secrets
-sudo install -m 0755 /usr/local/bin/gitdr /usr/local/bin/gitdr           # the binary
+sudo install -m 0711 -o root -g root gitdr /usr/local/bin/gitdr          # the binary
 ```
 
 `gitdr.env` is `KEY=value` lines, the secrets from the quickstart
 (`GITDR_GITHUB_APP_PRIVATE_KEY`, `GITDR_MANIFEST_SIGNING_KEY`, `AWS_*`, optionally
 `GITDR_ENCRYPTION_KEY`).
+
+The binary is root's with mode 0711, so the gitdr user can run it and not read it. The kernel
+starts a program its user cannot read non-dumpable, and so git, which runs as the gitdr user too,
+cannot read gitdr's environment through `/proc`, not even in the milliseconds before gitdr can
+protect itself. The container image installs it the same way.
 
 ## systemd (preferred, it sandboxes the run)
 
