@@ -47,3 +47,25 @@ func TestVerifyWormSaysWhatTheBucketLocks(t *testing.T) {
 		})
 	}
 }
+
+// The period the bucket's policy holds each copy for, which a skip of an unchanged repository may
+// not outlast. Reported whenever the bucket names one, locked or not: it can only shorten how long a
+// copy is relied on, and an unlocked policy's period is what holds the copies today.
+func TestVerifyWormReportsTheBucketsLockPeriod(t *testing.T) {
+	const day = 24 * time.Hour
+	for _, tc := range []struct {
+		name   string
+		policy *storage.RetentionPolicy
+		period time.Duration
+	}{
+		{"no policy", nil, 0},
+		{"locked for 30 days", &storage.RetentionPolicy{RetentionPeriod: 30 * day, IsLocked: true}, 30 * day},
+		{"locked for a year", &storage.RetentionPolicy{RetentionPeriod: 31557600 * time.Second, IsLocked: true}, 31557600 * time.Second},
+		{"unlocked for a day", &storage.RetentionPolicy{RetentionPeriod: day}, day},
+		{"locked, and no period", &storage.RetentionPolicy{IsLocked: true}, 0},
+	} {
+		if got := verdictFromPolicy(tc.policy).Period; got != tc.period {
+			t.Errorf("%s: period %s, want %s", tc.name, got, tc.period)
+		}
+	}
+}

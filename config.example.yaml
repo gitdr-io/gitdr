@@ -43,7 +43,7 @@ destination:
     resourceGroup: ""
   retention:
     mode: COMPLIANCE           # COMPLIANCE (true WORM) or GOVERNANCE, S3 only; GCS uses bucket retention
-    days: 30
+    days: 30                   # S3 locks each object this long; an unchanged copy is relied on for a third of this or of the bucket's own lock, whichever is shorter
 
 backup:
   concurrency: 4               # repositories backed up in parallel

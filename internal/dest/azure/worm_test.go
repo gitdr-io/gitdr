@@ -279,6 +279,38 @@ func TestVerifyWormSaysImmutableOnlyOnALockedPolicy(t *testing.T) {
 	}
 }
 
+// The period the container's policy holds each blob for, which a skip of an unchanged repository may
+// not outlast. Only Resource Manager reports it. It is carried whatever the policy's state, because
+// it can only shorten how long a copy is relied on.
+func TestVerifyWormReportsTheContainersLockPeriod(t *testing.T) {
+	const day = 24 * time.Hour
+	locked, unlocked := armstorage.ImmutabilityPolicyStateLocked, armstorage.ImmutabilityPolicyStateUnlocked
+	for _, tc := range []struct {
+		name     string
+		endpoint blobEndpoint
+		rm       *resourceManager
+		period   time.Duration
+	}{
+		{"a locked container policy", endpointSays(yes, no, no), withPolicy(locked, ptr(int32(30)), false), 30 * day},
+		{"a locked version-level default policy", endpointSays(yes, yes, no), withPolicy(locked, ptr(int32(7)), true), 7 * day},
+		{"an unlocked policy", endpointSays(yes, no, no), withPolicy(unlocked, ptr(int32(1)), false), day},
+		{"a state gitdr does not know", endpointSays(yes, no, no), withPolicy("Frozen", ptr(int32(30)), false), 30 * day},
+		{"locked, with no period reported", endpointSays(yes, no, no), withPolicy(locked, nil, false), 0},
+		{"the blob endpoint alone, which carries no period", endpointSays(yes, no, no), nil, 0},
+		{"Resource Manager refuses", endpointSays(yes, no, no), &resourceManager{err: &azcore.ResponseError{ErrorCode: "AuthorizationFailed", StatusCode: 403}}, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st, err := backend(tc.endpoint, tc.rm).VerifyWorm(context.Background())
+			if err != nil {
+				t.Fatalf("VerifyWorm: %v", err)
+			}
+			if st.Period != tc.period {
+				t.Errorf("period %s, want %s (%s)", st.Period, tc.period, st.Details)
+			}
+		})
+	}
+}
+
 // A blob with no policy on it is an earned negative only in a container where policies live on
 // blobs.
 //

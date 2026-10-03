@@ -102,12 +102,15 @@ func decideUnchanged(previous, current map[string]string, copiedAt, now time.Tim
 // refreshBound is how old a copy may get before it is written again, however unchanged the
 // repository: a third of the retention, capped at maxSkipDays, and maxSkipDays when the retention
 // is unknown.
+//
+// Only a retention of zero or less is unknown. A positive one too short to divide by three gives a
+// bound of zero, and no copy is relied on at all; it used to read as unknown and allow thirty days.
 func refreshBound(retention time.Duration) time.Duration {
-	limit := retention / refreshFloor
-	if max := time.Duration(maxSkipDays) * 24 * time.Hour; limit > max || limit <= 0 {
-		limit = max
+	limit := time.Duration(maxSkipDays) * 24 * time.Hour
+	if retention <= 0 {
+		return limit
 	}
-	return limit
+	return min(limit, retention/refreshFloor)
 }
 
 // sameRefs compares two ref maps exactly: same names, same objects, no extras on either side.

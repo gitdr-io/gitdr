@@ -250,11 +250,18 @@ func verdictFromResourceManager(c armstorage.BlobContainer) dest.WormStatus {
 	if versionLevel {
 		scope = ", version-level"
 	}
+	// How long the policy holds each blob, which a skip of an unchanged repository may not outlast.
+	// Reported whatever the policy's state, because it can only shorten how long a copy is relied on.
+	var held time.Duration
+	if days != nil && *days > 0 {
+		held = time.Duration(*days) * 24 * time.Hour
+	}
 
 	switch {
 	case state != nil && *state == armstorage.ImmutabilityPolicyStateLocked && days != nil && *days > 0:
 		return dest.WormStatus{
 			Verdict: dest.VerdictImmutable,
+			Period:  held,
 			Mode:    "IMMUTABILITY",
 			Details: fmt.Sprintf("container immutability policy Locked, %d days%s", *days, scope),
 		}
@@ -264,6 +271,7 @@ func verdictFromResourceManager(c armstorage.BlobContainer) dest.WormStatus {
 		// most likely to be compromised, so nothing here is enforced against them.
 		return dest.WormStatus{
 			Verdict: dest.VerdictNotImmutable,
+			Period:  held,
 			Mode:    "IMMUTABILITY",
 			Details: fmt.Sprintf("container immutability policy Unlocked%s%s; an unlocked policy can be shortened or deleted", period(days), scope),
 		}
@@ -276,6 +284,7 @@ func verdictFromResourceManager(c armstorage.BlobContainer) dest.WormStatus {
 	case state != nil:
 		return dest.WormStatus{
 			Verdict: dest.VerdictUnknown,
+			Period:  held,
 			Mode:    "IMMUTABILITY",
 			Details: fmt.Sprintf("container immutability policy in state %q, which is not Locked or Unlocked", string(*state)),
 		}

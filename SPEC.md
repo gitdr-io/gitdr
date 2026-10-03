@@ -507,6 +507,34 @@ protects an object until its retain-until date and not one second longer, so ski
 correct while the copy being relied on still exists. gitdr refreshes after a third of the
 retention period, capped at thirty days. See `internal/pipeline/unchanged.go`.
 
+**The retention period there is the bucket's own lock when that is shorter, from v0.1.21
+(2026-10-03).** A run skips a repository whose refs have not moved only while the copy it relies
+on is younger than
+
+    min(30 days, L / 3), where L = min(retention.days, P)
+
+P is the lock period the destination reports for every copy it holds: a GCS bucket's retention
+period, or an Azure container's immutability period as Resource Manager reports it, whatever the
+policy's state. Where nothing reports one, L is `retention.days`. That is what gitdr locks each
+object for on S3. On GCS and Azure gitdr locks nothing itself, so there `retention.days` only caps
+the window. The copy's age runs from its `copiedAt`, the repository's own finish, so when a run
+relies on a copy at least two thirds of its lock remain, less the time between the lock's start
+and that finish. The read of the recent manifests stops at the same window, and a lock too short
+to divide by three is never relied on. Up to v0.1.20 L was `retention.days` everywhere, ten days
+at the default thirty, so in a bucket locked for one day a copy two days old was skipped a day
+after its lock had ended. With a one-day lock the window is eight hours, and a daily schedule
+copies every repository every day.
+
+P is the period reported now. Cloud Storage and a container-level Azure policy apply it to every
+copy they hold. Where a copy's lock was fixed when it was written, on S3 and in an Azure container
+with version-level immutability, raising `retention.days` or the policy's period overstates the
+lock of the copies written before, until they are refreshed. Without `subscriptionID` and
+`resourceGroup` nothing reports an Azure period, and L is `retention.days`.
+
+A same-day rerun's skip, `already backed up for this date`, relies on a copy made earlier that UTC
+date, which a lock of a day or more still holds. Azure's shortest period is a day. A GCS bucket can
+be given a shorter one, and Google does not promise to enforce a period under a day.
+
 **Which runs the comparison reads, from v0.1.21.** The next run reads the recent manifests filed
 in its own manifests directory, newest first, and each repository is decided by the newest one
 that has an entry for it. After a `failed` entry that lists artifacts the repository is copied:

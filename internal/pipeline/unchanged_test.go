@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"gitdr.io/gitdr/internal/config"
 	"gitdr.io/gitdr/internal/crypto"
 	"gitdr.io/gitdr/internal/dest"
 )
@@ -127,6 +128,9 @@ func TestACopyIsRefreshedBeforeItsLockExpires(t *testing.T) {
 		// Nonsense configuration must not disable the bound.
 		{"zero retention", 0, 2 * day, true},
 		{"zero retention, old copy", 0, 40 * day, false},
+		// A lock too short to divide by three is too short to rely on at all. Rounded to a bound of
+		// zero, it used to read as no retention and allow thirty days.
+		{"a lock of two nanoseconds", 2 * time.Nanosecond, 0, false},
 	}
 
 	for _, c := range cases {
@@ -141,6 +145,73 @@ func TestACopyIsRefreshedBeforeItsLockExpires(t *testing.T) {
 			// checked none of it, which is how a table of nine cases proves eight things.
 			if !got.skip && !strings.Contains(got.reason, "days old") {
 				t.Errorf("refused on age without saying so: reason = %q", got.reason)
+			}
+		})
+	}
+}
+
+// The window a skip relies on is the configured retention or the lock the destination reported,
+// whichever is shorter. On S3 gitdr locks each object for the configured days, and the store reports
+// no period of its own. On GCS and Azure gitdr locks nothing: the bucket's or the container's policy
+// holds every copy for its period, whatever the configuration says.
+func TestTheSkipWindowIsTheShorterOfTheConfiguredDaysAndTheBucketsLock(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		days     int
+		reported time.Duration
+		window   time.Duration
+		bound    time.Duration
+	}{
+		{"S3, or a store that reports no lock", 30, 0, 30 * day, 10 * day},
+		{"a bucket that locks for a day", 30, day, day, 8 * time.Hour},
+		{"a bucket that locks for longer than the configured days", 3, 30 * day, 3 * day, day},
+		{"a bucket that locks for a decade", 3650, 10 * year, 3650 * day, 30 * day},
+		{"a lock too short to rely on", 30, 2 * time.Nanosecond, 2 * time.Nanosecond, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := &backupRun{cfg: config.Default(), wormStatus: dest.WormStatus{Verdict: dest.VerdictImmutable, Period: tc.reported}}
+			r.cfg.Destination.Retention.Days = tc.days
+			if got := r.retentionWindow(); got != tc.window {
+				t.Errorf("window = %s, want %s", got, tc.window)
+			}
+			if got := r.refreshBound(); got != tc.bound {
+				t.Errorf("refresh bound = %s, want %s", got, tc.bound)
+			}
+		})
+	}
+}
+
+// The recent manifests are read only as far back as the copies they record can still be relied on:
+// the same bound, the bucket's lock included. A manifest from twelve hours ago records copies a
+// one-day lock is a third done with, so it is not read at all.
+func TestTheRecentManifestsAreReadOnlyAsFarBackAsTheBucketsLock(t *testing.T) {
+	finished := now.Add(-12 * time.Hour)
+	raw, err := json.Marshal(&Manifest{
+		Schema: ManifestSchema, FinishedAt: finished,
+		Repos: []RepoEntry{{Slug: "octo/x", Status: StatusSuccess, Refs: []RefEntry{{Name: "refs/heads/main", Commit: "aaa"}}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := "github.com/octo/manifests/" + finished.Format(manifestStamp) + manifestSuffix
+	for _, tc := range []struct {
+		name     string
+		reported time.Duration
+		read     bool
+	}{
+		{"no lock reported, the configured 30 days", 0, true},
+		{"a bucket that locks for a day", day, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := &backupRun{pub: runPub, cfg: config.Default(),
+				dst:        &stubDest{objs: map[string][]byte{key: raw}},
+				wormStatus: dest.WormStatus{Verdict: dest.VerdictImmutable, Period: tc.reported},
+				log:        slog.New(slog.DiscardHandler),
+				now:        func() time.Time { return now },
+			}
+			_, got := r.loadPrevious(context.Background(), "github.com/octo/manifests", nil)["octo/x"]
+			if got != tc.read {
+				t.Errorf("read the manifest from twelve hours ago: %v, want %v", got, tc.read)
 			}
 		})
 	}

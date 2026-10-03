@@ -704,22 +704,32 @@ func baseNames(keys []string) []string {
 	return out
 }
 
-// retentionWindow is how long a copy is kept, as a duration.
+// retentionWindow is how long a copy is kept, as a duration: the configured days, or the lock the
+// destination reported when that is shorter.
 //
 // The skip decision needs it to know when a copy is close enough to expiring that it must be
 // rewritten even though nothing changed. Object lock protects an object until its retain-until
 // and not one second longer.
+//
+// The configured days are what gitdr locks each object for on S3, where the store reports no period
+// of its own. On GCS and Azure gitdr locks nothing: the bucket's retention policy or the container's
+// immutability policy holds every copy for its own period, whatever the configuration says. Up to
+// v0.1.20 the window was the configured days everywhere, so in a bucket that locks for one day a copy
+// was relied on for ten.
 func (r *backupRun) retentionWindow() time.Duration {
-	return time.Duration(r.cfg.Destination.Retention.Days) * 24 * time.Hour
+	var window time.Duration
+	if r.cfg != nil {
+		window = time.Duration(r.cfg.Destination.Retention.Days) * 24 * time.Hour
+	}
+	if held := r.wormStatus.Period; held > 0 && (window <= 0 || held < window) {
+		window = held
+	}
+	return window
 }
 
 // refreshBound is how old a copy may get before this run writes it again; see unchanged.go.
 func (r *backupRun) refreshBound() time.Duration {
-	var retention time.Duration
-	if r.cfg != nil {
-		retention = r.retentionWindow()
-	}
-	return refreshBound(retention)
+	return refreshBound(r.retentionWindow())
 }
 
 func (r *backupRun) retention() dest.Retention {

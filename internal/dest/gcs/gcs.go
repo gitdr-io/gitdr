@@ -89,12 +89,16 @@ func verdictFromPolicy(rp *storage.RetentionPolicy) dest.WormStatus {
 		// An unlocked retention policy is also an earned negative, and the distinction matters:
 		// the bucket has a retention period and the project owner can shorten or remove it, so
 		// nothing here is enforced against the person most likely to be compromised.
+		//
+		// Its period is still reported. It is what holds the copies today, and it can only shorten
+		// how long a skip relies on one.
 		details := "bucket retention policy Unlocked"
 		if rp.RetentionPeriod > 0 {
 			details += ", " + periodWords(rp.RetentionPeriod)
 		}
 		return dest.WormStatus{
 			Verdict: dest.VerdictNotImmutable,
+			Period:  rp.RetentionPeriod,
 			Mode:    "RETENTION",
 			Details: details + "; an unlocked policy can be shortened or removed",
 		}
@@ -107,6 +111,7 @@ func verdictFromPolicy(rp *storage.RetentionPolicy) dest.WormStatus {
 	default:
 		return dest.WormStatus{
 			Verdict: dest.VerdictImmutable,
+			Period:  rp.RetentionPeriod,
 			Mode:    "RETENTION",
 			Details: "bucket retention policy Locked, " + periodWords(rp.RetentionPeriod),
 		}
