@@ -6,7 +6,11 @@
 # Both services publish only on loopback, on ports Docker picks, so two runs never collide.
 services:
   minio:
-    image: quay.io/minio/minio@sha256:a1ea29fa28355559ef137d71fc570e508a214ec84ff8083e39bc5428980b015e
+    # Chainguard's build of MinIO. MinIO's own images no longer pull: quay.io answers 401 to an
+    # anonymous pull and Docker Hub's minio/minio is gone. Its entrypoint is the minio binary and
+    # it runs as uid 65532, which can write the data volume because the volume starts as a copy of
+    # the image's world-writable /data.
+    image: cgr.dev/chainguard/minio:latest@sha256:4cf4831a2bbcf13ddca09c1cbcc9faff716dd3c4247e0babc32864b8ee8e0034
     command: ["server", "/data", "--certs-dir", "/certs", "--quiet"]
     environment:
       MINIO_ROOT_USER: ${SCALE_MINIO_USER:?the harness sets this}

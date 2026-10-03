@@ -43,7 +43,7 @@ docker run -d --name azurite -p 10000:10000 \
 
 docker run -d --name minio -p 9000:9000 \
   -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin \
-  quay.io/minio/minio server /data
+  cgr.dev/chainguard/minio server /data
 
 export AZURITE_BLOB_ENDPOINT=http://127.0.0.1:10000
 export GITDR_TEST_S3_ENDPOINT=http://127.0.0.1:9000
@@ -53,6 +53,9 @@ make test-ci
 
 Azurite needs `--skipApiVersionCheck`. It runs behind the Azure SDK and rejects the API
 version the SDK sends, so every request is a 400 without it.
+
+MinIO is Chainguard's build. MinIO's own images no longer pull without an account: quay.io
+answers 401 and Docker Hub's `minio/minio` is gone.
 
 ## What gitdr will never do
 
