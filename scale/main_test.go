@@ -233,6 +233,15 @@ func (h *harness) isolate() error {
 			return err
 		}
 	}
+	// The variables below keep the system config and the askpass programs away from the harness's
+	// own git. The engine's git may not get them: a gitdr that passes git only an allowlist of its
+	// environment, HOME and not these, leaves that git reading the system config, and Homebrew's
+	// sets credential.helper=osxkeychain. An empty helper in HOME's config empties the list of
+	// helpers read before it, so no helper of the machine's is ever asked for the forge's
+	// credentials.
+	if err := os.WriteFile(filepath.Join(home, ".gitconfig"), []byte("[credential]\n\thelper =\n"), 0o600); err != nil {
+		return err
+	}
 	for k, v := range map[string]string{
 		"HOME":                        home,
 		"XDG_CONFIG_HOME":             filepath.Join(home, ".config"),
