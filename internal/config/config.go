@@ -158,7 +158,8 @@ func Default() *Config {
 }
 
 // Load reads config from path (may be empty for "defaults + env only"), then applies
-// environment overrides.
+// environment overrides. The secrets it reads from the environment leave it (envSecret), so a
+// second Load in the same process finds none there.
 func Load(path string) (*Config, error) {
 	c := Default()
 	if path != "" {
@@ -355,9 +356,15 @@ func envStr(dst *string, key string) {
 	}
 }
 
+// envSecret reads a secret and takes it out of the environment, so that a process gitdr starts
+// without choosing its environment, as the cloud SDKs start an AWS credential_process or the Azure
+// CLI, does not inherit it. git never could (gitexec's passedThrough). /proc/<pid>/environ still
+// holds it, since that is the environment gitdr started with; what closes that to other processes
+// is that gitdr is not dumpable (cmd/gitdr).
 func envSecret(dst *redact.Secret, key string) {
 	if v, ok := os.LookupEnv(envPrefix + key); ok {
 		*dst = redact.Secret(v)
+		_ = os.Unsetenv(envPrefix + key)
 	}
 }
 

@@ -249,6 +249,12 @@ or a SAS. See §4, Azure.
   `~/.gitconfig` instead. git's messages are in English whatever the locale. On Linux gitdr also
   makes itself non-dumpable as it starts, so git, which runs as the same user, cannot read
   gitdr's environment or memory through `/proc` or ptrace. *Changed in v0.1.21.*
+- gitdr's own secrets leave its environment. Once read, `GITDR_GITHUB_APP_PRIVATE_KEY`,
+  `GITDR_GITLAB_TOKEN`, `GITDR_MANIFEST_SIGNING_KEY`, `GITDR_ENCRYPTION_KEY` and
+  `GITDR_DESTINATION_AZURE_CONNECTIONSTRING` are taken out of gitdr's environment, before any
+  storage client is built. A process a cloud SDK starts for credentials, such as an AWS
+  `credential_process` or the Azure CLI, runs with gitdr's environment, the cloud's own variables
+  included, and without these. *Changed in v0.1.21.*
 - No telemetry.
 
 ## 7. Restore

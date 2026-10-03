@@ -38,6 +38,50 @@ func TestEnvOverrides(t *testing.T) {
 	}
 }
 
+// A secret leaves the environment as soon as gitdr has it. A process the cloud SDKs start for
+// credentials, an AWS credential_process or the Azure CLI, inherits gitdr's environment, and has no
+// use for gitdr's own keys. Everything else stays where it is: the SDKs read their own variables
+// after Load, and the other GITDR_* settings are not secrets.
+func TestLoadTakesSecretsOutOfTheEnvironment(t *testing.T) {
+	secrets := map[string]string{
+		"GITDR_GITHUB_APP_PRIVATE_KEY":             "canary-app-key",
+		"GITDR_GITLAB_TOKEN":                       "canary-gitlab-token",
+		"GITDR_DESTINATION_AZURE_CONNECTIONSTRING": "canary-connection-string",
+		"GITDR_MANIFEST_SIGNING_KEY":               "canary-signing-key",
+		"GITDR_ENCRYPTION_KEY":                     "canary-encryption-key",
+	}
+	for k, v := range secrets {
+		t.Setenv(k, v)
+	}
+	t.Setenv("GITDR_DESTINATION_S3_BUCKET", "a-bucket")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "the-sdk-reads-this-itself")
+
+	c, err := Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	held := map[string]redact.Secret{
+		"GITDR_GITHUB_APP_PRIVATE_KEY":             c.Source.GitHub.PrivateKey,
+		"GITDR_GITLAB_TOKEN":                       c.Source.GitLab.Token,
+		"GITDR_DESTINATION_AZURE_CONNECTIONSTRING": c.Destination.Azure.ConnectionString,
+		"GITDR_MANIFEST_SIGNING_KEY":               c.Manifest.SigningKey,
+		"GITDR_ENCRYPTION_KEY":                     c.Encryption.Key,
+	}
+	for k, want := range secrets {
+		if got := held[k].Reveal(); got != want {
+			t.Errorf("%s: the config holds %q, want %q", k, got, want)
+		}
+		if _, ok := os.LookupEnv(k); ok {
+			t.Errorf("%s is still in the environment after Load", k)
+		}
+	}
+	for _, k := range []string{"GITDR_DESTINATION_S3_BUCKET", "AWS_SECRET_ACCESS_KEY"} {
+		if _, ok := os.LookupEnv(k); !ok {
+			t.Errorf("Load took %s out of the environment; only gitdr's own secrets go", k)
+		}
+	}
+}
+
 // Where the storage account lives in Resource Manager arrives like any other non-secret field,
 // from YAML and then GITDR_* env. It decides whether the Azure WORM check can read a lock at all,
 // so a value that silently failed to arrive would turn every locked container into an unknown one.
