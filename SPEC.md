@@ -246,8 +246,9 @@ or a SAS. See §4, Azure.
   credential. The destination's credentials and the signing and encryption keys never reach
   them. Up to v0.1.20 git got the whole environment. Any other variable that changed what git
   does, `GIT_CONFIG_GLOBAL` for instance, no longer reaches it, so configure git in
-  `~/.gitconfig` instead. git's messages are in English whatever the locale.
-  *Changed in v0.1.21.*
+  `~/.gitconfig` instead. git's messages are in English whatever the locale. On Linux gitdr also
+  makes itself non-dumpable as it starts, so git, which runs as the same user, cannot read
+  gitdr's environment or memory through `/proc` or ptrace. *Changed in v0.1.21.*
 - No telemetry.
 
 ## 7. Restore
