@@ -13,6 +13,7 @@ import (
 	"io"
 	"log/slog"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 
@@ -187,19 +188,64 @@ func (b *Backend) PutImmutable(ctx context.Context, key string, r io.Reader, siz
 
 	out, err := b.client.PutObject(ctx, in)
 	if err != nil {
+		// The SDK sends a write again when it lost the answer to the first one, and the first may
+		// have landed. On AWS the second meets If-None-Match and is refused, 412, for the object
+		// the first one wrote. So before calling a write failed, ask the store what is at the key.
+		if !ok {
+			return dest.PutResult{}, fmt.Errorf("s3: put %q: %w", key, err)
+		}
+		switch state, head, serr := b.settle(ctx, key, size, crc); state {
+		case copyOurs:
+			b.logger.Info("s3: the write had landed and its answer was lost; the object at the key is this one", "key", key)
+			return putResult(key, size, ret, head.ETag, head.VersionId), nil
+		case copyOther:
+			if serr == nil {
+				return dest.PutResult{}, fmt.Errorf("s3: refusing to overwrite existing object %q: %w", key, err)
+			}
+		}
 		return dest.PutResult{}, fmt.Errorf("s3: put %q: %w", key, err)
 	}
-	res := dest.PutResult{Key: key, Size: size}
+	return putResult(key, size, ret, out.ETag, out.VersionId), nil
+}
+
+func putResult(key string, size int64, ret dest.Retention, etag, versionID *string) dest.PutResult {
+	res := dest.PutResult{Key: key, Size: size, ETag: strings.Trim(aws.ToString(etag), `"`), VersionID: aws.ToString(versionID)}
 	if !ret.Until.IsZero() {
 		res.RetainUntil = ret.Until.UTC()
 	}
-	if out.ETag != nil {
-		res.ETag = strings.Trim(*out.ETag, `"`)
+	return res
+}
+
+// copyState is what a store holds at a key, measured against the object a write sent.
+type copyState int
+
+const (
+	copyAbsent copyState = iota // nothing is there
+	copyOurs                    // our size and our CRC32
+	copyOther                   // something else, or something the store would not show us
+)
+
+// settle asks the store what is at key after a write whose answer was lost or refused, and
+// compares it with what the write sent: size bytes whose CRC32 is one of crcs.
+//
+// The checksum decides, with the size. A store that will not return the checksum has not shown
+// that the object is this one, and that is answered as someone else's: a refusal stays a refusal.
+func (b *Backend) settle(ctx context.Context, key string, size int64, crcs ...string) (copyState, *awss3.HeadObjectOutput, error) {
+	out, err := b.client.HeadObject(ctx, &awss3.HeadObjectInput{
+		Bucket:       aws.String(b.bucket),
+		Key:          aws.String(key),
+		ChecksumMode: s3types.ChecksumModeEnabled,
+	})
+	if err != nil {
+		if notFound(err) {
+			return copyAbsent, nil, nil
+		}
+		return copyOther, nil, err
 	}
-	if out.VersionId != nil {
-		res.VersionID = *out.VersionId
+	if aws.ToInt64(out.ContentLength) == size && out.ChecksumCRC32 != nil && slices.Contains(crcs, *out.ChecksumCRC32) {
+		return copyOurs, out, nil
 	}
-	return res, nil
+	return copyOther, out, nil
 }
 
 // crc32Of is the CRC32 S3 expects of the next size bytes of r, base64 of the big-endian sum, read
@@ -237,16 +283,24 @@ func (b *Backend) objectExists(ctx context.Context, key string) (bool, error) {
 	if err == nil {
 		return true, nil
 	}
-	if _, ok := errors.AsType[*s3types.NotFound](err); ok {
+	if notFound(err) {
 		return false, nil
+	}
+	return false, fmt.Errorf("s3: head %q: %w", key, err)
+}
+
+// notFound reports whether err is a store saying there is nothing at the key.
+func notFound(err error) bool {
+	if _, ok := errors.AsType[*s3types.NotFound](err); ok {
+		return true
 	}
 	if apiErr, ok := errors.AsType[smithy.APIError](err); ok {
 		switch apiErr.ErrorCode() {
 		case "NotFound", "NoSuchKey", "404":
-			return false, nil
+			return true
 		}
 	}
-	return false, fmt.Errorf("s3: head %q: %w", key, err)
+	return false
 }
 
 // List returns objects under prefix (read-only).

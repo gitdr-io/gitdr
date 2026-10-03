@@ -245,6 +245,12 @@ body `aws-chunked` as a single chunk with the checksum in a trailer. MinIO refus
 16 MiB, so before this no object over 16 MiB could be written to MinIO over TLS. *Changed in
 v0.1.21.*
 
+A write whose answer was lost is settled by asking the store. The SDK sends such a write again,
+and when the first one had landed, AWS refuses the second with 412, because of `If-None-Match`.
+gitdr then reads the object's size and CRC32 with `HeadObject` in checksum mode, and when they
+are this write's, the write succeeded. A different object at the key is still refused, and so is
+one the store will not give a checksum for. *Changed in v0.1.22.*
+
 ## 5. Object storage authentication
 
 Use each cloud SDK's default credential provider chain. One code path resolves static keys
