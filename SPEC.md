@@ -252,8 +252,9 @@ are this write's, the write succeeded. A different object at the key is still re
 one the store will not give a checksum for. A write settled this way records the retention
 `HeadObject` shows the object held to, and not the one it asked for: on AWS the object at the
 key can be an earlier write's with the same bytes, held to that write's date and mode.
-`HeadObject` shows the lock only to a key allowed `s3:GetObjectRetention` (`readFileRetentions`
-on B2), and without it the write records none. *Changed in v0.1.22.*
+AWS shows the lock on `HeadObject` only to a key allowed `s3:GetObjectRetention`, and Backblaze
+documents no lock headers on it at all. Where none is shown the write records none. *Changed in
+v0.1.22.*
 
 An object over 4 GiB is written in parts, because a single PutObject stops at 5 GiB on AWS, B2,
 R2 and Wasabi. Parts are at least 64 MiB, and larger for a larger object so it stays under 9,000

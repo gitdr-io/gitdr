@@ -264,9 +264,9 @@ func putResult(key string, size int64, ret dest.Retention, etag, versionID *stri
 // its bytes. Its retention is the one HeadObject shows that object held to, and never the one the
 // write asked for: the object can be an earlier write's with the same bytes, held to that write's
 // date and mode, and the date asked for would put a retention in the manifest that the store does
-// not hold. HeadObject shows the lock only to a key allowed s3:GetObjectRetention (readFileRetentions
-// on B2). Without it the result claims none, and the manifest says less than the store holds
-// rather than more.
+// not hold. AWS shows the lock on HeadObject only to a key allowed s3:GetObjectRetention, and
+// Backblaze documents no lock headers on HeadObject at all. Where none is shown the result claims
+// none, and the manifest says less than the store holds rather than more.
 func (b *Backend) settledResult(key string, size int64, head *awss3.HeadObjectOutput, ret dest.Retention) dest.PutResult {
 	res := dest.PutResult{Key: key, Size: size, ETag: strings.Trim(aws.ToString(head.ETag), `"`), VersionID: aws.ToString(head.VersionId)}
 	if head.ObjectLockRetainUntilDate != nil && head.ObjectLockMode != "" {
