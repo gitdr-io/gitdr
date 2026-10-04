@@ -72,6 +72,11 @@ jobs:
         env:
           AZURITE_BLOB_ENDPOINT: http://127.0.0.1:10000
         run: go test -mod=readonly ./...
+      # The proof that a binary only root can read starts non-dumpable needs root, to give the
+      # binary to root and run it as another user. The step above runs as the runner's user and
+      # skips it, so it runs here on its own, and GITDR_TEST_NEEDS_ROOT makes a skip a failure.
+      - name: test as root (startup window)
+        run: sudo -E env "PATH=$PATH" GITDR_TEST_NEEDS_ROOT=1 go test -mod=readonly -count=1 -run '^TestTheKernelClosesTheStartupWindow$' ./cmd/gitdr
       - name: lint
         run: make lint
       - name: govulncheck

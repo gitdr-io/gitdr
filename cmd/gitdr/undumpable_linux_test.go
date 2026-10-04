@@ -105,8 +105,11 @@ func readWhileItStarts(path string) int {
 // is the control; owned by root with mode 0711, no start may leak.
 func TestTheKernelClosesTheStartupWindow(t *testing.T) {
 	if os.Geteuid() != 0 {
-		if os.Getenv("CI") != "" {
-			t.Fatal("not root: this test gives the engine to root and runs it as another user, and CI runs as root")
+		// A gate that runs this as root sets GITDR_TEST_NEEDS_ROOT, so losing root there fails
+		// the gate instead of skipping the proof. Anywhere else it is skipped, as other tests skip
+		// what their machine cannot do.
+		if os.Getenv("GITDR_TEST_NEEDS_ROOT") != "" {
+			t.Fatal("not root: GITDR_TEST_NEEDS_ROOT is set, and this test gives the engine to root and runs it as another user")
 		}
 		t.Skip("needs root, to give the engine to root and run it as another user")
 	}
