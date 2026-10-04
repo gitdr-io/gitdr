@@ -92,6 +92,11 @@ storage calls the engine makes (`internal/dest/s3/s3.go`) for `backup`, `verify`
 COMPLIANCE that can only lengthen a lock, and under GOVERNANCE shortening one also needs
 `s3:BypassGovernanceRetention`, which this policy leaves out. gitdr never makes that call.
 
+`s3:GetObjectRetention` also decides what a write settled after a lost answer records.
+`HeadObject` shows an object's lock only to a key allowed it, and gitdr records the lock it is
+shown, so without it that artifact's `retainUntil` in the manifest is `0001-01-01T00:00:00Z`
+rather than a date the store never showed.
+
 Left out on purpose: `s3:DeleteObject`, `s3:DeleteObjectVersion`, `s3:AbortMultipartUpload`,
 `s3:BypassGovernanceRetention`, `s3:PutObjectLegalHold`, `s3:PutBucketObjectLockConfiguration`,
 `s3:PutLifecycleConfiguration`, `s3:PutBucketPolicy`.

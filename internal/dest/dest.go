@@ -95,6 +95,9 @@ type PutResult struct {
 	Size        int64     `json:"size"`
 	SHA256      string    `json:"sha256,omitempty"`
 	RetainUntil time.Time `json:"retainUntil"`
+	// RetainMode is the lock mode RetainUntil holds under, on a store that has modes (S3 Object
+	// Lock). Empty when there is no RetainUntil.
+	RetainMode RetentionMode `json:"retainMode,omitempty"`
 }
 
 // Object is a stored object as seen when listing a prefix (read-only).

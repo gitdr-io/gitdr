@@ -35,6 +35,9 @@ type fakeStore struct {
 	// dropAfterCommit is how many of the next writes land and then lose their answer: the
 	// connection closes with no response, so the client cannot know.
 	dropAfterCommit int
+	// hideLockOnHead answers HeadObject without the lock headers, as AWS answers a key that is
+	// not allowed s3:GetObjectRetention.
+	hideLockOnHead bool
 
 	uploads    map[string]*fakeUpload
 	nextUpload int
@@ -53,12 +56,17 @@ type fakeStore struct {
 	beforeComplete func()
 	// beforeHead runs before the HeadObject request of that number, counted from 1, is answered.
 	beforeHead map[int]func()
+	// dropLockOnComplete completes an upload in parts without the lock its Create asked for, as a
+	// store that honours the lock headers on PutObject and not on CreateMultipartUpload would.
+	dropLockOnComplete bool
 }
 
 type fakeObject struct {
 	data     []byte
 	crc32    string // what HeadObject returns with checksum mode on
 	versions int
+	// The lock the object holds, as GetObjectRetention returns it; empty for none.
+	lockMode, retainUntil string
 }
 
 type fakeUpload struct {
@@ -139,6 +147,13 @@ func (f *fakeStore) seed(key string, data []byte) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.objects[key] = &fakeObject{data: data, crc32: crc32Base64(data), versions: 1}
+}
+
+// seedHeld puts an object at key that holds a lock, as an earlier write would have left it.
+func (f *fakeStore) seedHeld(key string, data []byte, mode, until string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.objects[key] = &fakeObject{data: data, crc32: crc32Base64(data), versions: 1, lockMode: mode, retainUntil: until}
 }
 
 func (f *fakeStore) serve(w http.ResponseWriter, r *http.Request) {
@@ -308,6 +323,9 @@ func (f *fakeStore) completeUpload(w http.ResponseWriter, r *http.Request, key s
 		versions = o.versions + 1
 	}
 	f.objects[key] = &fakeObject{data: data, crc32: stored, versions: versions}
+	if !f.dropLockOnComplete {
+		f.objects[key].lockMode, f.objects[key].retainUntil = up.lockMode, up.retainUntil
+	}
 	up.done = true
 	f.completes = append(f.completes, call)
 	drop := f.dropCompleteAfterCommit
@@ -357,6 +375,7 @@ func (f *fakeStore) head(w http.ResponseWriter, r *http.Request, key string) {
 	f.mu.Lock()
 	f.ops["HeadObject"]++
 	hook := f.beforeHead[f.ops["HeadObject"]]
+	hideLock := f.hideLockOnHead
 	f.mu.Unlock()
 	if hook != nil {
 		hook()
@@ -370,6 +389,10 @@ func (f *fakeStore) head(w http.ResponseWriter, r *http.Request, key string) {
 	w.Header().Set("ETag", `"`+o.crc32+`"`)
 	if r.Header.Get("X-Amz-Checksum-Mode") == "ENABLED" {
 		w.Header().Set("X-Amz-Checksum-Crc32", o.crc32)
+	}
+	if o.lockMode != "" && !hideLock {
+		w.Header().Set("X-Amz-Object-Lock-Mode", o.lockMode)
+		w.Header().Set("X-Amz-Object-Lock-Retain-Until-Date", o.retainUntil)
 	}
 	w.WriteHeader(http.StatusOK)
 }
@@ -391,7 +414,8 @@ func (f *fakeStore) putObject(w http.ResponseWriter, r *http.Request, key string
 	if existing != nil {
 		versions = existing.versions + 1
 	}
-	f.objects[key] = &fakeObject{data: got.data, crc32: crc32Base64(got.data), versions: versions}
+	f.objects[key] = &fakeObject{data: got.data, crc32: crc32Base64(got.data), versions: versions,
+		lockMode: got.lockMode, retainUntil: got.retainUntil}
 	f.accepted = append(f.accepted, got)
 	drop := f.dropAfterCommit > 0
 	if drop {

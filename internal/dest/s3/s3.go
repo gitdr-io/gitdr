@@ -237,7 +237,7 @@ func (b *Backend) PutImmutable(ctx context.Context, key string, r io.Reader, siz
 		switch state, head, serr := b.settle(ctx, key, size, crc); state {
 		case copyOurs:
 			b.logger.Info("s3: the write had landed and its answer was lost; the object at the key is this one", "key", key)
-			return putResult(key, size, ret, head.ETag, head.VersionId), nil
+			return b.settledResult(key, size, head, ret), nil
 		case copyOther:
 			if serr == nil {
 				return dest.PutResult{}, fmt.Errorf("s3: refusing to overwrite existing object %q: %w", key, err)
@@ -252,6 +252,31 @@ func putResult(key string, size int64, ret dest.Retention, etag, versionID *stri
 	res := dest.PutResult{Key: key, Size: size, ETag: strings.Trim(aws.ToString(etag), `"`), VersionID: aws.ToString(versionID)}
 	if !ret.Until.IsZero() {
 		res.RetainUntil = ret.Until.UTC()
+		res.RetainMode = dest.RetentionCompliance
+		if ret.Mode == dest.RetentionGovernance {
+			res.RetainMode = dest.RetentionGovernance
+		}
+	}
+	return res
+}
+
+// settledResult is the result of a write settle took as ours, because the object at the key holds
+// its bytes. Its retention is the one HeadObject shows that object held to, and never the one the
+// write asked for: the object can be an earlier write's with the same bytes, held to that write's
+// date and mode, and the date asked for would put a retention in the manifest that the store does
+// not hold. HeadObject shows the lock only to a key allowed s3:GetObjectRetention (readFileRetentions
+// on B2). Without it the result claims none, and the manifest says less than the store holds
+// rather than more.
+func (b *Backend) settledResult(key string, size int64, head *awss3.HeadObjectOutput, ret dest.Retention) dest.PutResult {
+	res := dest.PutResult{Key: key, Size: size, ETag: strings.Trim(aws.ToString(head.ETag), `"`), VersionID: aws.ToString(head.VersionId)}
+	if head.ObjectLockRetainUntilDate != nil && head.ObjectLockMode != "" {
+		res.RetainUntil = head.ObjectLockRetainUntilDate.UTC()
+		res.RetainMode = dest.RetentionMode(head.ObjectLockMode)
+	}
+	asked := putResult(key, size, ret, nil, nil)
+	if res.RetainUntil.Before(asked.RetainUntil) || (asked.RetainMode == dest.RetentionCompliance && res.RetainMode != dest.RetentionCompliance) {
+		b.logger.Warn("s3: the store does not show the object at the key held as long or as firmly as this write asked; the result records what it shows",
+			"key", key, "held_until", res.RetainUntil, "held_mode", res.RetainMode, "asked_until", asked.RetainUntil, "asked_mode", asked.RetainMode)
 	}
 	return res
 }

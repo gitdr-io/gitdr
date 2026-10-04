@@ -249,7 +249,11 @@ A write whose answer was lost is settled by asking the store. The SDK sends such
 and when the first one had landed, AWS refuses the second with 412, because of `If-None-Match`.
 gitdr then reads the object's size and CRC32 with `HeadObject` in checksum mode, and when they
 are this write's, the write succeeded. A different object at the key is still refused, and so is
-one the store will not give a checksum for. *Changed in v0.1.22.*
+one the store will not give a checksum for. A write settled this way records the retention
+`HeadObject` shows the object held to, and not the one it asked for: on AWS the object at the
+key can be an earlier write's with the same bytes, held to that write's date and mode.
+`HeadObject` shows the lock only to a key allowed `s3:GetObjectRetention` (`readFileRetentions`
+on B2), and without it the write records none. *Changed in v0.1.22.*
 
 An object over 4 GiB is written in parts, because a single PutObject stops at 5 GiB on AWS, B2,
 R2 and Wasabi. Parts are at least 64 MiB, and larger for a larger object so it stays under 9,000
@@ -788,7 +792,10 @@ does not say which it is.**
   (`RetentionExpirationTime`).
 - On **S3** it is *requested*: the retain-until gitdr sent. `PutObject` returns no object-lock
   headers at all, so there is nothing to observe at write time, and the field records an
-  instruction rather than an answer.
+  instruction rather than an answer. The one exception is a write settled after its answer was
+  lost or refused (§4): it records what `HeadObject` shows the object at the key held to, or
+  `0001-01-01T00:00:00Z` when it shows none, so the field never claims more than the store
+  showed. *Changed in v0.1.22.*
 
 Both are written into a signed document, which makes the S3 case a claim gitdr has not earned:
 if a store accepted the write and ignored `x-amz-object-lock-mode`, the manifest still names a

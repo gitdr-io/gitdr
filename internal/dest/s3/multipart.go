@@ -316,7 +316,7 @@ func (b *Backend) complete(ctx context.Context, key, id string, parts []s3types.
 	switch state, head, serr := b.settle(ctx, key, plan.size, ours...); state {
 	case copyOurs:
 		b.logger.Info("s3: completing the upload landed and its answer was lost; the object at the key is this one", "key", key)
-		return putResult(key, plan.size, ret, head.ETag, head.VersionId), false, nil
+		return b.settledResult(key, plan.size, head, ret), false, nil
 	case copyOther:
 		if serr == nil {
 			return dest.PutResult{}, false, fmt.Errorf("s3: refusing to overwrite existing object %q: %w", key, err)
