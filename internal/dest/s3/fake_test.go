@@ -59,6 +59,15 @@ type fakeStore struct {
 	// dropLockOnComplete completes an upload in parts without the lock its Create asked for, as a
 	// store that honours the lock headers on PutObject and not on CreateMultipartUpload would.
 	dropLockOnComplete bool
+	// noRetention is how GetObjectRetention answers about an object that holds no lock. Each store
+	// words it its own way (retention_test.go); the zero value answers as AWS does.
+	noRetention errorAnswer
+}
+
+// errorAnswer is an S3 error response: its status, its code and its message.
+type errorAnswer struct {
+	status        int
+	code, message string
 }
 
 type fakeObject struct {
@@ -399,16 +408,21 @@ func (f *fakeStore) head(w http.ResponseWriter, r *http.Request, key string) {
 	w.WriteHeader(http.StatusOK)
 }
 
-// retention answers GetObjectRetention: the lock the object holds, or the error AWS gives for an
-// object that holds none.
+// retention answers GetObjectRetention: the lock the object holds, or, for an object that holds
+// none, the error the store the fake stands for gives, AWS's unless a test chose another.
 func (f *fakeStore) retention(w http.ResponseWriter, key string) {
 	f.op("GetObjectRetention")
-	o := f.object(key)
+	f.mu.Lock()
+	o, none := f.objects[key], f.noRetention
+	f.mu.Unlock()
+	if none.code == "" {
+		none = awsNoRetention
+	}
 	switch {
 	case o == nil:
 		s3Error(w, http.StatusNotFound, "NoSuchKey", "The specified key does not exist.")
 	case o.lockMode == "":
-		s3Error(w, http.StatusNotFound, "NoSuchObjectLockConfiguration", "The specified object does not have a ObjectLock configuration")
+		s3Error(w, none.status, none.code, none.message)
 	default:
 		writeXML(w, struct {
 			XMLName         xml.Name `xml:"Retention"`

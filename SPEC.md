@@ -977,6 +977,12 @@ credentials create/put-only, so a HeadObject-based check would report an unearne
 correctly configured, genuinely protected buckets belonging to the operators who followed that
 advice.
 
+Stores say "this object holds nothing" in their own words, and each reads `absent`: AWS and MinIO
+answer `NoSuchObjectLockConfiguration` (a 404 and a 400), and Backblaze B2 answers
+`ObjectLockConfigurationNotFoundError` (a 404). That is the code AWS gives the bucket's lock
+question, and there it keeps its own meaning. *Changed in v0.1.22: B2's answer read
+`not-checked`, so a B2 object holding no lock passed `--require-worm`.*
+
 `--require-worm` fails on `absent` and passes on `not-checked`, for that reason: an earned
 negative is the case the flag exists for, and silence is not one. Note what it cannot do — the
 objects are written before the check runs and the destination is create-only, so failing here

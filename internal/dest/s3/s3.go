@@ -425,7 +425,12 @@ func isLoopback(endpoint string) bool {
 // `?retention` fails distinguishably instead:
 //
 //	NoSuchObjectLockConfiguration  the store implements the question and this object holds
-//	                               nothing. An earned negative.
+//	                               nothing. An earned negative. AWS answers it with a 404 and
+//	                               MinIO with a 400.
+//	ObjectLockConfigurationNotFoundError
+//	                               the same negative from Backblaze B2, a 404. AWS gives this code
+//	                               to the bucket's lock question, which VerifyWorm asks; here it
+//	                               answers a question about one object.
 //	AccessDenied / NotImplemented  a refusal, and a refusal is not a no.
 //	anything else                  unclassified, and unclassified is not a no either.
 func (b *Backend) ObserveRetention(ctx context.Context, key string) (dest.RetentionObservation, time.Time, error) {
@@ -435,7 +440,7 @@ func (b *Backend) ObserveRetention(ctx context.Context, key string) (dest.Retent
 	})
 	if err != nil {
 		var api smithy.APIError
-		if errors.As(err, &api) && api.ErrorCode() == "NoSuchObjectLockConfiguration" {
+		if errors.As(err, &api) && objectHoldsNoRetention(api.ErrorCode()) {
 			return dest.RetentionAbsent, time.Time{}, nil
 		}
 		// Every other failure is the store declining to answer. Returned with the error so a
@@ -448,4 +453,16 @@ func (b *Backend) ObserveRetention(ctx context.Context, key string) (dest.Retent
 		return dest.RetentionAbsent, time.Time{}, nil
 	}
 	return dest.RetentionPresent, out.Retention.RetainUntilDate.UTC(), nil
+}
+
+// objectHoldsNoRetention reports whether code, a store's answer to GetObjectRetention, says the
+// object holds no retention. Only that read asks it: the same code about a bucket is VerifyWorm's
+// to read, on its own terms.
+func objectHoldsNoRetention(code string) bool {
+	switch code {
+	case "NoSuchObjectLockConfiguration", // AWS, MinIO
+		"ObjectLockConfigurationNotFoundError": // Backblaze B2
+		return true
+	}
+	return false
 }
