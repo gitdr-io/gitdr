@@ -16,6 +16,7 @@ import (
 
 	"cloud.google.com/go/storage"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
+	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
 	smithy "github.com/aws/smithy-go"
 	"google.golang.org/api/googleapi"
 
@@ -68,6 +69,12 @@ func TestErrorCodeNamesTheFailure(t *testing.T) {
 		{"a page the answer check refused", sdk(fmt.Errorf("%w: HTTP 200 and a document whose root is html", dest.ErrNotStorageAPI)), "not-s3"},
 		// An empty page ends in EOF, and the refusal outranks it, or it would read as a dropped connection.
 		{"an empty page the answer check refused", sdk(errors.Join(dest.ErrNotStorageAPI, io.EOF)), "not-s3"},
+		// As the Azure backend marks a token its credential chain could not get, under the
+		// policy's own wrapping. Ahead of anything in the SDK's error: nothing was sent.
+		{"an Azure credential the chain found nowhere", fmt.Errorf("azure: container properties: %w",
+			fmt.Errorf("%w: %w", dest.ErrNoCredentials, azidentity.NewCredentialUnavailableError("DefaultAzureCredential: failed to acquire a token"))), "no-credentials"},
+		{"an Azure credential the identity provider refused", fmt.Errorf("azure: read container immutability policy: %w",
+			fmt.Errorf("%w: %w", dest.ErrNoCredentials, &azidentity.AuthenticationFailedError{})), "no-credentials"},
 		{"anything nobody named", errors.New("something else"), "not-s3"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -81,7 +88,7 @@ func TestErrorCodeNamesTheFailure(t *testing.T) {
 // Every code doctor gives on its own has words beside it, and the words carry the code, so the
 // detail and the code cannot say two different things.
 func TestEveryCodeHasItsWords(t *testing.T) {
-	for _, code := range []string{codeDNS, codeConnect, codeTLS, codeTimeout, codeTooLarge, codeNotS3} {
+	for _, code := range []string{codeDNS, codeConnect, codeTLS, codeTimeout, codeTooLarge, codeNotS3, codeNoCredentials} {
 		if storeAnswered(code) {
 			t.Errorf("%s is counted as the store's own code", code)
 		}

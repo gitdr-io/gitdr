@@ -1217,7 +1217,7 @@ nothing to say.
 |---|---|
 | `verdict` | `immutable`, `not-immutable` or `unknown`, meaning what `destination.wormVerdict` means in the manifest (v4 above). `null` when the check ended in an error instead of an answer, and then `code` says which |
 | `mode` | `COMPLIANCE` or `GOVERNANCE` for an S3 bucket's default retention, `RETENTION` for a Cloud Storage retention policy, `IMMUTABILITY` for an Azure container policy. `null` when there is none, or the store named a mode gitdr does not know |
-| `code` | `null` when the store answered the question. Otherwise the store's own error code (S3's `Code`, Azure's error code, the reason in a Cloud Storage error) if it matches `^[A-Za-z][A-Za-z0-9.]{0,63}$`, `unnamed` if the store's code does not, or one of the six below for a failure that carries no code |
+| `code` | `null` when the store answered the question. Otherwise the store's own error code (S3's `Code`, Azure's error code, the reason in a Cloud Storage error) if it matches `^[A-Za-z][A-Za-z0-9.]{0,63}$`, `unnamed` if the store's code does not, or one of the seven below for a failure that carries no code |
 
 | code | the failure |
 |---|---|
@@ -1227,6 +1227,7 @@ nothing to say.
 | `timeout` | no answer in time, or the run was stopped before one came |
 | `too-large` | an answer ran past 1 MiB, the most doctor reads of one |
 | `not-s3` | an answer that is not the storage API's, such as a web page, an empty body, another call's document or a body that does not parse, or a failure none of the other codes names |
+| `no-credentials` | no credential could be obtained, so nothing reached the store. On Azure, the SDK's default credential chain found none (`CredentialUnavailableError`) or the identity provider refused the one it found (`AuthenticationFailedError`); what it tried goes to stderr. *Added 2026-10-04: it read `not-s3`* |
 
 `unknown` with a code is a store that declined the question. That covers `AccessDenied` and
 `NotImplemented`, and codes that say the key, the bucket name or the region is wrong, such as

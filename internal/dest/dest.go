@@ -108,6 +108,12 @@ var ErrNotStorageAPI = errors.New("the endpoint did not answer as the storage AP
 // doctor fails the check, worm.require or not.
 var ErrNoSuchBucket = errors.New("the bucket does not exist")
 
+// ErrNoCredentials marks a failure to get a credential at all: the SDK's default chain found none,
+// or the identity provider refused the one it found. No request reached the store, so it is
+// neither the store's answer nor an endpoint that is not the storage API. The SDK's own error stays
+// inside it, for the log.
+var ErrNoCredentials = errors.New("no credential could be obtained")
+
 // The shape of an error code: a letter, then up to 63 letters, digits and dots. S3, Azure and
 // Cloud Storage name their errors with single words of this shape (AccessDenied,
 // ObjectLockConfigurationNotFoundError, AuthorizationFailed, notFound).

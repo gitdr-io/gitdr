@@ -28,6 +28,9 @@ const (
 	codeTimeout  = "timeout"   // no answer in time, or the run was stopped first
 	codeTooLarge = "too-large" // an answer ran past doctorResponseLimit
 	codeNotS3    = "not-s3"    // an answer that is not the storage API's, or a failure none of these names
+	// codeNoCredentials is a credential the SDK's default chain could not get, so no request was
+	// sent. Azure's chain says so in a way gitdr can tell (dest.ErrNoCredentials).
+	codeNoCredentials = "no-credentials"
 
 	// codeConfig is on the config check alone: the config could not be read or parsed.
 	codeConfig = "config"
@@ -37,7 +40,8 @@ const (
 // error code when it answered with one, through dest.ShapedCode, or one of the codes above.
 //
 // The order matters. A capped answer comes first, since what it cut short could have held
-// anything, and then an answer that was not the storage API's. The store's code comes before the
+// anything, and then an answer that was not the storage API's. A credential that could not be got
+// comes next: nothing was sent, so nothing after it applies. The store's code comes before the
 // network's words, since an answer is the better fact. A context ending comes before the network
 // as well, since a dial or a lookup cut short by it reports itself as their own failure.
 func errorCode(err error) string {
@@ -46,6 +50,9 @@ func errorCode(err error) string {
 	}
 	if errors.Is(err, dest.ErrNotStorageAPI) {
 		return codeNotS3
+	}
+	if errors.Is(err, dest.ErrNoCredentials) {
+		return codeNoCredentials
 	}
 	if code, ok := storeCode(err); ok {
 		return dest.ShapedCode(code)
@@ -128,7 +135,7 @@ func isTLS(err error) bool {
 // never reached it.
 func storeAnswered(code string) bool {
 	switch code {
-	case codeDNS, codeConnect, codeTLS, codeTimeout, codeTooLarge, codeNotS3:
+	case codeDNS, codeConnect, codeTLS, codeTimeout, codeTooLarge, codeNotS3, codeNoCredentials:
 		return false
 	}
 	return true
@@ -150,6 +157,8 @@ func failure(code string) string {
 		return "an answer ran past 1 MiB, the most doctor reads of one (too-large)"
 	case codeNotS3:
 		return "the endpoint did not answer as the storage API does (not-s3)"
+	case codeNoCredentials:
+		return "no credential could be obtained, so nothing reached the store (no-credentials)"
 	}
 	return "the store answered " + code
 }

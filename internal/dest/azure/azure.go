@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/policy"
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/storage/armstorage"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob"
@@ -106,7 +107,7 @@ func New(_ context.Context, opts Options, logger *slog.Logger) (*Backend, error)
 		if err != nil {
 			return nil, fmt.Errorf("azure: default credential: %w", err)
 		}
-		cred = c
+		cred = markedCredential{c}
 	}
 	var client *azblob.Client
 	var err error
@@ -153,6 +154,25 @@ func New(_ context.Context, opts Options, logger *slog.Logger) (*Backend, error)
 		b.resource = rm
 	}
 	return b, nil
+}
+
+// markedCredential is the SDK's default credential chain, used as it is, with a token it could not
+// get marked dest.ErrNoCredentials. The chain answers with CredentialUnavailableError when it found
+// nothing to use and AuthenticationFailedError when what it found was refused; the first is not an
+// exported type, and either way no request reached the store, which a caller has to be able to
+// tell from the store's answer. A token asked for after the run's own deadline is that deadline's.
+type markedCredential struct{ azcore.TokenCredential }
+
+func (c markedCredential) GetToken(ctx context.Context, opts policy.TokenRequestOptions) (azcore.AccessToken, error) {
+	tok, err := c.TokenCredential.GetToken(ctx, opts)
+	if err != nil {
+		mark := dest.ErrNoCredentials
+		if ctx.Err() != nil {
+			mark = ctx.Err()
+		}
+		err = fmt.Errorf("%w: %w", mark, err)
+	}
+	return tok, err
 }
 
 // VerifyWorm says immutable only for a container whose time-based retention policy Resource

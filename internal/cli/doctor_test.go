@@ -1071,3 +1071,52 @@ func TestDoctorReportsAConfigItCannotLoad(t *testing.T) {
 		t.Errorf("text output: exit %d, stdout %q; want 1 and nothing", code, out)
 	}
 }
+
+// azureEnv clears the Azure SDK's settings from the environment and has its default chain try the
+// environment alone, so it finds no credential and asks no service, here or in CI.
+func azureEnv(t *testing.T) {
+	t.Helper()
+	for _, kv := range os.Environ() {
+		k, _, _ := strings.Cut(kv, "=")
+		if strings.HasPrefix(k, "AZURE_") || strings.HasPrefix(k, "IDENTITY_") || k == "MSI_ENDPOINT" {
+			t.Setenv(k, "") // restored when the test ends
+			if err := os.Unsetenv(k); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	t.Setenv("AZURE_TOKEN_CREDENTIALS", "EnvironmentCredential")
+}
+
+// An Azure credential the SDK's default chain cannot get is named for what it is, no-credentials.
+// Nothing reached the store, so it is neither the store's answer nor an endpoint that is not the
+// storage API. It read not-s3, "the endpoint did not answer as the storage API does", which sent
+// an operator to the endpoint when what was missing was a credential.
+func TestDoctorNamesAnAzureCredentialItCannotGet(t *testing.T) {
+	for _, scope := range doctorScopes {
+		t.Run(scope.name, func(t *testing.T) {
+			doctorEnv(t)
+			azureEnv(t)
+			// Never dialled: the token is asked for before the request, and there is none to get.
+			doc := "destination:\n  type: azure\n  azure:\n    account: gitdrdoctor\n    container: backups\n" +
+				"    endpoint: https://127.0.0.1:9/\n"
+			cfg := filepath.Join(t.TempDir(), "gitdr.yaml")
+			if err := os.WriteFile(cfg, []byte(doc), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			args := append(slices.Clone(scope.args), "-config", cfg, "-output", "json")
+			code, out, stderr := runDoctorCLI(context.Background(), t, args...)
+			w := decodeDoctor(t, out).check(t, "worm")
+			if w.Verdict != nil || text(w.Code) != "no-credentials" || !strings.Contains(w.Detail, "(no-credentials)") {
+				t.Errorf("worm = verdict %s, code %s, %q; want null, no-credentials", text(w.Verdict), text(w.Code), w.Detail)
+			}
+			if destOnly(scope.args) && code != 0 {
+				t.Errorf("exit %d, want 0: an unread lock is not a failure unless worm.require is set", code)
+			}
+			// The SDK's own account of what it tried goes to stderr, with the log.
+			if !strings.Contains(stderr, "EnvironmentCredential") {
+				t.Errorf("stderr does not say which credentials were tried:\n%s", stderr)
+			}
+		})
+	}
+}
