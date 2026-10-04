@@ -24,7 +24,8 @@ import (
 // source advertised when the copy was made.
 //
 // It writes a signed report beside the manifest it drilled, through the same create-only path
-// as everything else, so the evidence is as immutable as the thing it proves.
+// as everything else and under the same retention, so the evidence is as immutable as the thing
+// it proves.
 //
 // With -no-report it writes nothing at all. That is the drill an auditor re-runs from the
 // customer's own bucket: a read credential and the public key, no private key, no gitdr account,
@@ -77,7 +78,7 @@ func runDrill(ctx context.Context, args []string) int {
 	// sign one, so there is one read-only path, not a second one beside it.
 	res, err := pipeline.Drill(ctx, pipeline.DrillDeps{
 		Dest: dst, Git: gitexec.New(log), EncryptionKey: encKey,
-		PublicKey: pub, SigningKey: signer,
+		PublicKey: pub, SigningKey: signer, Retention: cfg.Destination.Retention,
 		ToolVersion: version(), Logger: log,
 	}, pipeline.DrillRequest{
 		ManifestKey: *manifest, Host: *host, Owner: *owner,

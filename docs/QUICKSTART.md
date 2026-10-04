@@ -246,7 +246,8 @@ Every repository is compared against the bundle's own header and against the ref
 manifest signed. Refs a clone creates nothing for, `refs/merge-requests/*` and the like, are
 counted apart and named rather than folded into the total. Non-zero exit if anything fails to
 restore or comes back at a different commit. The signed report is stored beside the manifest,
-and `reportKey` in the JSON says where.
+under the same retention as the artifacts on a locked bucket, and `reportKey` in the JSON says
+where.
 
 An auditor can re-run the same proof from your bucket without your signing key. Give them read
 access (see step 2) and the public key, and they run:

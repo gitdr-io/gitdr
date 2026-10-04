@@ -695,6 +695,14 @@ directory, compares what came back, throws it away, and stores a signed report b
 manifest it drilled — through the same create-only path as everything else, so the evidence is
 as immutable as the thing it proves.
 
+The report and its signature are written under the run's configured retention, as `backup`
+writes every artifact: `destination.retention`'s mode, until its `days` after the report is
+written, on a destination the WORM check confirms immutable. Elsewhere they are written plainly,
+as the artifacts are, since a store without Object Lock refuses lock headers. *Changed
+2026-10-04: they were written with no retention, so a bucket with no default retention held them
+unlocked beside artifacts it held for the full period (Backblaze B2, in gitdr's own release
+gates), and an AWS bucket held them under its default rule. `gitdr.drill/v1` is unchanged.*
+
 Three ref maps, and the drill checks both joins:
 
 | | |

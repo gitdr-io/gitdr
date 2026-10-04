@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"gitdr.io/gitdr/internal/config"
 	"gitdr.io/gitdr/internal/crypto"
 	"gitdr.io/gitdr/internal/dest"
 	"gitdr.io/gitdr/internal/gitexec"
@@ -80,7 +81,11 @@ type DrillDeps struct {
 	// text file anybody can write, so without a key the report is neither signed nor stored:
 	// the drill writes nothing to the destination. That is `drill -no-report`, the read-only
 	// proof an auditor runs with a read credential and the public key.
-	SigningKey  ed25519.PrivateKey
+	SigningKey ed25519.PrivateKey
+	// Retention is the run's configured retention, destination.retention, as backup reads it. The
+	// report and its signature are written with it, from when they are written, on a destination
+	// that confirms it is immutable, as backup writes every artifact. Zero days writes them plainly.
+	Retention   config.RetentionConfig
 	ToolVersion string
 	Logger      *slog.Logger
 	Now         func() time.Time
@@ -414,7 +419,8 @@ func loadManifestForDrill(ctx context.Context, d DrillDeps, req DrillRequest, no
 // the key it stored the report under.
 //
 // Written through the same create-only path as everything else, so a drill report cannot be
-// replaced by a later one that says something more comfortable.
+// replaced by a later one that says something more comfortable, and locked as the artifacts are
+// (reportRetention), so it cannot be deleted while the copies it proves are kept.
 //
 // Without a signing key it stores nothing and returns no key. This is the only read-only path,
 // and `drill -no-report` is built on it rather than beside it: a second way of skipping the write
@@ -430,20 +436,21 @@ func uploadDrill(ctx context.Context, d DrillDeps, report *DrillReport, req Dril
 	}
 	base := path.Dir(path.Dir(report.ManifestKey)) // {host}/{namespace}, or {host} when the manifest is filed there
 	key := path.Join(base, "drills", report.FinishedAt.UTC().Format("20060102T150405Z")+".drill.json")
+	ret := reportRetention(ctx, d, report.FinishedAt, log)
 
 	// Retried like every other write in the pipeline. A drill is the most expensive command in
 	// the product, so a blip on the last PUT should not cost the whole proof. It does not make
 	// the failure impossible - a prefix-denied policy fails all three times - which is why the
 	// exit code still has to distinguish this from a restore that did not come back.
 	if err := retry(ctx, 3, time.Second, func() error {
-		_, err := d.Dest.PutImmutable(ctx, key, strings.NewReader(string(canon)), int64(len(canon)), dest.Retention{})
+		_, err := d.Dest.PutImmutable(ctx, key, strings.NewReader(string(canon)), int64(len(canon)), ret)
 		return err
 	}); err != nil {
 		return "", err
 	}
 	sig := base64.StdEncoding.EncodeToString(crypto.Sign(d.SigningKey, canon))
 	if err := retry(ctx, 3, time.Second, func() error {
-		_, err := d.Dest.PutImmutable(ctx, key+".sig", strings.NewReader(sig), int64(len(sig)), dest.Retention{})
+		_, err := d.Dest.PutImmutable(ctx, key+".sig", strings.NewReader(sig), int64(len(sig)), ret)
 		return err
 	}); err != nil {
 		return "", err
@@ -463,6 +470,25 @@ func uploadDrill(ctx context.Context, d DrillDeps, report *DrillReport, req Dril
 	// here. It is not part of the output contract; `reportKey` is.
 	log.Info("drill report written", "key", key, "signature", key+".sig")
 	return key, nil
+}
+
+// reportRetention is the retention the report and its signature are written with: the configured
+// mode, until the configured days after now, as backup asks of every artifact (backupRun.retention)
+// and on the same condition, a destination that confirms it is immutable. A store without Object
+// Lock refuses lock headers, and one that will not say what it locks is sent none, so there the
+// report is written plainly, as the artifacts were.
+func reportRetention(ctx context.Context, d DrillDeps, now time.Time, log *slog.Logger) dest.Retention {
+	if d.Retention.Days <= 0 {
+		return dest.Retention{}
+	}
+	st, err := d.Dest.VerifyWorm(ctx)
+	if err != nil || !st.Verdict.Immutable() {
+		log.Warn("the drill report is written without retention: the destination is not confirmed immutable",
+			"verdict", st.Verdict.Wire(), "details", st.Details, "err", err)
+		return dest.Retention{}
+	}
+	mode := dest.RetentionMode(strings.ToUpper(strings.TrimSpace(d.Retention.Mode)))
+	return dest.Retention{Mode: mode, Until: now.UTC().Add(time.Duration(d.Retention.Days) * 24 * time.Hour)}
 }
 
 // LocateForTest exposes locate to the package's external tests. The parsing it does was wrong
