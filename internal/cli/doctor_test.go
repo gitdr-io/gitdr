@@ -33,8 +33,9 @@ const (
 	oneObjectPage = `<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">` +
 		`<Name>b</Name><Prefix></Prefix><KeyCount>1</KeyCount><MaxKeys>1</MaxKeys><IsTruncated>false</IsTruncated>` +
 		`<Contents><Key>` + objectKey + `</Key><Size>12</Size></Contents></ListBucketResult>`
+	// Far ahead: doctor reads it against the clock, and a date that has passed is a lock that ended.
 	heldRetention = `<Retention xmlns="http://s3.amazonaws.com/doc/2006-03-01/">` +
-		`<Mode>COMPLIANCE</Mode><RetainUntilDate>2026-11-02T12:00:00Z</RetainUntilDate></Retention>`
+		`<Mode>COMPLIANCE</Mode><RetainUntilDate>2099-11-02T12:00:00Z</RetainUntilDate></Retention>`
 	noLockConfiguration = `<Error><Code>ObjectLockConfigurationNotFoundError</Code>` +
 		`<Message>Object Lock configuration does not exist for this bucket</Message></Error>`
 )
@@ -800,7 +801,7 @@ func TestDoctorSaysWhatRetentionIsOnAnObject(t *testing.T) {
 	}{
 		{"an empty bucket", emptyPage(false), nil, false, "none", true, "nothing written here yet"},
 		{"an empty first page with more after it", emptyPage(true), nil, false, "none", true, "first page of the listing named no object"},
-		{"an object holding a retention", nil, nil, false, "present", true, "held until 2026-11-02T12:00:00Z"},
+		{"an object holding a retention", nil, nil, false, "present", true, "held until 2099-11-02T12:00:00Z"},
 		{"an object holding none", nil, none, false, "absent", true, "carries no retention"},
 		{"an object holding none, worm.require", nil, none, true, "absent", false, "carries no retention"},
 		{"a retention the key may not read", nil, answer(http.StatusForbidden, `<Error><Code>AccessDenied</Code></Error>`), false,
@@ -1116,6 +1117,36 @@ func TestDoctorNamesAnAzureCredentialItCannotGet(t *testing.T) {
 			// The SDK's own account of what it tried goes to stderr, with the log.
 			if !strings.Contains(stderr, "EnvironmentCredential") {
 				t.Errorf("stderr does not say which credentials were tried:\n%s", stderr)
+			}
+		})
+	}
+}
+
+// A lock whose date has passed is not called present. The release gates sampled objects on B2 held
+// until 2026-07-04 and 2026-09-14, months before, and doctor said "an object here is held until"
+// each of them.
+func TestDoctorCallsAnEndedLockLapsed(t *testing.T) {
+	ended := answer(http.StatusOK, `<Retention xmlns="http://s3.amazonaws.com/doc/2006-03-01/">`+
+		`<Mode>COMPLIANCE</Mode><RetainUntilDate>2026-07-04T00:00:00Z</RetainUntilDate></Retention>`)
+	for _, require := range []bool{false, true} {
+		t.Run(fmt.Sprintf("worm.require %v", require), func(t *testing.T) {
+			doctorEnv(t)
+			store := newDoctorStore(t)
+			store.retention = ended
+			extra := ""
+			if require {
+				extra = "worm:\n  require: true\n"
+			}
+			code, out, _ := runDoctorCLI(context.Background(), t,
+				"-config", bucketConfig(t, store.URL, extra), "-only", "destination", "-output", "json")
+			r := decodeDoctor(t, out).check(t, "retention")
+			if text(r.Observed) != "lapsed" || !strings.Contains(r.Detail, "ended on 2026-07-04T00:00:00Z") || strings.Contains(r.Detail, "held until") {
+				t.Errorf("retention = observed %s, %q; want lapsed, saying the lock ended on 2026-07-04T00:00:00Z", text(r.Observed), r.Detail)
+			}
+			// The store applied a lock and it ran its course, as every lock does. That is not a
+			// bucket that drops locks, so the check passes, worm.require or not.
+			if !r.OK || code != 0 {
+				t.Errorf("retention ok %v, exit %d; want ok and 0", r.OK, code)
 			}
 		})
 	}

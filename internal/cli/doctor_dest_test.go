@@ -71,6 +71,7 @@ var lockedStatus = dest.WormStatus{Verdict: dest.VerdictImmutable, Mode: "COMPLI
 func TestDoctorNeverReachesAWrite(t *testing.T) {
 	refused := &smithy.OperationError{ServiceID: "S3", OperationName: "GetObjectRetention",
 		Err: &smithy.GenericAPIError{Code: "AccessDenied", Message: "Access Denied"}}
+	now := time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)
 	held := time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
 	object := []dest.Object{{Key: "github.com/acme/api/2026-10-03/api.bundle"}}
 
@@ -85,6 +86,10 @@ func TestDoctorNeverReachesAWrite(t *testing.T) {
 	}{
 		{name: "locked, holding a retained object", d: readOnlyDest{worm: lockedStatus, page: object, held: dest.RetentionPresent, until: held},
 			observed: "present", detail: "held until 2026-11-02T12:00:00Z"},
+		{name: "locked, holding an object whose lock has ended", d: readOnlyDest{worm: lockedStatus, page: object, held: dest.RetentionPresent, until: time.Date(2026, 7, 4, 0, 0, 0, 0, time.UTC)},
+			observed: "lapsed", detail: "the lock on an object here ended on 2026-07-04T00:00:00Z"},
+		{name: "locked, holding an object whose lock ends now", d: readOnlyDest{worm: lockedStatus, page: object, held: dest.RetentionPresent, until: now},
+			observed: "lapsed", detail: "ended on 2026-10-03T12:00:00Z"},
 		{name: "locked and empty", d: readOnlyDest{worm: lockedStatus},
 			observed: "none", detail: "nothing written here yet"},
 		{name: "locked, an empty first page that says there are more", d: readOnlyDest{worm: lockedStatus, more: true},
@@ -105,7 +110,7 @@ func TestDoctorNeverReachesAWrite(t *testing.T) {
 			t.Run(fmt.Sprintf("%s, worm.require %v", tc.name, require), func(t *testing.T) {
 				d := tc.d
 				d.t = t
-				checks := checkDestination(context.Background(), &d, require, quietLog())
+				checks := checkDestination(context.Background(), &d, require, now, quietLog())
 
 				if d.pages > 1 {
 					t.Errorf("%d pages listed; doctor reads one", d.pages)

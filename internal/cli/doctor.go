@@ -37,8 +37,8 @@ type checkResult struct {
 	// The worm check's answer as data, on that check alone. Its three fields are always there on
 	// it, null when there is nothing to report, and absent from every other check.
 	*WormAnswer
-	// Observed is the retention check's answer as data, on that check alone: present, absent,
-	// unreadable or none.
+	// Observed is the retention check's answer as data, on that check alone: present, lapsed,
+	// absent, unreadable or none.
 	Observed string `json:"observed,omitempty"`
 }
 
@@ -57,7 +57,8 @@ type WormAnswer struct {
 
 // What the retention check's observed field holds. gitdr.doctor/v1.
 const (
-	observedPresent    = "present"    // the store returned a retention for an object here
+	observedPresent    = "present"    // the store returned a retention for an object here, to a date still to come
+	observedLapsed     = "lapsed"     // the store returned one whose date has passed: the lock has ended
 	observedAbsent     = "absent"     // the store said an object here holds none
 	observedUnreadable = "unreadable" // the listing or the read failed, or the store would not say
 	observedNone       = "none"       // the first page of the listing held no object to look at
@@ -149,7 +150,7 @@ func runDoctor(ctx context.Context, args []string) int {
 	if dst, err := doctorDest(ctx, cfg, log); err != nil {
 		add("destination", false, err.Error())
 	} else {
-		checks = append(checks, checkDestination(ctx, dst, cfg.WORM.Require, log)...)
+		checks = append(checks, checkDestination(ctx, dst, cfg.WORM.Require, time.Now(), log)...)
 	}
 
 	return emitDoctor(common.output, checks)
@@ -190,11 +191,12 @@ func doctorDest(ctx context.Context, cfg *config.Config, log *slog.Logger) (dest
 }
 
 // checkDestination asks a destination what it locks and, when it says it locks, reads the
-// retention on an object already there. It never writes, and it reads one page of the listing.
+// retention on an object already there, against now. It never writes, and it reads one page of
+// the listing.
 //
 // No check's detail carries text the store wrote, except an error code of the shape
 // dest.ShapedCode allows. The store's own words go to the log, which is stderr.
-func checkDestination(ctx context.Context, dst dest.Destination, require bool, log *slog.Logger) []checkResult {
+func checkDestination(ctx context.Context, dst dest.Destination, require bool, now time.Time, log *slog.Logger) []checkResult {
 	worm, st := checkWorm(ctx, dst, require, log)
 	checks := []checkResult{worm}
 
@@ -214,7 +216,7 @@ func checkDestination(ctx context.Context, dst dest.Destination, require bool, l
 	 * claim in a signed document, so here it may say what it saw.
 	 */
 	if st.Verdict.Immutable() {
-		if c, ok := checkRetention(ctx, dst, require, log); ok {
+		if c, ok := checkRetention(ctx, dst, require, now, log); ok {
 			checks = append(checks, c)
 		}
 	}
@@ -273,8 +275,9 @@ func knownMode(mode string) *string {
 }
 
 // checkRetention reads the retention on one object already under the destination, and reports
-// false when the destination cannot be asked.
-func checkRetention(ctx context.Context, dst dest.Destination, require bool, log *slog.Logger) (checkResult, bool) {
+// false when the destination cannot be asked. A retain-until that is not after now is a lock that
+// has ended, and is never reported as one that holds.
+func checkRetention(ctx context.Context, dst dest.Destination, require bool, now time.Time, log *slog.Logger) (checkResult, bool) {
 	observer, canObserve := dst.(dest.RetentionObserver)
 	lister, canList := dst.(dest.PageLister)
 	if !canObserve || !canList {
@@ -297,10 +300,15 @@ func checkRetention(ctx context.Context, dst dest.Destination, require bool, log
 		c.Observed, c.Detail = observedNone, "nothing written here yet, so there is no object to check"
 	default:
 		got, until, err := observer.ObserveRetention(ctx, key)
-		switch got {
-		case dest.RetentionPresent:
+		switch {
+		case got == dest.RetentionPresent && until.After(now):
 			c.Observed, c.Detail = observedPresent, "an object here is held until "+until.Format(time.RFC3339)
-		case dest.RetentionAbsent:
+		case got == dest.RetentionPresent:
+			// The store applied a lock and it ran its course. That says the bucket locks what it
+			// is sent, and nothing about this object now: it can be deleted or overwritten.
+			c.Observed = observedLapsed
+			c.Detail = "the lock on an object here ended on " + until.Format(time.RFC3339) + ": the store applied one, and the object is no longer held"
+		case got == dest.RetentionAbsent:
 			// The bucket said it locks and the object holds nothing. This is the failure
 			// the whole gate exists to prevent, and until now nothing could see it.
 			c.Observed, c.OK = observedAbsent, !require

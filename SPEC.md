@@ -1249,7 +1249,8 @@ asked. It has `observed`.
 
 | value | what it means |
 |---|---|
-| `present` | the store returned a retention for an object already under the destination |
+| `present` | the store returned a retention for an object already under the destination, to a date still to come |
+| `lapsed` | the store returned a retention for that object whose date has passed. The store applied a lock and it has ended, so the object is no longer held; the detail names the date. Not a failure, since every lock ends. *Added 2026-10-04: such a lock read `present`* |
 | `absent` | the store said that object holds none. The earned negative of v5 above, and a failed check under `worm.require` |
 | `unreadable` | the listing or the read failed, or the store would not say. On S3 the read needs `s3:GetObjectRetention`, which a create-only key does not have |
 | `none` | the first page of the listing held no object, so there was nothing to look at |
