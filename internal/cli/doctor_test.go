@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -1149,5 +1150,28 @@ func TestDoctorCallsAnEndedLockLapsed(t *testing.T) {
 				t.Errorf("retention ok %v, exit %d; want ok and 0", r.OK, code)
 			}
 		})
+	}
+}
+
+// doctor -only destination runs no git, so it says nothing about git: no git or git-lfs check, and
+// nothing on stderr about the variables git would not get from gitdr's environment, set here as an
+// editor or an IDE sets them.
+func TestDoctorOnlyDestinationSaysNothingAboutGit(t *testing.T) {
+	doctorEnv(t)
+	t.Setenv("GIT_ASKPASS", "/usr/local/bin/askpass")
+	t.Setenv("GIT_EDITOR", "vi")
+	store := newDoctorStore(t)
+	code, out, stderr := runDoctorCLI(context.Background(), t,
+		"-config", bucketConfig(t, store.URL, ""), "-only", "destination", "-output", "json")
+	if code != 0 {
+		t.Fatalf("exit %d\n%s\n%s", code, out, stderr)
+	}
+	for _, name := range decodeDoctor(t, out).names() {
+		if strings.HasPrefix(name, "git") {
+			t.Errorf("doctor -only destination ran the %s check", name)
+		}
+	}
+	if gitWord := regexp.MustCompile(`\bgit\b|GIT_`); gitWord.MatchString(stderr) {
+		t.Errorf("doctor -only destination said something about git on stderr:\n%s", stderr)
 	}
 }

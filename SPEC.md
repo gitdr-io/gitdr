@@ -1279,8 +1279,9 @@ What doctor guarantees about its reads and writes:
 
 `gitdr doctor -only destination` runs the destination's checks and nothing else, which means
 `config` for the destination block, `worm` and `retention`. It needs no source, no git and no
-git-lfs, so a bucket can be checked before anything is connected to back up into it. `-only`
-takes no other value, and any other exits 2.
+git-lfs, so a bucket can be checked before anything is connected to back up into it. It runs no
+git, so it says nothing about git either, on stdout or on stderr. `-only` takes no other value,
+and any other exits 2.
 
 doctor stops its checks after 45 seconds, or after `-timeout`, a duration such as `20s`. `0`
 waits for the checks, and a negative value exits 2. A check that runs out of time ends with the
