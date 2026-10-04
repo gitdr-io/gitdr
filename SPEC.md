@@ -181,6 +181,13 @@ immutability, clone every repository and fail each one at its first upload. Ever
 keeps its meaning: `not-immutable`, and `unknown` for any other reason, warn and proceed unless
 `--require-worm` is set. doctor fails its `worm` check on the same answer (§11).
 
+This holds where the credential can see that a bucket is not there: AWS, Backblaze B2 and MinIO
+answer `NoSuchBucket`. A Cloudflare R2 token scoped to buckets answers `AccessDenied` to every
+request about a bucket outside its scope, a missing one included: the lock question, the listing
+and `HeadBucket` alike. So on R2 a missing bucket reads `unknown` with `AccessDenied`, doctor
+passes it unless `worm.require` is set, and a backup clones each repository and fails it at the
+check before its first write, exit 1.
+
 *Changed 2026-10-04. `gitdr.manifest/v5` and `--output json` are unchanged.*
 
 ### Azure
@@ -1242,7 +1249,9 @@ false, `verdict` stays `unknown` and `code` is `NoSuchBucket`, the detail says t
 exist, and doctor exits 1. A backup stops on the same answer before it copies anything (§4), and
 there is nothing to lock or to write into, so this is not a verdict on what the bucket locks. It
 used to pass, `ok: true` and exit 0, unless `worm.require` was set. *Changed 2026-10-04. The keys
-of `gitdr.doctor/v1` are unchanged.*
+of `gitdr.doctor/v1` are unchanged.* It takes a credential that can see the bucket is missing
+(§4): a Cloudflare R2 token scoped to buckets answers `AccessDenied` instead, and the check reads
+`unknown` with that code and passes unless `worm.require` is set.
 
 The `retention` check is there when the `worm` check says `immutable` and the destination can be
 asked. It has `observed`.
