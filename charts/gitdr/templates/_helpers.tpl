@@ -34,6 +34,7 @@ metadata:
     {{- include "gitdr.labels" . | nindent 4 }}
 spec:
   restartPolicy: {{ .Values.restartPolicy }}
+  terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
   serviceAccountName: {{ include "gitdr.serviceAccountName" . }}
   securityContext:
     {{- toYaml .Values.podSecurityContext | nindent 4 }}

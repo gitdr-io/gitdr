@@ -15,6 +15,10 @@ cronjob:
 
 restartPolicy: Never
 backoffLimit: 2
+# A stopped backup writes its manifest before it exits, which can take 45 seconds after
+# SIGTERM. Kubernetes waits 30 by default and then kills the pod, so the copies already made
+# would go unrecorded.
+terminationGracePeriodSeconds: 90
 
 # gitdr subcommand + flags. Default: a backup run reading the mounted config.
 args:
