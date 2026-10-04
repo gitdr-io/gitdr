@@ -104,7 +104,7 @@ type DestInfo struct {
 	 *
 	 * Only ever lowers a claim. A "present" here does not raise WormVerdict, because one object
 	 * carrying retention proves the store implements the headers and nothing about the rest.
-	 * From v0.1.22 it is read on one object of each write path a run used (observeRetention).
+	 * From v0.1.21 it is read on one object of each write path a run used (observeRetention).
 	 */
 	RetentionObserved string `json:"retentionObserved,omitempty"`
 }

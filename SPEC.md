@@ -294,7 +294,7 @@ one the store will not give a checksum for. A write settled this way records the
 key can be an earlier write's with the same bytes, held to that write's date and mode.
 AWS shows the lock on `HeadObject` only to a key allowed `s3:GetObjectRetention`, and Backblaze
 documents no lock headers on it at all. Where none is shown the write records none. *Changed in
-v0.1.22.*
+v0.1.21.*
 
 An object over 4 GiB is written in parts, because a single PutObject stops at 5 GiB on AWS, B2,
 R2 and Wasabi. Parts are at least 64 MiB, and larger for a larger object so it stays under 9,000
@@ -307,7 +307,7 @@ is sent once, and a lost answer is settled as above. An upload is never aborted:
 run leaves behind is ended by the bucket's lifecycle rule, which `docs/QUICKSTART.md` gives.
 `destination.s3.multipartThreshold` and `destination.s3.partSize`, in bytes from 5 MiB to 5 GiB,
 move the threshold and the smallest part, so a test can write in parts without writing gigabytes.
-*Changed in v0.1.22.*
+*Changed in v0.1.21.*
 
 ## 5. Object storage authentication
 
@@ -412,7 +412,7 @@ or a SAS. See §4, Azure.
   cached bases, so a clone of large files stored as deltas took 1 GiB on 14 CPUs, and takes 297
   MiB on two threads. The settings change how much memory git uses, not the objects, refs or
   deltas it fetches and bundles. gitdr has no setting for them, and as `GIT_CONFIG_*` pairs they
-  outrank any git configuration file. *Added in v0.1.22.*
+  outrank any git configuration file. *Added in v0.1.21.*
 - No telemetry.
 
 ## 7. Restore
@@ -855,7 +855,7 @@ does not say which it is.**
   instruction rather than an answer. The one exception is a write settled after its answer was
   lost or refused (§4): it records what `HeadObject` shows the object at the key held to, or
   `0001-01-01T00:00:00Z` when it shows none, so the field never claims more than the store
-  showed. *Changed in v0.1.22.*
+  showed. *Changed in v0.1.21.*
 
 Both are written into a signed document, which makes the S3 case a claim gitdr has not earned:
 if a store accepted the write and ignored `x-amz-object-lock-mode`, the manifest still names a
@@ -1014,12 +1014,12 @@ the same way and a negative generalises from one sample of that path — while a
 only that this object is retained. Per-object checks would be thousands of extra requests buying
 detection of an anomaly the protocol does not produce.
 
-On S3 from v0.1.22 an object goes in one of two ways: up to the multipart threshold in one
+On S3 from v0.1.21 an object goes in one of two ways: up to the multipart threshold in one
 `PutObject`, and past it in parts, with the lock headers on `CreateMultipartUpload` (§4). A store
 can honour them on one call and not the other, so a run asks, on every backend, about the
 smallest object it wrote, which went in one PUT unless every object went in parts, and the
 largest, which went in parts if any object did. `absent` on either is `absent`; `present` needs
-both; anything else is `not-checked`. *Changed in v0.1.22: a run asked about the first object it
+both; anything else is `not-checked`. *Changed in v0.1.21: a run asked about the first object it
 wrote, a single PUT whenever the first repository was small, so a store that dropped the lock on
 every upload in parts read `present`, and `--require-worm` passed it.*
 
@@ -1039,7 +1039,7 @@ advice.
 Stores say "this object holds nothing" in their own words, and each reads `absent`: AWS and MinIO
 answer `NoSuchObjectLockConfiguration` (a 404 and a 400), and Backblaze B2 answers
 `ObjectLockConfigurationNotFoundError` (a 404). That is the code AWS gives the bucket's lock
-question, and there it keeps its own meaning. *Changed in v0.1.22: B2's answer read
+question, and there it keeps its own meaning. *Changed in v0.1.21: B2's answer read
 `not-checked`, so a B2 object holding no lock passed `--require-worm`.*
 
 `--require-worm` fails on `absent` and passes on `not-checked`, for that reason: an earned
