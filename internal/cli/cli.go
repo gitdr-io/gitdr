@@ -70,6 +70,9 @@ type commonOpts struct {
 	logLevel   string
 	logFormat  string
 	output     string
+	// gitless is set by a command, or a mode of one, that runs no git: nothing is said about
+	// the variables git would not get from gitdr's environment.
+	gitless bool
 }
 
 func registerCommon(fs *flag.FlagSet) *commonOpts {
@@ -97,7 +100,7 @@ func (o *commonOpts) load() (*config.Config, *slog.Logger, error) {
 		cfg.Log.Format = o.logFormat
 	}
 	log := logging.Default(cfg.Log.Level, cfg.Log.Format)
-	if names := gitexec.Withheld(); len(names) > 0 {
+	if names := gitexec.Withheld(); len(names) > 0 && !o.gitless {
 		log.Warn(withheldWarning, "vars", names)
 	}
 	return cfg, log, nil

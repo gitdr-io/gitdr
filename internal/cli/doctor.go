@@ -86,6 +86,7 @@ func runDoctor(ctx context.Context, args []string) int {
 		fmt.Fprintf(os.Stderr, "doctor: -timeout %s is negative\n", *timeout)
 		return 2
 	}
+	common.gitless = destOnly // no git runs, so nothing is said about git's environment
 	cfg, log, err := common.load()
 	if err != nil {
 		// The error goes to stderr and nowhere else: a parse error can quote the file.
