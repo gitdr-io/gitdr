@@ -221,7 +221,30 @@ func markMissingBucket(err error) error {
 // aws_chunked_encoding.go, lines 90-111). AWS takes a chunk of any size; MinIO refuses one over
 // 16 MiB, so no object over 16 MiB could be written to MinIO over TLS. A checksum header already
 // on the request turns the trailer off (the same file, lines 131-139 and 285-290).
+//
+// Only a stream of exactly size bytes is committed. The body goes through an exactReader
+// (exact.go), which passes the artifact's last bytes only once it has seen the stream end there, so
+// a stream that ends short, runs long or fails part way never makes the request whole, and no store
+// commits a request it has not had whole. The checksum reads the artifact through the same reader
+// first and refuses such a stream before a byte is sent; the reader is what holds if the stream
+// changes after that. The length on the wire is size whatever the stream holds: the input's
+// Content-Length replaces the one SetStream measured (service/s3 v1.113.1, serializers.go, lines
+// 8501-8505 and 8607-8609; smithy-go v1.28.2, encoding/httpbinding/encode.go, lines 66-72).
+//
+// Up to v0.1.21 the checksum read size bytes and stopped, and the SDK sent size bytes. A byte past
+// them was found by net/http only once the whole request had gone. Over TLS the payload goes
+// unsigned (aws-sdk-go-v2 v1.47.0, aws/signer/v4/middleware.go, lines 87-88), so the CRC32 gitdr
+// had computed over those same bytes was the only check, and it passed: MinIO committed such a
+// stream's first size bytes and the write was reported done, and an artifact of no bytes was
+// written empty from a stream that had some. Over plain HTTP the SDK signs a SHA-256 it computes by
+// reading the stream to its end (the same file, lines 175-191), and the store refuses a body that
+// does not match it, so there a stream already long when the SDK read it was refused, by accident.
+// Writes are create-only, so in a locked bucket that left an object that was not the artifact at a
+// key no copy could be written to again that day.
 func (b *Backend) PutImmutable(ctx context.Context, key string, r io.Reader, size int64, ret dest.Retention) (dest.PutResult, error) {
+	if size < 0 {
+		return dest.PutResult{}, fmt.Errorf("s3: put %q: a size of %d bytes is not a length", key, size)
+	}
 	// Past the threshold, in parts (multipart.go). Every caller in gitdr hands a file or a byte
 	// slice, both readable at an offset; anything else goes as one PUT.
 	if ra, ok := r.(io.ReaderAt); ok && size > b.multipartThreshold {
@@ -235,10 +258,14 @@ func (b *Backend) PutImmutable(ctx context.Context, key string, r io.Reader, siz
 		return b.putParts(ctx, key, ra, base, size, ret)
 	}
 
+	body, err := exact(r, size)
+	if err != nil {
+		return dest.PutResult{}, fmt.Errorf("s3: put %q: %w", key, err)
+	}
 	in := &awss3.PutObjectInput{
 		Bucket:            aws.String(b.bucket),
 		Key:               aws.String(key),
-		Body:              r,
+		Body:              body,
 		ContentLength:     aws.Int64(size),
 		ChecksumAlgorithm: s3types.ChecksumAlgorithmCrc32,
 	}
@@ -260,7 +287,7 @@ func (b *Backend) PutImmutable(ctx context.Context, key string, r io.Reader, siz
 	}
 
 	// After the existence check, so an object that is refused is not read first.
-	crc, ok, err := crc32Of(r, size)
+	crc, ok, err := crc32Of(body)
 	if err != nil {
 		return dest.PutResult{}, fmt.Errorf("s3: checksum %q: %w", key, err)
 	}
@@ -355,26 +382,28 @@ func (b *Backend) settle(ctx context.Context, key string, size int64, crcs ...st
 	return copyOther, out, nil
 }
 
-// crc32Of is the CRC32 S3 expects of the next size bytes of r, base64 of the big-endian sum, read
-// and then rewound to where r stood.
+// crc32Of is the CRC32 S3 expects of the artifact body carries, base64 of the big-endian sum. body
+// is what exact made of the write's reader, and it is read through to its end, which it gives only
+// where the stream ends at the artifact's size: a stream that is anything else fails here, before a
+// byte is sent. It is then rewound to where it stood.
 //
 // Every caller in gitdr passes a file or a byte slice. A reader that cannot rewind reports no
 // checksum, and the SDK computes it on the way out instead, as a trailer over TLS. That is the
 // path a store limiting chunk size refuses past the limit, and nothing in gitdr takes it.
-func crc32Of(r io.Reader, size int64) (string, bool, error) {
-	rs, ok := r.(io.ReadSeeker)
+func crc32Of(body io.Reader) (string, bool, error) {
+	e, ok := body.(*exactSeeker)
 	if !ok {
 		return "", false, nil
 	}
-	start, err := rs.Seek(0, io.SeekCurrent)
+	start, err := e.Seek(0, io.SeekCurrent)
 	if err != nil {
 		return "", false, err
 	}
 	sum := crc32.NewIEEE()
-	if _, err := io.CopyN(sum, rs, size); err != nil {
+	if _, err := io.Copy(sum, e); err != nil {
 		return "", false, err
 	}
-	if _, err := rs.Seek(start, io.SeekStart); err != nil {
+	if _, err := e.Seek(start, io.SeekStart); err != nil {
 		return "", false, err
 	}
 	return base64.StdEncoding.EncodeToString(sum.Sum(nil)), true, nil

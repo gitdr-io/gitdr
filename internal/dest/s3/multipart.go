@@ -36,6 +36,14 @@ import (
 // Every part carries its own CRC32 in a header, computed before it is sent. Asked for the
 // algorithm alone, the SDK would send each part aws-chunked as a single chunk with the checksum in
 // a trailer, and MinIO refuses a chunk over 16 MiB (see PutImmutable).
+//
+// Only a stream of exactly size bytes becomes the object. Each part is read at its own offset, so
+// the parts hold size bytes and no more, and the store checks each against the CRC32 read before it
+// was sent. A stream that ends short fails the checksum, and one that fails part way fails its part;
+// neither reaches Complete. What the parts cannot show is a stream that runs on past size, so the
+// stream's end is read once the parts are checksummed, and again just before Complete, and a stream
+// that holds a byte there is refused with nothing completed. Up to v0.1.21 nothing looked past size:
+// such a stream's first size bytes were completed into the object and reported written.
 
 const (
 	defaultMultipartThreshold = 4 << 30
@@ -115,8 +123,30 @@ func checksumParts(ctx context.Context, r io.ReaderAt, base int64, plan partPlan
 		}
 		s.parts[i] = part.Sum32()
 	}
+	// The parts are read at their offsets and stop at size, so a stream that runs on past it would
+	// go unseen. It is not the artifact, and it is refused here, before anything is sent.
+	if err := endsAt(r, base+plan.size, plan.size); err != nil {
+		return s, err
+	}
 	s.full = full.Sum32()
 	return s, nil
+}
+
+// endsAt returns nil where r holds nothing at off, the end of an artifact of size bytes, and an
+// error otherwise: one saying r holds more, or whatever kept r from saying it ends there.
+func endsAt(r io.ReaderAt, off, size int64) error {
+	var b [1]byte
+	k, err := r.ReadAt(b[:], off)
+	switch {
+	case k > 0:
+		return fmt.Errorf("the stream holds more than the artifact's %d bytes", size)
+	case errors.Is(err, io.EOF):
+		return nil
+	case err == nil:
+		return errors.New("the stream answered a read at the artifact's end with neither a byte nor an end")
+	default:
+		return err
+	}
 }
 
 // putParts writes size bytes of r, from base, to key in parts.
@@ -149,6 +179,11 @@ func (b *Backend) upload(ctx context.Context, key string, r io.ReaderAt, base in
 		return dest.PutResult{}, false, err
 	}
 	parts, err := b.sendParts(ctx, key, id, r, base, plan, sums)
+	if err == nil {
+		// The parts hold the artifact's bytes. Whether the stream still ends where the artifact does
+		// is read again here, the last moment before Complete makes them the object at the key.
+		err = endsAt(r, base+plan.size, plan.size)
+	}
 	if err != nil {
 		return dest.PutResult{}, false, fmt.Errorf("s3: put %q in %d parts (the upload is left to the bucket's lifecycle rule): %w", key, plan.count, err)
 	}
