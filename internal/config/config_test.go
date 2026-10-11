@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -361,6 +362,45 @@ func TestMaxRateLimitWaitFromYAMLAndEnv(t *testing.T) {
 			}
 			if err := c.Validate(); (err != nil) != tc.wantErr {
 				t.Errorf("Validate = %v, want an error: %v", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+// backup.recopy arrives like any other field, from YAML and then GITDR_BACKUP_RECOPY, env winning.
+// In YAML it is a list. In the environment it is a comma-separated one, as --recopy is: spaces
+// around a name and empty items are dropped, and a variable that is set and empty names nothing,
+// as an empty string does for every other field.
+func TestBackupRecopyFromYAMLAndEnv(t *testing.T) {
+	const yamlDoc = "backup:\n  recopy:\n    - octo/a\n    - acme/platform/api\n"
+	for _, tc := range []struct {
+		name, yaml string
+		env        *string
+		want       []string
+	}{
+		{name: "unset", yaml: "backup:\n  concurrency: 2\n"},
+		{name: "from YAML", yaml: yamlDoc, want: []string{"octo/a", "acme/platform/api"}},
+		{name: "env over YAML", yaml: yamlDoc, env: new(" octo/b, ,acme/x/y,"), want: []string{"octo/b", "acme/x/y"}},
+		{name: "set and empty", yaml: yamlDoc, env: new("")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("GITDR_BACKUP_RECOPY", "")
+			if err := os.Unsetenv("GITDR_BACKUP_RECOPY"); err != nil {
+				t.Fatal(err)
+			}
+			if tc.env != nil {
+				t.Setenv("GITDR_BACKUP_RECOPY", *tc.env)
+			}
+			path := filepath.Join(t.TempDir(), "gitdr.yaml")
+			if err := os.WriteFile(path, []byte(tc.yaml), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			c, err := Load(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !slices.Equal(c.Backup.Recopy, tc.want) {
+				t.Errorf("backup.recopy = %q, want %q", c.Backup.Recopy, tc.want)
 			}
 		})
 	}

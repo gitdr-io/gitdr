@@ -51,6 +51,7 @@ backup:
   concurrency: 4               # repositories backed up in parallel, and artifacts `gitdr verify` reads at once
   resume: true                 # skip repos a manifest records as copied on the run date
   lfs: true                    # fetch Git LFS objects (stored as a separate .lfs.tar artifact)
+  recopy: []                   # repos every run copies even when unchanged, named as the manifest names them; for one run pass --recopy (SPEC §11)
 
 manifest:
   signingKeyPath: ""           # ed25519 private key, PEM (or GITDR_MANIFEST_SIGNING_KEY)

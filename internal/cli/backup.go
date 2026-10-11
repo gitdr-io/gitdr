@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"gitdr.io/gitdr/internal/config"
 	"gitdr.io/gitdr/internal/crypto"
 	"gitdr.io/gitdr/internal/gitexec"
 	"gitdr.io/gitdr/internal/metrics"
@@ -21,6 +22,7 @@ func runBackup(ctx context.Context, args []string) int {
 	requireWORM := fs.Bool("require-worm", false, "fail if the destination is not WORM-immutable (default: warn and proceed)")
 	repo := fs.String("repo", "", "owner/name to back up (overrides config source.repo)")
 	deadlineFlag := fs.String("deadline", "", "RFC 3339 time the run's work stops by; the manifest is still written (default $GITDR_DEADLINE)")
+	recopy := recopyFlag(fs)
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -37,6 +39,7 @@ func runBackup(ctx context.Context, args []string) int {
 	if *repo != "" {
 		cfg.Source.Repo = *repo
 	}
+	cfg.Backup.Recopy = recopyNames(*recopy, cfg.Backup.Recopy)
 	if err := cfg.Validate(); err != nil {
 		log.Error("invalid config", "err", err)
 		return 1
@@ -112,6 +115,33 @@ func runDeadline(flagValue, envValue string, now time.Time) (time.Time, error) {
 		return time.Time{}, fmt.Errorf("%s %s has already passed", from, deadline.UTC().Format(time.RFC3339))
 	}
 	return deadline, nil
+}
+
+// recopyFlag registers --recopy on fs and returns every value it is given, in order. Every one, and
+// not the last as a string flag keeps: a caller that passes one flag per repository would have the
+// others go on relying on the copy that failed, with nothing said.
+func recopyFlag(fs *flag.FlagSet) *[]string {
+	var given []string
+	fs.Func("recopy", "comma-separated repositories, named as the manifest names them, to copy even when unchanged; repeatable (overrides config backup.recopy)", func(v string) error {
+		given = append(given, v)
+		return nil
+	})
+	return &given
+}
+
+// recopyNames is the repositories to copy even when unchanged: the names --recopy was given, each
+// value a comma-separated list, when it names any, and otherwise backup.recopy, which
+// GITDR_BACKUP_RECOPY overrides in the config. The flag replaces the configured list rather than
+// adding to it, as --repo replaces source.repo.
+func recopyNames(given, configured []string) []string {
+	var names []string
+	for _, v := range given {
+		names = append(names, config.SplitList(v)...)
+	}
+	if len(names) == 0 {
+		return configured
+	}
+	return names
 }
 
 // okRepoCount counts repos that ended up protected (backed up now or already present).

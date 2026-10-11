@@ -388,6 +388,11 @@ or a SAS. See §4, Azure.
   (`GITDR_SOURCE_GITHUB_MAXRATELIMITWAIT`, a Go duration, one hour when unset) bounds how long one
   run spends waiting for GitHub's rate limits. It counts the time something is waiting, once, however
   many requests wait together. *Added in v0.1.21.*
+- Copying named repositories again. `gitdr backup --recopy <list>`, or `backup.recopy`
+  (`GITDR_BACKUP_RECOPY`) when the flag is not given, copies the repositories it names even when
+  their refs have not moved, so a copy that failed when it was read back is not relied on until its
+  refresh. A recopy cannot replace a copy made earlier the same UTC date. The rules are in §11.
+  *Added in v0.1.23.*
 - Bounded transfers. gitdr runs git with `http.lowSpeedLimit=1000` and `http.lowSpeedTime=600`,
   so a clone, fetch or `ls-remote` that moves under 1000 bytes a second for ten minutes is
   aborted and its repository fails. Before this, a server that stopped sending while keeping the
@@ -675,6 +680,30 @@ relies on a copy, and a forged entry could name a copy that was never made and k
 repository uncopied, every run green, until the refresh. A signing key rotated since a manifest
 was written fails the check as a forgery does: the next run copies what that manifest recorded,
 once, and a same-day rerun fails by name the repositories copied under the old key that day.
+
+**Copying named repositories again, from v0.1.23.** `gitdr backup --recopy <list>`, or
+`backup.recopy` (`GITDR_BACKUP_RECOPY`) when the flag is not given, names repositories the run
+copies even when their refs have not moved. On the command line and in the environment the list is
+comma-separated. The flag replaces the configured list, and given more than once it takes the names
+from each. A name left in `backup.recopy` or in the environment is copied in full by every run,
+each copy locked like any other, so a repository is named for one run with the flag. Each
+repository is named exactly as the manifest names it, `acme/api`, or `acme/platform/api` for a
+GitLab project in a subgroup. Names are not matched the way `include` and `exclude` are, because a
+pattern that caught more than was meant would write copies nobody can delete. A named repository is
+never skipped as unchanged in that run. It is copied in full under the run's date, through the same
+create-only writes as every copy. Its entry is an ordinary copy and says nothing of the request, and
+the next run relies on it like any other. This is for a copy that failed when it was read back. The
+skip would rely on that copy until the refresh above, up to thirty days later, so whoever verified
+it names the repository in the next run instead. A name the source did not list for the run, a
+repository renamed, deleted or outside the run's filter, is named in a warning, and the run goes on.
+
+A recopy cannot replace a copy made earlier the same UTC date, because the date's keys are
+create-only. With `backup.resume` on, the default, a named repository with objects under the run's
+date gets what it would get without the name: `already backed up for this date` when a manifest
+records a complete copy, and failed by name otherwise. A warning says it can be copied again from
+the next date, by a run that names it again. With `backup.resume` off nothing looks under the date
+first, so the copy is attempted and fails on the keys already there (§4). *Added in v0.1.23. It
+changes neither the manifest nor `--output json`.*
 
 **A stopped backup files its manifest, from v0.1.21.** On SIGTERM or SIGINT, or at its deadline,
 a backup starts no more repositories. The ones in flight are stopped and their git commands

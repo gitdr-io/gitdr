@@ -98,6 +98,9 @@ type backupRun struct {
 	// copies finds the manifest that records a copy under this run's date, for a repository a
 	// same-day rerun finds objects for. See recorded.go.
 	copies *copySearch
+	// recopy is the repositories, by slug, that this run copies even when their refs have not
+	// moved: the ones backup.recopy names that the source listed. See namedForRecopy.
+	recopy map[string]bool
 }
 
 func (r *backupRun) run(ctx context.Context) (*BackupResult, error) {
@@ -153,6 +156,7 @@ func (r *backupRun) run(ctx context.Context) (*BackupResult, error) {
 	for _, repo := range repos {
 		selected[repo.Slug()] = true
 	}
+	r.recopy = r.namedForRecopy(selected)
 	r.previous = r.loadPrevious(work, manifestDir(repos), selected)
 	r.copies = newCopySearch(r.dst, r.pub, r.log, func(slug string) bool { return selected[slug] })
 
@@ -288,6 +292,33 @@ func (r *backupRun) wormCheck(ctx context.Context) error {
 	r.log.Warn("destination is NOT WORM-immutable, backups here can be deleted or overwritten. "+
 		"Strongly recommended: enable object-lock/retention on the bucket. Proceeding anyway.", "details", st.Details)
 	return nil
+}
+
+// namedForRecopy is the repositories backup.recopy names that the source listed for this run, which
+// are copied even when their refs have not moved. A recopy is for a copy that failed as it was read
+// back, which the unchanged skip would otherwise rely on until the refresh, up to thirty days later.
+//
+// A name is the slug as the manifest records it, compared exactly, and not the way include and
+// exclude match: a pattern that caught more than was meant would write copies nobody can delete. A
+// name the source did not list is warned about, by name, and the run goes on. The repository can
+// have been renamed or deleted since its copy, or be outside this run's filter, and failing the
+// backup of every other repository over it would protect nothing.
+func (r *backupRun) namedForRecopy(selected map[string]bool) map[string]bool {
+	named := map[string]bool{}
+	warned := map[string]bool{}
+	for _, name := range r.cfg.Backup.Recopy {
+		name = strings.TrimSpace(name)
+		if name == "" || named[name] || warned[name] {
+			continue
+		}
+		if !selected[name] {
+			warned[name] = true
+			r.log.Warn("a repository named for a recopy is not one the source listed for this run; nothing is copied for it", "repo", name)
+			continue
+		}
+		named[name] = true
+	}
+	return named
 }
 
 // selectRepos enumerates and guards against unbounded fan-out (single-repo milestone).
@@ -507,6 +538,13 @@ func (r *backupRun) finished(e RepoEntry) {
 func (r *backupRun) backupOne(ctx context.Context, repo source.Repo, ret dest.Retention, progress *copyProgress) RepoEntry {
 	if r.cfg.Backup.Resume {
 		if entry, ok := r.resumed(ctx, repo); ok {
+			// A recopy would write this date's keys, and objects are under the date already. The
+			// keys are create-only, so the repository gets what it would get without the name, and
+			// the recopy waits for the next date.
+			if r.recopy[repo.Slug()] {
+				r.log.Warn("a repository named for a recopy already has objects under this run's date, whose keys are create-only; it can be copied again from the next date",
+					"repo", repo.Slug(), "date", r.date)
+			}
 			if entry.Status == StatusFailed {
 				r.log.Error("repo backup failed", "repo", repo.Slug(), "err", entry.Error)
 			} else {
@@ -527,6 +565,12 @@ func (r *backupRun) backupOne(ctx context.Context, repo source.Repo, ret dest.Re
 	current := r.currentRefs(ctx, repo)
 	if prev, ok := r.previous[repo.Slug()]; ok {
 		d := decideUnchanged(prev.refs, current, prev.copiedAt, r.now(), r.retentionWindow())
+		// Named for a recopy: the copy the skip would rely on is not relied on, and the repository
+		// is copied as if its refs had moved, into an ordinary entry the next run relies on.
+		if d.skip && r.recopy[repo.Slug()] {
+			r.log.Info("repo unchanged, but named for a recopy; copying again", "repo", repo.Slug())
+			d = unchangedDecision{}
+		}
 		if d.skip {
 			copiedAt := prev.copiedAt
 			r.log.Info("repo skipped (unchanged)", "repo", repo.Slug(), "reason", d.reason)

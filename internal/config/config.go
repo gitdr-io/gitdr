@@ -122,6 +122,11 @@ type BackupConfig struct {
 	Concurrency int  `yaml:"concurrency"` // parallel repos, and artifacts verify reads at once; default 4
 	Resume      bool `yaml:"resume"`      // skip repos a manifest records as copied on the run date
 	LFS         bool `yaml:"lfs"`         // fetch Git LFS objects; default true
+	// Recopy names repositories the run copies even when their refs have not moved, each exactly
+	// as the manifest names it: owner/name, or group/subgroup/name on GitLab. --recopy and
+	// GITDR_BACKUP_RECOPY take a comma-separated list. A copy made earlier the same UTC date is not
+	// replaced, since its keys are create-only. SPEC §11.
+	Recopy []string `yaml:"recopy"`
 }
 
 // ManifestConfig configures run-manifest signing/verification keys. The signing key
@@ -226,6 +231,7 @@ func applyEnvOverrides(c *Config) {
 	envInt(&c.Backup.Concurrency, "BACKUP_CONCURRENCY")
 	envBool(&c.Backup.Resume, "BACKUP_RESUME")
 	envBool(&c.Backup.LFS, "BACKUP_LFS")
+	envList(&c.Backup.Recopy, "BACKUP_RECOPY")
 
 	envStr(&c.Manifest.SigningKeyPath, "MANIFEST_SIGNINGKEYPATH")
 	envStr(&c.Manifest.PublicKeyPath, "MANIFEST_PUBLICKEYPATH")
@@ -445,4 +451,25 @@ func envBool(dst *bool, key string) {
 			*dst = b
 		}
 	}
+}
+
+// envList reads a comma-separated list (SplitList). Set and empty is an empty list, as it is an
+// empty string for envStr.
+func envList(dst *[]string, key string) {
+	if v, ok := os.LookupEnv(envPrefix + key); ok {
+		*dst = SplitList(v)
+	}
+}
+
+// SplitList splits a comma-separated list, trims the spaces around each item and drops the empty
+// ones, so "a, b," is a and b. A list setting reads its environment variable with it, and the
+// command line flag that sets it does the same, so the two cannot read one value differently.
+func SplitList(s string) []string {
+	var out []string
+	for _, item := range strings.Split(s, ",") {
+		if item = strings.TrimSpace(item); item != "" {
+			out = append(out, item)
+		}
+	}
+	return out
 }
