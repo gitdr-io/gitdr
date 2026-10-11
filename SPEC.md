@@ -272,11 +272,24 @@ MinIO integration test exercises this path).
 | Wasabi | `https://s3.<region>.wasabisys.com` | ✅ | compliance mode, Cohasset-assessed |
 | Backblaze B2 | `https://s3.<region>.backblazeb2.com` | ✅ | Object Lock can be turned on for a new or existing bucket; always versioned; `If-None-Match` answers 501, so gitdr checks each key with `HeadObject` before writing it |
 | MinIO / IDrive E2 | `http(s)://host:9000` | ✅ | self-hosted, create the bucket with object lock |
+| Google Cloud Storage | `https://storage.googleapis.com` | ✅ with Object Retention Lock | an HMAC key; gitdr cannot read Bucket Lock here and reports unknown, see below |
 | Cloudflare R2 | `https://<account>.r2.cloudflarestorage.com` | ❌ | bucket locks, not Object Lock; gitdr cannot read them and reports unknown |
 
 Providers not in this list work too, but verify their Object Lock support before you rely
 on WORM. Credentials are static keys via the standard `AWS_*` env (the SDK default chain).
 Scope them create/put-only.
+
+Google Cloud Storage answers the S3 API at `https://storage.googleapis.com`, with an HMAC key as
+the static key. There `GetObjectLockConfiguration` reports Object Retention Lock and nothing else.
+A bucket with Object Retention Lock verifies as `immutable`. The per-object COMPLIANCE retention
+gitdr sends is applied, Google records it as `Locked`, and it reads back the same. A bucket
+protected only by Bucket Lock reads `unknown`, because the S3 API cannot see Bucket Lock. It
+answers `ObjectLockConfigurationNotFound`, which is not AWS's
+`ObjectLockConfigurationNotFoundError` and says only that Object Retention Lock is off. So
+`--require-worm` fails there, and the native `gcs` destination reads the retention policy instead.
+Lock headers sent to a bucket without Object Retention Lock are rejected with `InvalidRequest`,
+never ignored. gitdr sends them only to a bucket that verified `immutable`. *Verified on real
+buckets with the aws CLI on 2026-10-11.*
 
 Every write carries the object's CRC32 in the `x-amz-checksum-crc32` header, which gitdr
 computes before the upload. AWS and B2 want a checksum on a write under Object Lock. Asked for

@@ -108,9 +108,11 @@ func New(ctx context.Context, opts Options, logger *slog.Logger) (*Backend, erro
 	}, nil
 }
 
-// VerifyWorm probes bucket Object Lock. A missing lock config is reported as not-locked once a
-// listing shows the bucket exists (so the operator can override); other failures, an answer that
-// is not S3's among them, are returned as errors.
+// VerifyWorm probes bucket Object Lock. A missing lock config, answered with S3's
+// ObjectLockConfigurationNotFoundError, is reported as not-locked once a listing shows the bucket
+// exists (so the operator can override). Any other refusal is an unknown verdict, Google's
+// ObjectLockConfigurationNotFound among them, and a failure that is no S3 answer at all is
+// returned as an error.
 func (b *Backend) VerifyWorm(ctx context.Context) (dest.WormStatus, error) {
 	out, err := b.client.GetObjectLockConfiguration(ctx, &awss3.GetObjectLockConfigurationInput{
 		Bucket: aws.String(b.bucket),

@@ -142,6 +142,75 @@ func TestVerifyWormMarksABucketThatDoesNotExist(t *testing.T) {
 	}
 }
 
+// What Google Cloud Storage answers the lock question through its S3 interoperability endpoint,
+// storage.googleapis.com with an HMAC key, as two real buckets answered it on 2026-10-11. The
+// code, the message and the configuration are Google's. The refusal's status is the 404 Google
+// documents for a bucket without object retention.
+const (
+	// A bucket created with Object Retention Lock.
+	googleRetentionLock = `<ObjectLockConfiguration><ObjectLockEnabled>Enabled</ObjectLockEnabled></ObjectLockConfiguration>`
+	// A bucket under a Bucket Lock retention policy, unlocked and of 120 s, without Object
+	// Retention Lock.
+	googleNoRetentionLock = `<Error><Code>ObjectLockConfigurationNotFound</Code>` +
+		`<Message>Object Lock configuration does not exist.</Message></Error>`
+)
+
+// Through S3, Google shows Object Retention Lock and cannot show Bucket Lock, so its no is not an
+// earned negative.
+//
+// Google's ?object-lock reports Object Retention Lock and nothing else, and Google documents that
+// the XML API cannot view a bucket's retention policy, which is what Bucket Lock is. A bucket under
+// a Bucket Lock policy and without Object Retention Lock answered ObjectLockConfigurationNotFound.
+// That says one feature is off and nothing about the policy that may hold the bucket, so it reads
+// unknown with Google's code in Details, and never not-immutable, even where a listing shows the
+// bucket is there. It gets there because the code is not AWS's: AWS's no ends in Error, and it is
+// believed of a bucket that lists (TestVerifyWormAsksWhetherTheBucketExists). --require-worm fails
+// on unknown, and the native gcs destination reads the retention policy instead.
+//
+// A bucket with Object Retention Lock answered Enabled and no default rule. That immutable is
+// earned: Google held the COMPLIANCE retention sent with an object, as Locked, and read it back. It
+// has no mode, because Mode is what the bucket said, and it named none.
+func TestVerifyWormCannotSeeGoogleBucketLockSoItsNoIsNotEarned(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		lock    http.HandlerFunc
+		verdict dest.WormVerdict
+		details string
+		code    string // the code of the refusal behind an unknown verdict, "" for none
+	}{
+		{"Object Retention Lock, which S3 can see", xmlAnswer(http.StatusOK, googleRetentionLock),
+			dest.VerdictImmutable, "Object Lock enabled", ""},
+		{"Bucket Lock only, which S3 cannot see", xmlAnswer(http.StatusNotFound, googleNoRetentionLock),
+			dest.VerdictUnknown, "could not verify immutability: the bucket answered ObjectLockConfigurationNotFound", "ObjectLockConfigurationNotFound"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// The listing answers as a bucket that is there, the condition under which AWS's no is
+			// believed. Google's has to stay unknown on its own terms.
+			store := newReaderStore(t, byCall(tc.lock, xmlAnswer(http.StatusOK, emptyListing), nil))
+			st, err := newReaderBackend(t, store.URL).VerifyWorm(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if st.Verdict == dest.VerdictNotImmutable {
+				t.Errorf("verdict not-immutable (%s): nothing Google answers through S3 earns that, since the S3 API cannot see Bucket Lock", st.Details)
+			}
+			if st.Verdict != tc.verdict || st.Details != tc.details || st.Mode != "" {
+				t.Errorf("VerifyWorm = %q, %q, mode %q; want %q, %q, no mode", st.Verdict.Wire(), st.Details, st.Mode, tc.verdict.Wire(), tc.details)
+			}
+			var api smithy.APIError
+			switch {
+			case tc.code == "" && st.Refusal != nil:
+				t.Errorf("Refusal = %v on an answer", st.Refusal)
+			case tc.code != "" && (!errors.As(st.Refusal, &api) || api.ErrorCode() != tc.code):
+				t.Errorf("Refusal = %v, want Google's %s", st.Refusal, tc.code)
+			}
+			if errors.Is(st.Refusal, dest.ErrNoSuchBucket) {
+				t.Errorf("Refusal %v is marked as a missing bucket", st.Refusal)
+			}
+		})
+	}
+}
+
 // An answer that is not the storage API's is no answer, and never the earned negative. Handed a
 // web page where the lock configuration belongs, the SDK read it as a configuration with nothing
 // in it, and gitdr said "Object Lock not enabled". A 404 page became the code NotFound, which the
