@@ -129,6 +129,12 @@ git fsck --full
 git for-each-ref            # all branches and tags present?
 ```
 
+If the restore ended with `nothing is checked out`, the repository's `HEAD` named a branch that did
+not exist when it was copied, so there was no default branch to check out. Every branch is under
+`refs/remotes/origin/`. Check one out with `git switch <branch>` before `git log`, and its LFS files
+are filled in from the objects the restore put back. *From v0.1.23. Before it, such a repository
+had no complete copy.*
+
 ### Check the LFS files are files
 
 If the repository uses Git LFS, confirm the working tree holds real content and not pointers:

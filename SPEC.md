@@ -72,14 +72,18 @@ pushed to between the two the record named what the source had before the push, 
 held: a drill failed the good copy, and the next run copied the repository again although nothing
 had moved since. *Changed in v0.1.23.*
 
-In a mirror whose `HEAD` names a branch that does not exist, `git bundle create --all HEAD`, run in
-the mirror, takes `HEAD` for the path of the mirror's own `HEAD` file and leaves every commit out:
-it writes a bundle of the tags that point at something other than a commit, and exits 0. Up to
-v0.1.22 such a copy was stored and reported as a success, and `verify` and `restore` passed it;
-only a drill's source join failed it. It now fails the repository, with nothing stored and an
-error that starts `the bundle written from the clone does not declare the refs the clone holds`
-and says `HEAD names a branch that does not exist`. Without such a tag the bundle is empty, git
-refuses to write it, and the repository failed already. *Changed in v0.1.23.*
+The bundle is given `HEAD` only when `HEAD` resolves in the mirror. A repository whose `HEAD` names
+a branch that does not exist is not rare: a default branch renamed or deleted, or an empty default
+beside other branches. In its mirror `git bundle create --all HEAD` takes `HEAD` for the path of the
+mirror's own `HEAD` file and leaves every branch out. With an annotated tag it writes a bundle of
+the annotated tags alone and exits 0. Up to v0.1.22 that copy was stored and reported as a
+success, `verify` and `restore` passed it, and only a drill's source join failed it. Without such a
+tag git refuses to write the empty bundle, and the repository failed every night. Such a
+repository is now copied with every ref and no `HEAD`, which is what its record holds too, since
+the source lists no `HEAD` either. The revisions given to git end with `--`, so it can never again
+read one as a path. A restore of the copy checks no branch out (§7), and its drill compares no
+`HEAD` (§11). The check that the bundle declares what the copy records stays, for whatever git does
+next. *Changed in v0.1.23.*
 
 ### Object key layout
 
@@ -533,6 +537,18 @@ None of this changed the manifest schema or `--output json`. The counts travel i
 output and on `RestoreResult.Refs`, which is `json:"-"`; putting them on the wire is a
 separate, deliberate change.
 
+**A bundle with no `HEAD`.** The copy of a repository whose `HEAD` names a branch that does not
+exist declares every ref and no `HEAD` (§2). The source had no default branch, and a restore does
+not make one up. `git clone` restores every branch under `refs/remotes/origin/*` and every tag, and
+checks no branch out, unless the restoring machine's git falls back to the branch its
+`init.defaultBranch` names and the bundle has that branch. The ref comparison holds the restore to
+every ref the bundle declares, as for any bundle, and with no `HEAD` declared it compares none.
+With nothing checked out, the LFS objects still go into `.git/lfs` and the filters are installed,
+so a branch checked out later gets its files. `git lfs checkout` is not run, since it fails on a
+`HEAD` that does not resolve, and the pointer check has no tree to read. The restore's summary then
+ends with `nothing is checked out`. The manifest and `--output json` are unchanged. *Changed in
+v0.1.23.*
+
 The metadata JSON is for audit and manual reference
 only. The GitHub and GitLab APIs can't recreate original issue/PR numbers, authors,
 timestamps, or cross-references. That's true of every backup tool, and it's documented for
@@ -824,6 +840,11 @@ backup signed. A copy made before keeps the R of a listing taken before its clon
 between that listing and the clone can still fail its source join. *Changed in v0.1.23.
 `gitdr.drill/v1` is unchanged.*
 
+A copy of a repository whose `HEAD` names a branch that does not exist has no `HEAD` in R, since the
+source listed none, and none in B (§2). Neither join compares one, so a restore of it that checks
+nothing out is not a mismatch. A `HEAD` is compared exactly when the copy recorded one. *Changed in
+v0.1.23, before which such a repository had no good copy to drill. `gitdr.drill/v1` is unchanged.*
+
 Both joins report into the same `mismatches` array, and a source failure is prefixed
 `source: `. That prefix is part of `gitdr.drill/v1`, not an implementation detail: it is the
 only thing distinguishing "a ref the bundle declared came back at a different object" from "the
@@ -859,7 +880,8 @@ What it does not prove, stated because the report is read by people who will act
 - **`sourceMatch` is null, not false, for a pre-v3 copy.** "Not recorded" and "did not match"
   are different answers.
 - **Not LFS content off the checked-out tree.** The pointer check reads the working tree at
-  HEAD, so a pointer that exists only on another branch or in history is not checked.
+  HEAD, so a pointer that exists only on another branch or in history is not checked, and with
+  nothing checked out (§7) no LFS file is read at all.
 
 A manifest whose signature does not verify is **refused**, not drilled: evidence about an
 artifact set nobody can attribute to gitdr is worse than no evidence.
@@ -917,7 +939,7 @@ every engine pinned before it.
 ### Object layout (per run)
 
 ```
-{host}/{org}/{repo}/{YYYY-MM-DD}/{repo}.bundle      # git data, git bundle --all HEAD
+{host}/{org}/{repo}/{YYYY-MM-DD}/{repo}.bundle      # git data, every ref, and HEAD when it resolves
 {host}/{org}/{repo}/{YYYY-MM-DD}/{repo}.meta.json   # per-resource metadata dump (gitdr.meta/v1)
 {host}/{org}/{repo}/{YYYY-MM-DD}/{repo}.sha256      # sha256sum line for the bundle
 {host}/{org}/{repo}/{YYYY-MM-DD}/{repo}.lfs.tar     # LFS objects, when present

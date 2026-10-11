@@ -92,6 +92,16 @@ func TestCompareRefs(t *testing.T) {
 			wantDeclared: 2, wantMatched: 2,
 		},
 		{
+			// The copy of a repository whose HEAD named a branch that did not exist: its bundle
+			// declares no HEAD, and a clone of it checks nothing out. There is no HEAD to hold
+			// the restore to, so the unborn one it has is not a mismatch.
+			name:         "a bundle that declares no HEAD is not held to the restore's",
+			declared:     decl("refs/heads/main", oidMain, "refs/heads/feature", oidFeature),
+			restored:     map[string]string{"refs/remotes/origin/main": oidMain, "refs/remotes/origin/feature": oidFeature},
+			head:         "",
+			wantDeclared: 2, wantMatched: 2,
+		},
+		{
 			name:         "object ids compare without regard to case",
 			declared:     decl("refs/heads/main", strings.ToUpper(oidMain), "HEAD", oidMain),
 			restored:     map[string]string{"refs/heads/main": oidMain},

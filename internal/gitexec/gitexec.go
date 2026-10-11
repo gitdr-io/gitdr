@@ -70,10 +70,31 @@ func (g *Git) HasRefs(ctx context.Context, repoDir string) (bool, error) {
 	return strings.TrimSpace(out) != "", nil
 }
 
-// BundleAll bundles every ref plus HEAD inside repoDir so `git clone <bundle>` checks
-// out the default branch on restore.
+// BundleAll bundles every ref in repoDir, and HEAD when it resolves there, so `git clone
+// <bundle>` checks out the default branch on restore.
+//
+// HEAD only when it resolves. Changed in v0.1.23. In a mirror whose HEAD names a branch that does
+// not exist, a default branch renamed or deleted, or an empty default beside other branches, git
+// finds no revision called HEAD and, run in the mirror, takes it for the path of the mirror's own
+// HEAD file. No commit touches that path, so every branch was left out: the bundle held the
+// annotated tags alone, or nothing, which git refuses to write. Such a repository failed every
+// night, and up to v0.1.22 the tags-alone bundle was stored as a good copy. Without HEAD the bundle
+// says what the source says, that there is no default branch: it declares every ref and no HEAD,
+// which is what the copy records of the mirror (MirrorRefs), and a clone of it checks no branch
+// out. Restore and drill take it as it is (SPEC §7).
+//
+// The "--" ends the revisions, so nothing here is ever read as a path: a HEAD that stopped
+// resolving after the check would fail the bundle as a bad revision instead of narrowing it.
 func (g *Git) BundleAll(ctx context.Context, repoDir, bundlePath string) error {
-	return g.run(ctx, repoDir, nil, "bundle", "create", bundlePath, "--all", "HEAD")
+	args := []string{"bundle", "create", bundlePath, "--all"}
+	_, resolves, err := g.head(ctx, repoDir)
+	if err != nil {
+		return err
+	}
+	if resolves {
+		args = append(args, "HEAD")
+	}
+	return g.run(ctx, repoDir, nil, append(args, "--")...)
 }
 
 // scratchBundleRepo creates an empty repository to read a bundle from, and returns it with
@@ -132,8 +153,8 @@ func (g *Git) BundleVerify(ctx context.Context, bundlePath string) error {
 // it points at.
 type BundleRef struct {
 	// Name is a full ref name such as "refs/heads/main" or "refs/tags/v1", or the literal
-	// "HEAD". A bundle written with `bundle create --all HEAD` carries a HEAD entry, which
-	// is not a ref any repository stores under refs/; callers normalise it.
+	// "HEAD". A bundle BundleAll writes carries a HEAD entry when HEAD resolves where it was
+	// written, and it is not a ref any repository stores under refs/; callers normalise it.
 	Name string
 	// OID is the object the bundle declares for Name, exactly as recorded. For an annotated
 	// tag this is the tag object, not the commit it peels to.
@@ -301,31 +322,56 @@ func (g *Git) LsRemote(ctx context.Context, repoURL string, opts Options) (map[s
 //
 // HEAD is read as the object it resolves to, as ls-remote reports it, and left out when it names a
 // branch that does not exist, as ls-remote leaves it out. A repository with no commits reads as no
-// refs at all rather than as an error. `rev-parse --verify --quiet` exits 1 and says nothing for
-// such a HEAD; any other failure is an error.
+// refs at all rather than as an error. BundleAll leaves HEAD out of the bundle on the same
+// condition, so the bundle declares exactly this.
 func (g *Git) MirrorRefs(ctx context.Context, repoDir string) (map[string]string, error) {
 	refs, err := g.ListRefs(ctx, repoDir)
 	if err != nil {
 		return nil, err
 	}
-	out, err := g.output(ctx, repoDir, "rev-parse", "--verify", "--quiet", "HEAD")
-	var exit *exec.ExitError
+	head, resolves, err := g.head(ctx, repoDir)
 	switch {
-	case errors.As(err, &exit) && exit.ExitCode() == 1:
-		return refs, nil
 	case err != nil:
-		return nil, fmt.Errorf("resolve HEAD: %w", err)
-	}
-	head := strings.TrimSpace(out)
-	if !isHex(head) {
+		return nil, err
+	case !resolves:
+		return refs, nil
+	case !isHex(head):
 		return nil, fmt.Errorf("unreadable HEAD %q", head)
 	}
 	refs["HEAD"] = head
 	return refs, nil
 }
 
-// HeadOID resolves repoDir's HEAD to the object it points at. It fails on an unborn HEAD,
-// which for a repository cloned from a non-empty bundle cannot happen.
+// HeadResolves reports whether repoDir's HEAD resolves to an object. It does not in a repository
+// with no commits, in one whose HEAD names a branch that does not exist, and in a clone of a bundle
+// that declares no HEAD, which checks no branch out.
+func (g *Git) HeadResolves(ctx context.Context, repoDir string) (bool, error) {
+	_, resolves, err := g.head(ctx, repoDir)
+	return resolves, err
+}
+
+// head reads repoDir's HEAD: what git prints for the object it resolves to, and whether it resolves
+// at all. It is the one read of HEAD that BundleAll, MirrorRefs and HeadResolves share, so the
+// bundle declares HEAD on exactly the condition the record of the copy holds it.
+//
+// `rev-parse --verify --quiet` exits 1 and says nothing for a HEAD that names a branch that does
+// not exist. Any other failure, such as a directory that is not a repository, is an error, never a
+// HEAD that does not resolve.
+func (g *Git) head(ctx context.Context, repoDir string) (oid string, resolves bool, err error) {
+	out, err := g.output(ctx, repoDir, "rev-parse", "--verify", "--quiet", "HEAD")
+	var exit *exec.ExitError
+	switch {
+	case errors.As(err, &exit) && exit.ExitCode() == 1:
+		return "", false, nil
+	case err != nil:
+		return "", false, fmt.Errorf("resolve HEAD: %w", err)
+	}
+	return strings.TrimSpace(out), true, nil
+}
+
+// HeadOID resolves repoDir's HEAD to the object it points at. It fails on a HEAD that does not
+// resolve, which a clone of a bundle has when the bundle declares no HEAD and no branch was
+// checked out (BundleAll); HeadResolves tells that apart from a failure.
 func (g *Git) HeadOID(ctx context.Context, repoDir string) (string, error) {
 	out, err := g.output(ctx, repoDir, "rev-parse", "--verify", "HEAD")
 	if err != nil {

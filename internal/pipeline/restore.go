@@ -85,6 +85,10 @@ type RestoreResult struct {
 	Refs RefComparison `json:"-"`
 }
 
+// nothingCheckedOut ends a restore's Verification when the clone checked no branch out: every ref
+// came back, and there is no working tree, so no file of it was read.
+const nothingCheckedOut = "nothing is checked out: the bundle declares no HEAD, since the repository's HEAD named a branch that did not exist when it was copied, and its branches are under refs/remotes/origin/"
+
 // Restore fetches a bundle, verifies its checksum against the stored sidecar (and,
 // when a public key is configured, against the signed run-manifest), checks the
 // bundle, and clones it into OutDir. Read-only against the destination.
@@ -204,6 +208,24 @@ func Restore(ctx context.Context, d RestoreDeps, req RestoreRequest) (*RestoreRe
 			bundleKey, refs.Matched, refs.Declared, len(refs.Mismatches), refs.Mismatches[0])
 	}
 
+	// Whether the clone checked a branch out. Changed in v0.1.23.
+	//
+	// A bundle declares no HEAD when the repository's HEAD named a branch that did not exist when
+	// it was copied (gitexec.BundleAll): there was no default branch, and the restore does not make
+	// one up. `git clone` then checks no branch out, or, in the git versions that fall back to it,
+	// the one this machine's init.defaultBranch names when the bundle has it. Either way every ref
+	// came back, which is what the comparison above holds the restore to, and the HEAD it has is
+	// not compared, since the bundle declares none. A drill holds the restore to the copy's record
+	// the same way, and that has no HEAD either.
+	//
+	// With nothing checked out there is no tree for the LFS files to go into, or for the pointer
+	// check to read: the objects are restored and the filters installed, so a branch checked out
+	// later gets its files from them, and the restore says that nothing is checked out.
+	checkedOut, err := d.Git.HeadResolves(ctx, req.OutDir)
+	if err != nil {
+		return nil, fmt.Errorf("read the restored HEAD: %w", err)
+	}
+
 	// LFS: if a tar artifact exists for this date, restore the objects and check out.
 	objs, listErr := d.Dest.List(ctx, lfsKey)
 	lfsStored := listErr == nil && len(objs) > 0
@@ -257,8 +279,12 @@ func Restore(ctx context.Context, d RestoreDeps, req RestoreRequest) (*RestoreRe
 			if err := d.Git.LFSInstallLocal(ctx, req.OutDir); err != nil {
 				return nil, fmt.Errorf("lfs install: %w", err)
 			}
-			if err := d.Git.LFSCheckout(ctx, req.OutDir); err != nil {
-				return nil, fmt.Errorf("lfs checkout: %w", err)
+			// Not with nothing checked out: there are no files to fill in, and `git lfs
+			// checkout` fails on a HEAD that does not resolve, "Git can't resolve ref".
+			if checkedOut {
+				if err := d.Git.LFSCheckout(ctx, req.OutDir); err != nil {
+					return nil, fmt.Errorf("lfs checkout: %w", err)
+				}
 			}
 
 			// Then read the working tree back rather than trusting the exit code, for the
@@ -325,6 +351,9 @@ func Restore(ctx context.Context, d RestoreDeps, req RestoreRequest) (*RestoreRe
 	// ref comparison runs either way, so with no key it is still a real proof — of the
 	// restore against an unauthenticated bundle, which is what its wording says.
 	res.Verification = integrity + "; " + refs.Summary(checks != nil)
+	if !checkedOut {
+		res.Verification += "; " + nothingCheckedOut
+	}
 	if checks == nil {
 		log.Warn("restore was not verified against the signed manifest; set manifest.publicKeyPath to verify restores",
 			"checked", res.Verification)

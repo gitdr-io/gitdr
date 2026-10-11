@@ -54,6 +54,11 @@ import (
 // this join (copiedrefs.go). For such a copy the second join holds the restore to the record the
 // backup signed. A copy made before keeps the R of a listing taken before the clone.
 //
+// A copy of a repository whose HEAD named a branch that did not exist has no HEAD in R, as the
+// source listed none, and none in B (gitexec.BundleAll), so neither join compares one, and a clone
+// of it that checks nothing out is not a mismatch: HEAD is compared exactly when the copy recorded
+// it. Changed in v0.1.23, before which such a repository had no good copy to drill.
+//
 // # What it does not prove
 //
 // Not that the repository's *content* is what somebody remembers. A commit hash covers the

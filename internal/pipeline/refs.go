@@ -169,7 +169,9 @@ func CompareRestoredRefs(ctx context.Context, g *gitexec.Git, bundlePath, repoDi
 //     It is checked instead against what the restored repository's HEAD resolves to, which
 //     is what proves the restore checked out the history the bundle says it should. Verified
 //     against a detached-HEAD source and a tag-only repository, where HEAD is the only thing
-//     tying the restore to the right commit.
+//     tying the restore to the right commit. A bundle that declares no HEAD, the copy of a
+//     repository whose HEAD named a branch that did not exist, holds the restore to none, and
+//     the HEAD a clone of it has, unborn or a branch git chose, is not compared.
 //   - Any other namespace is Unreferenced when absent, for the reason given on that field.
 //     When present it must still match: if a restore ever does materialise these, a wrong
 //     object there is a failure, and this check upgrades itself the day that changes.

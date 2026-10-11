@@ -13,9 +13,9 @@ import (
 // The refs a copy records, and what the clone and the bundle are held to.
 //
 // A copy records the refs of the mirror its bundle is written from, read back once the clone is
-// done: every ref, and HEAD, the shape `git ls-remote` gives. They are the advertisement the clone
-// itself received and what the bundle declares, and the next run compares a listing of the source
-// with them as they are (unchanged.go).
+// done: every ref, and HEAD when it resolves, the shape `git ls-remote` gives. They are the
+// advertisement the clone itself received and what the bundle declares, and the next run compares a
+// listing of the source with them as they are (unchanged.go).
 //
 // Up to v0.1.22 a copy recorded the listing that decides whether to copy at all, taken before the
 // clone. A busy repository is pushed to between the two most nights once its clone takes hours, and
@@ -86,13 +86,13 @@ func (r *backupRun) cloneHolds(ctx context.Context, repo source.Repo, cloneURL s
 // every one at the same object and nothing else, so what the record names is what a restore of the
 // bundle gives back.
 //
-// git does not always write what it is asked to. In a mirror whose HEAD names a branch that does not
-// exist, `git bundle create --all HEAD` finds no revision called HEAD and, run in the mirror, takes it
-// for the path of the mirror's own HEAD file. No commit touches that path, so every commit is left
-// out, the bundle holds only the tags that point at something other than a commit, and git exits 0.
-// Up to v0.1.22 that copy was stored as a good one: verify and restore pass such a bundle, which
-// restores to what it declares, and only a drill compared it with the source. Without such a tag the
-// bundle is empty, and git refuses to write it.
+// The bundle is held to the record whatever git was asked to write, because git has not always
+// written what it was asked to. In a mirror whose HEAD named a branch that did not exist, `git bundle
+// create --all HEAD` took HEAD for the path of the mirror's own HEAD file and left every branch out,
+// and git exited 0 with the annotated tags alone in the bundle. Up to v0.1.22 that copy was stored
+// as a good one: verify and restore pass such a bundle, which restores to what it declares, and only
+// a drill compared it with the source. BundleAll now leaves HEAD out there (SPEC §2), and this is
+// what refuses the next surprise of that kind before anything is written.
 func (r *backupRun) bundleHolds(ctx context.Context, bundlePath string, copied map[string]string) error {
 	heads, err := r.git.BundleHeads(ctx, bundlePath)
 	if err != nil {
@@ -133,9 +133,6 @@ func (r *backupRun) bundleHolds(ctx context.Context, bundlePath string, copied m
 	}
 	if len(extra) > 0 {
 		what = append(what, "it declares "+strings.Join(firstN(extra, 3), ", ")+", which the clone does not hold")
-	}
-	if _, ok := copied[headRef]; !ok && len(lacks) > 0 {
-		what = append(what, "HEAD names a branch that does not exist")
 	}
 	return fmt.Errorf("the bundle written from the clone does not declare the refs the clone holds: %s", strings.Join(what, "; "))
 }
