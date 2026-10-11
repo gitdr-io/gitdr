@@ -168,7 +168,7 @@ func count(n int64, unit string) string {
 // internal/gensupport/media.go, lines 121-133, and resumable.go, lines 304-310 (the object is
 // ended only on io.EOF itself).
 //
-// Up to v0.1.22 size was not read. A stream that ended short or ran long was stored as it was and
+// Up to v0.1.21 size was not read. A stream that ended short or ran long was stored as it was and
 // reported written, and a failed read was followed by Close, which committed what had been read.
 // Writes are create-only, so in a locked bucket either left an object that was not the artifact,
 // held for the bucket's period, at a key no copy could be written to again that day.
