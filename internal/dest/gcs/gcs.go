@@ -147,11 +147,47 @@ func count(n int64, unit string) string {
 
 // PutImmutable creates key. Create-only via the DoesNotExist precondition; immutability
 // is enforced by the bucket's locked retention policy. Never overwrites, never deletes.
-func (b *Backend) PutImmutable(ctx context.Context, key string, r io.Reader, _ int64, _ dest.Retention) (dest.PutResult, error) {
-	obj := b.bucket.Object(key).If(storage.Conditions{DoesNotExist: true})
-	w := obj.NewWriter(ctx)
-	if _, err := io.Copy(w, r); err != nil {
-		_ = w.Close()
+//
+// Only a stream of exactly size bytes is committed, and only Close commits it. Close ends the
+// writer's pipe with io.EOF, and on that end the library's upload sends what it has read as the
+// whole object: one request below its 16 MiB chunk, and the last chunk of a resumable session from
+// there up. So Close comes only after the stream has ended at size. On any error the upload is
+// abandoned instead, by cancelling the context the writer was made with, which is how the library
+// says to stop writing without saving the data. The writer then closes its pipe with the
+// context's error, so the upload never reads an end and sends nothing that ends the object, and a
+// request in flight is stopped. Close is not called after the cancel either: it would close the
+// same pipe with io.EOF, and the upload reads whichever close came first. Nothing is sent to delete
+// or cancel anything. A request that never completed is no object, nor is a resumable session that
+// never got its last chunk, which Google expires a week after it began.
+//
+// From the pinned sources. cloud.google.com/go/storage v1.68.0: storage.go, lines 1269-1270 and
+// 1280-1281 (NewWriter: no object until Close, and cancel to stop without saving); writer.go,
+// lines 398-437 (Close) and 522-547 (the cancel closes the pipe with its error, and
+// CloseWithError is deprecated for it); http_client.go, lines 1123-1131 and 1164-1250 (the pipe,
+// and the upload that reads it under the same context). google.golang.org/api v0.298.0:
+// internal/gensupport/media.go, lines 121-133, and resumable.go, lines 304-310 (the object is
+// ended only on io.EOF itself).
+//
+// Up to v0.1.22 size was not read. A stream that ended short or ran long was stored as it was and
+// reported written, and a failed read was followed by Close, which committed what had been read.
+// Writes are create-only, so in a locked bucket either left an object that was not the artifact,
+// held for the bucket's period, at a key no copy could be written to again that day.
+func (b *Backend) PutImmutable(ctx context.Context, key string, r io.Reader, size int64, _ dest.Retention) (dest.PutResult, error) {
+	if size < 0 {
+		return dest.PutResult{}, fmt.Errorf("gcs: put %q: a size of %d bytes is not a length", key, size)
+	}
+	upload, abandon := context.WithCancel(ctx)
+	defer abandon()
+	w := b.bucket.Object(key).If(storage.Conditions{DoesNotExist: true}).NewWriter(upload)
+	sent := &exactReader{r: r, size: size}
+	_, err := io.Copy(w, sent)
+	// Unreachable while io.Copy ends without an error only on the io.EOF exactReader gives at size.
+	// It stays because Close, below, commits, and this is the last place to refuse.
+	if err == nil && sent.n != size {
+		err = fmt.Errorf("%d bytes were read, and the artifact is %d", sent.n, size)
+	}
+	if err != nil {
+		abandon()
 		return dest.PutResult{}, fmt.Errorf("gcs: put %q: %w", key, err)
 	}
 	if err := w.Close(); err != nil {
@@ -159,6 +195,56 @@ func (b *Backend) PutImmutable(ctx context.Context, key string, r io.Reader, _ i
 	}
 	a := w.Attrs()
 	return dest.PutResult{Key: key, ETag: a.Etag, Size: a.Size, RetainUntil: a.RetentionExpirationTime}, nil
+}
+
+// exactReader passes r on as the artifact of size bytes it is meant to be, and counts what it
+// passes. PutImmutable commits only when io.Copy ends without an error, which io.Copy does only
+// when its source says io.EOF, so this says io.EOF only where r ends at exactly size. It says
+// io.EOF itself there, as io.Copy compares it, when r's end came wrapped in another error. A
+// stream that ends sooner, or has a byte past size, ends in an error that is no end, and the
+// upload is abandoned with nothing committed.
+//
+// Nothing past size is passed on. To know that r ends there, it reads one byte more. io.Copy reads
+// it from one goroutine.
+type exactReader struct {
+	r    io.Reader
+	size int64
+	n    int64
+	err  error // how the stream ended, given again to every read after it
+}
+
+func (e *exactReader) Read(p []byte) (int, error) {
+	if e.err != nil || len(p) == 0 {
+		return 0, e.err
+	}
+	if e.n == e.size {
+		var past [1]byte
+		k, err := e.r.Read(past[:])
+		switch {
+		case k > 0:
+			e.err = fmt.Errorf("the stream holds more than the artifact's %d bytes", e.size)
+		case err == nil:
+			return 0, nil
+		case errors.Is(err, io.EOF):
+			e.err = io.EOF
+		default:
+			e.err = err
+		}
+		return 0, e.err
+	}
+	if rest := e.size - e.n; int64(len(p)) > rest {
+		p = p[:rest]
+	}
+	k, err := e.r.Read(p)
+	e.n += int64(k)
+	if errors.Is(err, io.EOF) {
+		err = io.EOF
+		if e.n < e.size {
+			err = fmt.Errorf("the stream ended after %d of the artifact's %d bytes", e.n, e.size)
+		}
+	}
+	e.err = err
+	return k, err
 }
 
 // List returns objects under prefix (read-only).
