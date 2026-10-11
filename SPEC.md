@@ -250,6 +250,11 @@ Blobs are uploaded in 1 MiB blocks until a blob would need more than Azure's 50,
 Azure's limit of about 190.7 TiB. Up to v0.1.20 every blob went in 1 MiB blocks, and one over
 48.8 GiB failed after all of it had been sent. *Changed in v0.1.21.*
 
+A blob is committed only from a stream of exactly the artifact's size. One that ends sooner or
+runs longer fails the write before anything is committed, so the key stays free for that day's
+next copy. Up to v0.1.22 such a stream was committed before anything compared its size.
+*Changed in v0.1.23.*
+
 After a write, on a version-level container, gitdr reads the first blob's policy back. A blob
 that carries none is the earned negative of v5. Blobs under a container-level policy never carry
 one, however locked the container is, so there it records `not-checked`.

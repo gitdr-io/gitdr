@@ -422,6 +422,11 @@ func isLoopback(host string) bool {
 //
 // The size recorded is what was read from r and committed, and it has to be size: a stream that ran
 // short or long is not the artifact that was checksummed. Up to v0.1.20 it recorded 0 for every blob.
+//
+// A stream that runs short or long fails the upload before its commit, so it never becomes the blob
+// at the key, and the key stays free for the artifact. Up to v0.1.22 it was committed before anything
+// compared its size, which in a locked container left a blob that was not the artifact, held for the
+// container's period, at a key no copy could be written to again that day.
 func (b *Backend) PutImmutable(ctx context.Context, key string, r io.Reader, size int64, _ dest.Retention) (dest.PutResult, error) {
 	maxBlocks := b.maxBlocks
 	if maxBlocks <= 0 {
@@ -432,7 +437,7 @@ func (b *Backend) PutImmutable(ctx context.Context, key string, r io.Reader, siz
 		return dest.PutResult{}, fmt.Errorf("azure: put %q: %w", key, err)
 	}
 	etagAny := azcore.ETagAny
-	sent := &countingReader{r: r}
+	sent := &exactReader{r: r, size: size}
 	_, err = b.client.UploadStream(ctx, b.container, key, sent, &azblob.UploadStreamOptions{
 		BlockSize: blockSize,
 		AccessConditions: &blob.AccessConditions{
@@ -442,6 +447,8 @@ func (b *Backend) PutImmutable(ctx context.Context, key string, r io.Reader, siz
 	if err != nil {
 		return dest.PutResult{}, fmt.Errorf("azure: put %q: %w", key, err)
 	}
+	// Unreachable while the upload commits only on io.EOF, which exactReader gives only at size. It
+	// stays for an SDK that would commit on anything else.
 	if sent.n != size {
 		return dest.PutResult{}, fmt.Errorf("azure: put %q: %d bytes were stored, and the artifact is %d", key, sent.n, size)
 	}
@@ -473,16 +480,49 @@ func blockSizeFor(size int64, maxBlocks int) (int64, error) {
 	return max(1, (perBlock+mib-1)/mib) * mib, nil
 }
 
-// countingReader counts what is read through it. The upload reads its source from one goroutine.
-type countingReader struct {
-	r io.Reader
-	n int64
+// exactReader passes r on as the artifact of size bytes it is meant to be, and counts what it
+// passes. The upload commits when its source says io.EOF and on no other error, so this says io.EOF
+// only where r ends at exactly size. A stream that ends sooner, or has a byte past size, ends in an
+// error instead, and the upload stops with nothing committed. Microsoft documents that the blocks
+// it staged are discarded at the key's next commit, or a week after the last one staged there.
+//
+// Nothing past size is passed on. To know that r ends there, it reads one byte more. The upload
+// reads its source from one goroutine.
+type exactReader struct {
+	r    io.Reader
+	size int64
+	n    int64
+	err  error // how the stream ended, given again to every read after it
 }
 
-func (c *countingReader) Read(p []byte) (int, error) {
-	n, err := c.r.Read(p)
-	c.n += int64(n)
-	return n, err
+func (e *exactReader) Read(p []byte) (int, error) {
+	if e.err != nil || len(p) == 0 {
+		return 0, e.err
+	}
+	if e.n == e.size {
+		var past [1]byte
+		k, err := e.r.Read(past[:])
+		switch {
+		case k > 0:
+			e.err = fmt.Errorf("the stream holds more than the artifact's %d bytes", e.size)
+		case err == nil:
+			return 0, nil
+		default:
+			e.err = err
+		}
+		return 0, e.err
+	}
+	if rest := e.size - e.n; int64(len(p)) > rest {
+		p = p[:rest]
+	}
+	k, err := e.r.Read(p)
+	e.n += int64(k)
+	// errors.Is, as the upload asks: an end wrapped in another error is still an end it commits on.
+	if errors.Is(err, io.EOF) && e.n < e.size {
+		err = fmt.Errorf("the stream ended after %d of the artifact's %d bytes", e.n, e.size)
+	}
+	e.err = err
+	return k, err
 }
 
 // List returns blobs under prefix (read-only).

@@ -15,6 +15,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -22,6 +23,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"testing/iotest"
 	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob"
@@ -237,6 +239,73 @@ func TestAzuriteWritesABlobThatNeedsLargerBlocks(t *testing.T) {
 	}
 }
 
+// A stream that ends before the artifact's size, or holds more than it, is not the artifact that
+// was checksummed, and it must not become the blob at the key. Up to v0.1.22 the upload committed
+// whatever the stream held before anything compared its size: in a locked container that is a blob
+// nobody can remove, at a key no copy can be written to again that day. The upload now stops before
+// its commit, and the artifact itself, written next, finds the key free.
+//
+// Below a block the blob goes in one Put Blob, and from a block up in Put Block List. Each is a
+// commit, so each is tried.
+func TestAzuriteCommitsNothingFromAStreamOfAnotherSize(t *testing.T) {
+	cs := connectionString(t)
+	ctx := context.Background()
+	b := container(t, cs, "gitdr-length")
+
+	const mib = 1 << 20
+	for _, tc := range []struct {
+		name         string
+		size, stream int
+		wrappedEnd   bool // the stream's end comes as an error wrapping io.EOF
+	}{
+		{"one byte short, in one request", 100, 99, false},
+		{"one byte over, in one request", 100, 101, false},
+		{"nothing, for an artifact that has bytes", 10, 0, false},
+		{"bytes, for an artifact that has none", 0, 10, false},
+		{"a block short, in blocks", 3*mib + 5, 2 * mib, false},
+		{"a block over, in blocks", 2 * mib, 3 * mib, false},
+		{"a block short, its end wrapped in an error", 3*mib + 5, 2 * mib, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			data := make([]byte, max(tc.size, tc.stream))
+			if _, err := rand.Read(data); err != nil {
+				t.Fatal(err)
+			}
+			var stream io.Reader = bytes.NewReader(data[:tc.stream])
+			if tc.wrappedEnd {
+				stream = io.MultiReader(stream, iotest.ErrReader(fmt.Errorf("the pipe closed: %w", io.EOF)))
+			}
+			key := uniqueKey(t, "length.bundle")
+			if _, err := b.PutImmutable(ctx, key, stream, int64(tc.size), dest.Retention{}); err == nil {
+				t.Fatalf("a stream of %d bytes was stored as the %d-byte artifact", tc.stream, tc.size)
+			}
+			if objs, err := b.List(ctx, key); err != nil || len(objs) != 0 {
+				t.Fatalf("after the refusal the key holds %+v (%v), want nothing", objs, err)
+			}
+
+			res, err := b.PutImmutable(ctx, key, bytes.NewReader(data[:tc.size]), int64(tc.size), dest.Retention{})
+			if err != nil {
+				t.Fatalf("the artifact itself, written next, was refused: %v", err)
+			}
+			if res.Size != int64(tc.size) {
+				t.Errorf("put recorded %d bytes, want %d", res.Size, tc.size)
+			}
+			rc, err := b.Get(ctx, key)
+			if err != nil {
+				t.Fatalf("get: %v", err)
+			}
+			got, err := io.ReadAll(rc)
+			_ = rc.Close()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(got, data[:tc.size]) {
+				t.Errorf("the blob read back is %d bytes and not the %d-byte artifact", len(got), tc.size)
+			}
+		})
+	}
+}
+
 // The block size at Azure's real limits: 50,000 blocks, each at most 4000 MiB.
 func TestBlockSizeKeepsEveryBlobWithinTheBlockLimit(t *testing.T) {
 	const mib = 1 << 20
@@ -288,6 +357,74 @@ func TestBlockSizeKeepsEveryBlobWithinTheBlockLimit(t *testing.T) {
 	}
 }
 
+// The upload commits when its source says io.EOF, so exactReader may say it only where the stream
+// ends at the artifact's size, however the stream hands its bytes over, and never passes on a byte
+// past size. Read here as the SDK reads: into whole blocks, each until it is full or a read fails,
+// where an error that comes with a full block is dropped and has to come again on the next read.
+func TestExactReaderEndsOnlyWhereTheArtifactDoes(t *testing.T) {
+	data := []byte("0123456789abcdefghijklmnopqrstuv")
+	readBlock := func(r io.Reader, block []byte) (n int, err error) {
+		for n < len(block) && err == nil {
+			var k int
+			k, err = r.Read(block[n:])
+			n += k
+		}
+		if n == len(block) {
+			err = nil
+		}
+		return n, err
+	}
+	sources := []struct {
+		name string
+		wrap func(io.Reader) io.Reader
+	}{
+		{"as it is", func(r io.Reader) io.Reader { return r }},
+		{"a byte at a time", iotest.OneByteReader},
+		{"half of each read", iotest.HalfReader},
+		{"its end with its last bytes", iotest.DataErrReader},
+		// A read that ends in an error wrapping io.EOF, which the upload commits on as well.
+		{"an end wrapped in an error", func(r io.Reader) io.Reader {
+			return io.MultiReader(r, iotest.ErrReader(fmt.Errorf("the pipe closed: %w", io.EOF)))
+		}},
+	}
+	for _, src := range sources {
+		// Blocks are 4 bytes. An artifact of 19 ends inside one, as nearly every real artifact
+		// does, so the last read asks for more than is left of it. A 16-byte stream for 20 ends on
+		// a full block, so an end that comes with its last bytes is dropped there and has to be
+		// said again.
+		for _, tc := range []struct{ size, stream int }{
+			{20, 20}, {19, 19}, {8, 8}, {0, 0},
+			{20, 19}, {19, 18}, {8, 7}, {20, 16}, {20, 0},
+			{20, 21}, {19, 20}, {8, 9}, {8, 20}, {0, 1},
+		} {
+			e := &exactReader{r: src.wrap(bytes.NewReader(data[:tc.stream])), size: int64(tc.size)}
+			var got []byte
+			var err error
+			for err == nil {
+				block := make([]byte, 4)
+				var n int
+				n, err = readBlock(e, block)
+				got = append(got, block[:n]...)
+			}
+			what := fmt.Sprintf("%s: a %d-byte stream for a %d-byte artifact", src.name, tc.stream, tc.size)
+			if len(got) > tc.size || e.n != int64(len(got)) {
+				t.Errorf("%s passed on %d bytes and counted %d", what, len(got), e.n)
+			}
+			ended := errors.Is(err, io.EOF)
+			if tc.stream == tc.size && (!ended || !bytes.Equal(got, data[:tc.size])) {
+				t.Errorf("%s gave %q, %v; want the artifact and io.EOF", what, got, err)
+			}
+			if tc.stream != tc.size && ended {
+				t.Errorf("%s ended in %v, which the upload would commit", what, err)
+			}
+		}
+	}
+
+	if err := iotest.TestReader(&exactReader{r: bytes.NewReader(data), size: int64(len(data))}, data); err != nil {
+		t.Error(err)
+	}
+}
+
 // TestAzuriteCreateOnly is the one that matters. Invariant: a backup destination never
 // overwrites. The backend enforces it with If-None-Match: *, and until now nothing
 // anywhere proved that condition was actually being sent — an upload that silently
@@ -317,6 +454,57 @@ func TestAzuriteCreateOnly(t *testing.T) {
 	_ = rc.Close()
 	if !bytes.Equal(got, first) {
 		t.Fatalf("stored bytes changed after a refused overwrite: got %q want %q", got, first)
+	}
+}
+
+// A blob of a block or more is staged and then committed with Put Block List, the request every
+// blob past 48.8 GiB ends in, and If-None-Match has to ride on that request as well. The test
+// above writes a blob small enough for one Put Blob and proves only that one. Staging carries no
+// condition, so the commit is the only place the refusal can happen.
+func TestAzuriteCreateOnlyInBlocks(t *testing.T) {
+	cs := connectionString(t)
+	ctx := context.Background()
+	const name = "gitdr-createonly"
+	b := container(t, cs, name)
+
+	const mib = 1 << 20
+	first, second := make([]byte, 2*mib+1), make([]byte, 3*mib)
+	for _, data := range [][]byte{first, second} {
+		if _, err := rand.Read(data); err != nil {
+			t.Fatal(err)
+		}
+	}
+	key := uniqueKey(t, "immutable.bundle")
+	if _, err := b.PutImmutable(ctx, key, bytes.NewReader(first), int64(len(first)), dest.Retention{}); err != nil {
+		t.Fatalf("first put: %v", err)
+	}
+	// In blocks, or this proves the Put Blob path a second time.
+	raw, err := azblob.NewClientFromConnectionString(cs, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	blocks, err := raw.ServiceClient().NewContainerClient(name).NewBlockBlobClient(key).GetBlockList(ctx, blockblob.BlockListTypeCommitted, nil)
+	if err != nil {
+		t.Fatalf("block list: %v", err)
+	}
+	if n := len(blocks.CommittedBlocks); n < 2 {
+		t.Fatalf("the first blob was committed in %d blocks, and this test is about Put Block List", n)
+	}
+
+	if _, err := b.PutImmutable(ctx, key, bytes.NewReader(second), int64(len(second)), dest.Retention{}); err == nil {
+		t.Fatal("second put to the same key succeeded; the destination is not create-only")
+	}
+	rc, err := b.Get(ctx, key)
+	if err != nil {
+		t.Fatalf("get after refused overwrite: %v", err)
+	}
+	got, err := io.ReadAll(rc)
+	_ = rc.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, first) {
+		t.Fatalf("stored bytes changed after a refused overwrite: %d bytes, and the original is %d", len(got), len(first))
 	}
 }
 
