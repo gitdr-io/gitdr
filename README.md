@@ -106,12 +106,37 @@ New here? Start with [`docs/QUICKSTART.md`](./docs/QUICKSTART.md). The artifacts
 - Static binaries on the [Releases](https://github.com/gitdr-io/gitdr/releases) page, `linux/amd64` and `linux/arm64`, with checksums and cosign signatures
 - Helm chart `oci://ghcr.io/gitdr-io/charts/gitdr`
 
+### Verifying a release
+
 Everything ships signed with cosign (keyless) and carries an SBOM. Binaries also carry build
 provenance, so you can check a download really came from this repo's release workflow before
 you trust it:
 
 ```
 gh attestation verify gitdr_*_linux_amd64.tar.gz --repo gitdr-io/gitdr
+```
+
+With cosign, check the signature on `checksums.txt`, then the archive against it. Name the
+release workflow and the tag exactly: a pattern that matches only the repository also accepts
+certificates issued to its other workflows.
+
+```
+VERSION=0.1.22
+ID="https://github.com/gitdr-io/gitdr/.github/workflows/release.yml@refs/tags/v$VERSION"
+cosign verify-blob checksums.txt \
+  --certificate checksums.txt.pem --signature checksums.txt.sig \
+  --certificate-identity "$ID" \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+sha256sum --ignore-missing -c checksums.txt
+```
+
+The image and the chart are signed by the same workflow:
+
+```
+cosign verify ghcr.io/gitdr-io/gitdr:$VERSION \
+  --certificate-identity "$ID" --certificate-oidc-issuer https://token.actions.githubusercontent.com
+cosign verify ghcr.io/gitdr-io/charts/gitdr:$VERSION \
+  --certificate-identity "$ID" --certificate-oidc-issuer https://token.actions.githubusercontent.com
 ```
 
 ## Security
