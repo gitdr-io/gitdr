@@ -3,6 +3,7 @@ package pipeline
 import (
 	"archive/tar"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -200,6 +201,19 @@ func tarEntryPath(raw string) (string, error) {
 	return name, nil
 }
 
+// countFiles is how many regular files dir holds at any depth: 0 for a dir that does not exist, and
+// a part of it that cannot be read counts as holding none.
+func countFiles(dir string) int {
+	n := 0
+	_ = filepath.WalkDir(dir, func(_ string, d fs.DirEntry, err error) error {
+		if err == nil && d.Type().IsRegular() {
+			n++
+		}
+		return nil
+	})
+	return n
+}
+
 // dirHasFiles reports whether dir exists and contains at least one regular file.
 func dirHasFiles(dir string) bool {
 	found := false
@@ -214,4 +228,31 @@ func dirHasFiles(dir string) bool {
 		return nil
 	})
 	return found
+}
+
+// keepOnlyObjects removes everything from a mirror's lfs directory but lfs/objects, so the objects
+// are all its archive holds. A directory that does not exist has nothing to remove.
+//
+// git-lfs keeps more there: its temporary and partly downloaded files, and a log of each fatal
+// error, a server error on a batch say, that lists every GIT_* variable it was started with, the
+// source credential's header among them (gitexec). A failed fetch used to fail the repository, and
+// its log went with the mirror. A fetch that failed part way is now run again (fetchLFS), and the
+// log of the attempt that failed is still here when the next one completes.
+func keepOnlyObjects(lfsDir string) error {
+	entries, err := os.ReadDir(lfsDir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	for _, e := range entries {
+		if e.Name() == "objects" && e.IsDir() {
+			continue
+		}
+		if err := os.RemoveAll(filepath.Join(lfsDir, e.Name())); err != nil {
+			return err
+		}
+	}
+	return nil
 }

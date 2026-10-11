@@ -875,14 +875,14 @@ func (r *backupRun) backupRepo(ctx context.Context, repo source.Repo, ret dest.R
 	// LFS objects, fetched while the source is being read and archived before anything is
 	// written. Nothing to fetch without refs: LFS objects are pointed at by commits.
 	if hasRefs && r.cfg.Backup.LFS && gitexec.LFSAvailable() {
-		auth, err := gitAuthHeader(ctx, r.src)
-		if err != nil {
-			return fail(fmt.Errorf("lfs fetch: source auth: %w", err))
+		if err := r.fetchLFS(ctx, repo, mirror, cloneURL); err != nil {
+			return fail(err)
 		}
-		if err := r.git.LFSFetchAll(ctx, mirror, cloneURL, gitexec.Options{AuthHeader: auth}); err != nil {
-			return fail(fmt.Errorf("lfs fetch: %w", err))
+		lfsDir := filepath.Join(mirror, "lfs")
+		if err := keepOnlyObjects(lfsDir); err != nil {
+			return fail(fmt.Errorf("lfs: keep only the objects: %w", err))
 		}
-		if lfsDir := filepath.Join(mirror, "lfs"); dirHasFiles(lfsDir) {
+		if dirHasFiles(lfsDir) {
 			lfsTar := filepath.Join(tmp, repo.Name+".lfs.tar")
 			if err := archiveLFS(ctx, lfsDir, lfsTar); err != nil {
 				return fail(err)
@@ -951,6 +951,51 @@ func (r *backupRun) backupRepo(ctx context.Context, repo source.Repo, ret dest.R
 		return fail(fmt.Errorf("metadata: %w", metaErr))
 	}
 	return entry
+}
+
+// fetchLFS fetches every LFS object the mirror's refs point at into the mirror, with `git lfs fetch
+// --all`, and runs the fetch again after a failure for as long as each attempt adds objects.
+//
+// git-lfs sends the header it was started with until it ends, and GitHub refuses an installation
+// token once its hour is up, so a fetch that took longer than its token failed part way with a
+// 401. The clone does not have the problem, because it authenticates before its pack streams. The
+// credential is asked for again before each attempt, which in App mode mints a new token once the
+// old one has run out and with a token file reads the file again, and git-lfs skips the objects
+// already in lfs/objects, so an attempt fetches only what is still missing.
+//
+// An attempt that fails having added nothing to lfs/objects fails the repository with its error.
+// So the attempts end: every one before it added at least one of the objects the mirror points at,
+// and those are finite. An error a new credential does not mend, an object missing from the source
+// say, costs at most one attempt more than it used to, the one that finds nothing more to fetch.
+//
+// An attempt that failed can leave git-lfs's log of it in lfs/, with the header in it, so only
+// lfs/objects is archived (keepOnlyObjects).
+func (r *backupRun) fetchLFS(ctx context.Context, repo source.Repo, mirror, cloneURL string) error {
+	objects := filepath.Join(mirror, "lfs", "objects")
+	had := countFiles(objects)
+	for attempt := 1; ; attempt++ {
+		auth, err := gitAuthHeader(ctx, r.src)
+		if err != nil {
+			return fmt.Errorf("lfs fetch: source auth: %w", err)
+		}
+		err = r.git.LFSFetchAll(ctx, mirror, cloneURL, gitexec.Options{AuthHeader: auth})
+		if err == nil {
+			return nil
+		}
+		has := countFiles(objects)
+		switch {
+		case ctx.Err() != nil:
+			return fmt.Errorf("lfs fetch: %w", err)
+		case has > had:
+			r.log.Warn("the LFS fetch failed part way; fetching the rest with the credential asked for again",
+				"repo", repo.Slug(), "attempt", attempt, "fetched", has, "err", err)
+			had = has
+		case attempt == 1:
+			return fmt.Errorf("lfs fetch: %w", err)
+		default:
+			return fmt.Errorf("lfs fetch: attempt %d fetched no object, so it is not run again (%d fetched before it): %w", attempt, had, err)
+		}
+	}
 }
 
 // stagedArtifact is one artifact ready to upload: its stored bytes, on disk or in memory, with

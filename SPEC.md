@@ -93,6 +93,18 @@ short-lived tokens. It does not use the GitHub org Migrations API. That one need
 classic PAT with `repo` and `admin:org`, is a preview API with size limits and a 7-day
 archive expiry, and doesn't work with App tokens or fine-grained PATs.
 
+LFS note. A long LFS fetch can outlive the token it started with. git-lfs sends that token with
+every batch of objects it asks for, and GitHub refuses an installation token after its hour, so
+the fetch fails part way with a 401. A clone does not, because it authenticates before its pack
+streams. So an LFS fetch that fails after fetching some objects runs again, with the credential
+asked for again (in App mode a new token once the old one has run out, with a token file the
+file read again), and fetches only the objects still missing. It runs again for as long as each
+attempt adds an object, and an attempt that adds none fails the repository with its error. Up to
+v0.1.22 the first failure did, so an LFS fetch longer than its token never finished. Only the
+objects go into the LFS archive, because an attempt that failed can leave a git-lfs error log
+beside them that lists the credential's header. Up to v0.1.22 the archive also held git-lfs's
+temporary directories. *Changed in v0.1.23.*
+
 ### GitHub token file
 
 `source.github.tokenPath` (`GITDR_SOURCE_GITHUB_TOKENPATH`) names a file holding a GitHub App
@@ -114,8 +126,9 @@ token's hour is up.
 - Replace the file by writing a new one beside it and renaming it over the old one. A missing,
   empty or unreadable file fails the request or git command that read it, and so that repository
   and the run. An expired token does the same, since GitHub answers 401. Nothing falls back.
-- A git command reads the file once, when it starts. One that outlives its token, such as a very
-  long `git lfs fetch`, can fail, so replace the file well before the hour.
+- A git command reads the file once, when it starts, so replace the file well before the hour. An
+  LFS fetch whose token runs out after it has fetched some objects runs again with the file read
+  again (the LFS note above). Up to v0.1.22 it failed. *Changed in v0.1.23.*
 - git receives the token as it always has, in an `http.extraHeader` passed through
   `GIT_CONFIG_*` environment variables and scoped to the source host. It never appears on a
   command line or in a URL. API requests carry it only over HTTPS to the configured API host.

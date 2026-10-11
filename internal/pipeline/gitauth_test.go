@@ -44,9 +44,15 @@ type gitHTTPServer struct {
 	want string
 	seen []seenGitRequest
 	// expire is answered 401 once, as GitHub answers a token that has run out, and then
-	// onExpire runs, before the answer is sent.
-	expire   string
-	onExpire func()
+	// onExpire runs, before the answer is sent. Not before expireAfter LFS objects have been
+	// sent, so a token can run out part way through a fetch.
+	expire      string
+	onExpire    func()
+	expireAfter int
+	lfsSent     int
+	// failBatch, when set, is the status the next LFS batch request is answered with, whatever
+	// it carries, and is then cleared: a batch the server could not serve.
+	failBatch int
 }
 
 type seenGitRequest struct {
@@ -63,11 +69,18 @@ func newGitHTTPServer(t *testing.T, root, lfsObjects string) *gitHTTPServer {
 		s.mu.Lock()
 		status, then := http.StatusOK, func() {}
 		switch {
-		case s.expire != "" && auth == s.expire:
+		case s.failBatch != 0 && strings.HasSuffix(r.URL.Path, "/info/lfs/objects/batch"):
+			status, s.failBatch = s.failBatch, 0
+		case s.expire != "" && auth == s.expire && s.lfsSent >= s.expireAfter:
 			status, s.expire = http.StatusUnauthorized, ""
 			then = s.onExpire
 		case auth != s.want:
 			status = http.StatusUnauthorized
+		}
+		// Counted as the request is let through, so of the downloads git-lfs runs at once,
+		// exactly expireAfter get theirs.
+		if status == http.StatusOK && strings.HasPrefix(r.URL.Path, "/lfs-objects/") {
+			s.lfsSent++
 		}
 		s.seen = append(s.seen, seenGitRequest{r.Method, r.URL.Path, auth, status})
 		s.mu.Unlock()
@@ -80,8 +93,7 @@ func newGitHTTPServer(t *testing.T, root, lfsObjects string) *gitHTTPServer {
 		case strings.HasSuffix(r.URL.Path, "/info/lfs/objects/batch"):
 			s.lfsBatch(w, r)
 		case strings.HasPrefix(r.URL.Path, "/lfs-objects/"):
-			oid := path.Base(r.URL.Path)
-			http.ServeFile(w, r, filepath.Join(s.lfsObjects, oid[0:2], oid[2:4], oid))
+			http.ServeFile(w, r, s.objectPath(path.Base(r.URL.Path)))
 		default:
 			files.ServeHTTP(w, r)
 		}
@@ -90,7 +102,17 @@ func newGitHTTPServer(t *testing.T, root, lfsObjects string) *gitHTTPServer {
 	return s
 }
 
-// lfsBatch answers a download batch with a URL on this server for each object.
+// objectPath is where the server keeps the LFS object oid, laid out as git-lfs lays out its own.
+func (s *gitHTTPServer) objectPath(oid string) string {
+	if len(oid) < 4 {
+		return filepath.Join(s.lfsObjects, oid)
+	}
+	return filepath.Join(s.lfsObjects, oid[0:2], oid[2:4], oid)
+}
+
+// lfsBatch answers a download batch with a URL on this server for each object it has. One it does
+// not have is answered as GitHub answers it, with an error in the batch, which git-lfs takes as
+// final; a download that answers 404 is retried for over half a minute.
 func (s *gitHTTPServer) lfsBatch(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Objects []struct {
@@ -102,17 +124,28 @@ func (s *gitHTTPServer) lfsBatch(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	type objectError struct {
+		Code    int    `json:"code"`
+		Message string `json:"message"`
+	}
 	type object struct {
 		OID           string                       `json:"oid"`
 		Size          int64                        `json:"size"`
-		Authenticated bool                         `json:"authenticated"`
-		Actions       map[string]map[string]string `json:"actions"`
+		Authenticated bool                         `json:"authenticated,omitempty"`
+		Actions       map[string]map[string]string `json:"actions,omitempty"`
+		Error         *objectError                 `json:"error,omitempty"`
 	}
 	resp := struct {
 		Transfer string   `json:"transfer"`
 		Objects  []object `json:"objects"`
 	}{Transfer: "basic"}
 	for _, o := range req.Objects {
+		if _, err := os.Stat(s.objectPath(o.OID)); err != nil {
+			resp.Objects = append(resp.Objects, object{
+				OID: o.OID, Size: o.Size, Error: &objectError{Code: http.StatusNotFound, Message: "Object does not exist"},
+			})
+			continue
+		}
 		resp.Objects = append(resp.Objects, object{
 			OID: o.OID, Size: o.Size, Authenticated: true,
 			Actions: map[string]map[string]string{"download": {"href": s.URL + "/lfs-objects/" + o.OID}},
@@ -211,11 +244,14 @@ type tokenFileSource struct {
 
 	mu            sync.Mutex
 	cloneURLCalls int
+	gitAuthCalls  int
 	// onCloneURL runs on every CloneURL with the call's number. The pipeline resolves the clone
 	// URL once before ls-remote and once before the clone, so call 2 falls between them.
 	onCloneURL func(call int)
-	// onMetadata runs when metadata is fetched, which is after the clone and before LFS.
-	onMetadata func()
+	// onGitAuth runs on every GitAuthHeader with the call's number, before the file is read. The
+	// pipeline asks once for its preflight, and then before each git command: ls-remote, the
+	// clone, and each LFS fetch.
+	onGitAuth func(call int)
 }
 
 func (s *tokenFileSource) ListRepos(context.Context, source.Filter) ([]source.Repo, error) {
@@ -234,13 +270,17 @@ func (s *tokenFileSource) CloneURL(_ context.Context, r source.Repo) (string, er
 }
 
 func (s *tokenFileSource) FetchMetadata(context.Context, source.Repo) ([]byte, error) {
-	if s.onMetadata != nil {
-		s.onMetadata()
-	}
 	return []byte(`{"schema":"gitdr.meta/v0"}`), nil
 }
 
 func (s *tokenFileSource) GitAuthHeader(ctx context.Context) (string, error) {
+	s.mu.Lock()
+	s.gitAuthCalls++
+	call := s.gitAuthCalls
+	s.mu.Unlock()
+	if s.onGitAuth != nil {
+		s.onGitAuth(call)
+	}
 	return s.github.GitAuthHeader(ctx)
 }
 
@@ -250,6 +290,7 @@ type authRun struct {
 	src       *tokenFileSource
 	tokenPath string
 	logs      *bytes.Buffer
+	dest      *memDest
 }
 
 func newAuthRun(t *testing.T, workdir, lfsObjects, name, firstToken string) *authRun {
@@ -273,6 +314,7 @@ func newAuthRun(t *testing.T, workdir, lfsObjects, name, firstToken string) *aut
 		}},
 		tokenPath: tokenPath,
 		logs:      &bytes.Buffer{},
+		dest:      newMemDest(true),
 	}
 }
 
@@ -296,7 +338,7 @@ func (a *authRun) backup(t *testing.T, lfs bool) (*pipeline.BackupResult, error)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 	return pipeline.Backup(ctx, pipeline.BackupDeps{
-		Config: cfg, Source: a.src, Dest: newMemDest(true), Git: gitexec.New(log),
+		Config: cfg, Source: a.src, Dest: a.dest, Git: gitexec.New(log),
 		SigningKey: signer, ToolVersion: "test", Now: fixedClock(), Logger: log,
 	})
 }
@@ -407,10 +449,12 @@ func TestTheTokenFileIsReadBeforeEveryGitCommand(t *testing.T) {
 			}
 		}
 		boundary := -1
-		a.src.onMetadata = func() { // the clone is done; LFS has not asked for its header yet
-			boundary = len(a.server.requests())
-			putToken(t, a.tokenPath, third)
-			a.server.expect(basicAuth(third))
+		a.src.onGitAuth = func(call int) {
+			if call == 4 { // the preflight, ls-remote and the clone are done; LFS has sent nothing
+				boundary = len(a.server.requests())
+				putToken(t, a.tokenPath, third)
+				a.server.expect(basicAuth(third))
+			}
 		}
 
 		res, err := a.backup(t, true)
@@ -419,8 +463,16 @@ func TestTheTokenFileIsReadBeforeEveryGitCommand(t *testing.T) {
 		}
 		reqs := a.server.requests()
 		if boundary < 0 {
-			t.Fatal("metadata was never fetched")
+			t.Fatal("the LFS fetch never asked for its credential")
 		}
+		// The clone fetched its objects before the file was replaced, so the boundary is after it.
+		var clone []seenGitRequest
+		for _, r := range reqs[:boundary] {
+			if strings.Contains(r.path, ".git/objects/") {
+				clone = append(clone, r)
+			}
+		}
+		assertCarried(t, "clone", clone, basicAuth(second))
 		var batch, download bool
 		for _, r := range reqs[boundary:] {
 			batch = batch || strings.HasSuffix(r.path, "/info/lfs/objects/batch")
