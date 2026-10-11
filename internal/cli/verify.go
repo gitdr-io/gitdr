@@ -51,7 +51,9 @@ func runVerify(ctx context.Context, args []string) int {
 		log.Error("public key", "err", err)
 		return 1
 	}
-	deps := pipeline.VerifyDeps{Dest: dst, PublicKey: pub, Logger: log}
+	// backup.concurrency bounds verify's reads as well as a backup's repositories: the operator sized
+	// it for this store and this machine, and verify adds no setting of its own.
+	deps := pipeline.VerifyDeps{Dest: dst, PublicKey: pub, Logger: log, Concurrency: cfg.Backup.Concurrency}
 
 	if *drill != "" {
 		return verifyDrill(ctx, deps, *drill, common.output, log)

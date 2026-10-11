@@ -355,6 +355,10 @@ or a SAS. See §4, Azure.
   unwrap the data key later without changing the format. Checksums cover the stored
   ciphertext, so `verify` stays key-free and `restore` needs the key.
 - Integrity. SHA-256 per artifact plus a signed run-manifest, checked by `gitdr verify`.
+  `verify` reads up to `backup.concurrency` (`GITDR_BACKUP_CONCURRENCY`) artifacts at once, four
+  by default, and streams each through SHA-256 without holding it. It reports them in the
+  manifest's order, so it prints what it printed when it read one at a time, only sooner. *Changed
+  in v0.1.23.*
 - Hardened container. Wolfi/Chainguard base, non-root, read-only rootfs, no shell, plus
   `git` and `git-lfs`, pinned by digest.
 - Fail closed, bounded concurrency. A same-day rerun skips the copies a manifest records and

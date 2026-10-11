@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 
 	"gitdr.io/gitdr/internal/crypto"
 	"gitdr.io/gitdr/internal/dest"
@@ -19,6 +20,10 @@ type VerifyDeps struct {
 	Dest      dest.Destination
 	PublicKey ed25519.PublicKey
 	Logger    *slog.Logger
+	// Concurrency is how many artifacts Verify reads back at once. The CLI passes
+	// backup.concurrency, the bound an operator already set on what a backup has in flight. Below
+	// one is one, so a caller that sets nothing reads one artifact at a time, as Verify always did.
+	Concurrency int
 }
 
 // VerifyResult reports signature and per-artifact checksum results.
@@ -86,20 +91,14 @@ func verifyWithin(ctx context.Context, d VerifyDeps, manifestKey string, limit i
 		return res, fmt.Errorf("%s is a %s document, not a manifest: verify checks manifests, and counting its zero artifacts as a pass would be a green over a document this command cannot read", manifestKey, m.Schema)
 	}
 
-	for _, repo := range m.Repos {
-		for _, a := range repo.Artifacts {
-			res.ArtifactsChecked++
-			got, err := getSHA(ctx, d.Dest, a.Key)
-			if err != nil {
-				res.Failures = append(res.Failures, fmt.Sprintf("%s: %v", a.Key, err))
-				continue
-			}
-			if !strings.EqualFold(got, a.SHA256) {
-				res.Failures = append(res.Failures, fmt.Sprintf("%s: checksum mismatch", a.Key))
-				continue
-			}
-			res.ArtifactsOK++
+	checks := readBack(ctx, d.Dest, m.Repos, d.Concurrency)
+	res.ArtifactsChecked = len(checks)
+	for _, c := range checks {
+		if !c.ok {
+			res.Failures = append(res.Failures, c.failure)
+			continue
 		}
+		res.ArtifactsOK++
 	}
 
 	if len(res.Failures) > 0 {
@@ -107,6 +106,64 @@ func verifyWithin(ctx context.Context, d VerifyDeps, manifestKey string, limit i
 	}
 	log.Info("verify ok", "manifest", manifestKey, "artifacts", res.ArtifactsOK)
 	return res, nil
+}
+
+// artifactCheck is what reading one artifact back found: ok once its SHA-256 was seen to be the one
+// the manifest records, and otherwise the failure verify reports for it.
+//
+// A flag that says ok, rather than an empty failure, so that the zero value is a failure. A check
+// that no read filled in, say once a later change stops asking for the rest after a stop or stops
+// waiting for a slow read, then fails the verify, where an empty failure would have counted an
+// artifact as verified without reading a byte of it.
+type artifactCheck struct {
+	ok      bool
+	failure string
+}
+
+// readBack reads back every artifact the repositories list, up to limit at a time, and returns what
+// it found for each, in the manifest's order.
+//
+// Each read fills only its own slot, and the slots are read once every read has finished, so the
+// failures come in the manifest's order whatever order the reads finish in: the result, and the JSON
+// printed from it, are the ones verify gave reading one artifact at a time. Once ctx is done the rest
+// are still asked for, as they were one at a time, and a store that honours ctx fails each of those
+// reads at once with its own error, so a stopped verify still names every artifact it did not read.
+// A read streams the object through SHA-256, so verify holds a copy buffer per read in flight and
+// never an artifact, whatever its size.
+func readBack(ctx context.Context, d dest.Destination, repos []RepoEntry, limit int) []artifactCheck {
+	n := 0
+	for _, repo := range repos {
+		n += len(repo.Artifacts)
+	}
+	checks := make([]artifactCheck, n)
+	sem := make(chan struct{}, max(1, min(limit, n)))
+	var wg sync.WaitGroup
+	i := 0
+	for _, repo := range repos {
+		for _, a := range repo.Artifacts {
+			slot := i
+			sem <- struct{}{}
+			wg.Go(func() {
+				defer func() { <-sem }()
+				checks[slot] = checkArtifact(ctx, d, a)
+			})
+			i++
+		}
+	}
+	wg.Wait()
+	return checks
+}
+
+// checkArtifact reads one artifact back and checks its SHA-256 against the one the manifest records.
+func checkArtifact(ctx context.Context, d dest.Destination, a ArtifactInfo) artifactCheck {
+	got, err := getSHA(ctx, d, a.Key)
+	if err != nil {
+		return artifactCheck{failure: fmt.Sprintf("%s: %v", a.Key, err)}
+	}
+	if !strings.EqualFold(got, a.SHA256) {
+		return artifactCheck{failure: fmt.Sprintf("%s: checksum mismatch", a.Key)}
+	}
+	return artifactCheck{ok: true}
 }
 
 // getSHA streams an object through SHA-256 without buffering it whole.

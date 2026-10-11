@@ -48,7 +48,7 @@ destination:
     days: 30                   # S3 locks each object this long; an unchanged copy is relied on for a third of this or of the bucket's own lock, whichever is shorter
 
 backup:
-  concurrency: 4               # repositories backed up in parallel
+  concurrency: 4               # repositories backed up in parallel, and artifacts `gitdr verify` reads at once
   resume: true                 # skip repos a manifest records as copied on the run date
   lfs: true                    # fetch Git LFS objects (stored as a separate .lfs.tar artifact)
 
