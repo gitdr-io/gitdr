@@ -66,6 +66,13 @@
       "pinDigests": false
     },
     {
+      "description": "Hold cosign below v3. v3 signs in the new bundle format by default and requires --bundle, and neither the release's GoReleaser signing, its verify job nor the published verify commands use bundles yet. Lift this in the change that moves them.",
+      "matchPackageNames": [
+        "sigstore/cosign"
+      ],
+      "allowedVersions": "<3"
+    },
+    {
       "description": "Group the container base images. Chainguard rebuilds :latest almost daily, and every rebuild is a new digest, so pinned bases are by far the loudest source of merge requests here. One request covering all of them is the same review with a quarter of the interruption.",
       "matchDatasources": [
         "docker"
