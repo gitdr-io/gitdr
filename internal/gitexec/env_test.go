@@ -651,8 +651,14 @@ func TestGitIsStartedInOnePlace(t *testing.T) {
 			return err
 		}
 		if d.IsDir() {
-			switch d.Name() {
-			case ".git", ".cache", "vendor", "bin", "dist":
+			// The go tool ignores a directory whose name begins with "." or "_", so nothing in one
+			// reaches the binary, and a second checkout nested in one must not count twice.
+			name := d.Name()
+			if path != root && (strings.HasPrefix(name, ".") || strings.HasPrefix(name, "_")) {
+				return filepath.SkipDir
+			}
+			switch name {
+			case "vendor", "bin", "dist":
 				return filepath.SkipDir
 			}
 			return nil
