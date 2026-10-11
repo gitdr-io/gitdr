@@ -119,7 +119,10 @@ type RepoEntry struct {
 	// unknown one and there is more than one reason to skip.
 	Reason    string         `json:"reason,omitempty"`
 	Artifacts []ArtifactInfo `json:"artifacts,omitempty"`
-	// What the source advertised when this copy was made, from `git ls-remote`.
+	// What the source advertised when this copy was made: the advertisement the clone itself
+	// received, read back from the mirror the bundle was written from, in the shape that
+	// `git ls-remote` gives. Up to v0.1.22 it was an ls-remote taken before the clone
+	// (copiedrefs.go).
 	//
 	// It is recorded so the next run can ask the same question and compare, and skip a
 	// repository whose refs have not moved instead of writing a byte-identical copy of its

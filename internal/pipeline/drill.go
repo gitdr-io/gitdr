@@ -48,6 +48,12 @@ import (
 // auditor is really asking about. A bundle that restores perfectly to a history missing half
 // the branches passes the first check and fails the second.
 //
+// From v0.1.23 R is read back from the mirror the bundle was written from, and the backup fails a
+// copy whose bundle does not declare exactly R, so R and B are equal when a copy is made. A clone
+// missing a branch or tag the source advertised before and after it fails the backup instead of
+// this join (copiedrefs.go). For such a copy the second join holds the restore to the record the
+// backup signed. A copy made before keeps the R of a listing taken before the clone.
+//
 // # What it does not prove
 //
 // Not that the repository's *content* is what somebody remembers. A commit hash covers the
@@ -326,7 +332,9 @@ func drillOne(ctx context.Context, d DrillDeps, req DrillRequest, manifestKey st
 
 	// The second join, and the one nothing could check before the manifest recorded source
 	// refs: does what came back carry the history the source actually had? A bundle written
-	// from a half-fetched mirror passes every check above and fails this one.
+	// from a half-fetched mirror passes every check above and fails this one. From v0.1.23 the
+	// backup holds the clone to the source's listing and the bundle to the clone (copiedrefs.go),
+	// and for a copy it made this holds what came back to the record it signed.
 	//
 	// Left null rather than false for a copy made by a pre-v3 gitdr. "Not recorded" and "did
 	// not match" are different answers and a reader must be able to tell them apart.

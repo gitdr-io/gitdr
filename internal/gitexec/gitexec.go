@@ -7,6 +7,7 @@ package gitexec
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/url"
@@ -290,6 +291,36 @@ func (g *Git) LsRemote(ctx context.Context, repoURL string, opts Options) (map[s
 		}
 		refs[name] = oid
 	}
+	return refs, nil
+}
+
+// MirrorRefs reads back the refs a clone received: every ref in repoDir, and HEAD when it
+// resolves. That is the shape LsRemote returns for the remote the clone was made from, so the two
+// compare directly, and what a backup records of a copy is what the next run's listing of the
+// source is compared with.
+//
+// HEAD is read as the object it resolves to, as ls-remote reports it, and left out when it names a
+// branch that does not exist, as ls-remote leaves it out. A repository with no commits reads as no
+// refs at all rather than as an error. `rev-parse --verify --quiet` exits 1 and says nothing for
+// such a HEAD; any other failure is an error.
+func (g *Git) MirrorRefs(ctx context.Context, repoDir string) (map[string]string, error) {
+	refs, err := g.ListRefs(ctx, repoDir)
+	if err != nil {
+		return nil, err
+	}
+	out, err := g.output(ctx, repoDir, "rev-parse", "--verify", "--quiet", "HEAD")
+	var exit *exec.ExitError
+	switch {
+	case errors.As(err, &exit) && exit.ExitCode() == 1:
+		return refs, nil
+	case err != nil:
+		return nil, fmt.Errorf("resolve HEAD: %w", err)
+	}
+	head := strings.TrimSpace(out)
+	if !isHex(head) {
+		return nil, fmt.Errorf("unreadable HEAD %q", head)
+	}
+	refs["HEAD"] = head
 	return refs, nil
 }
 

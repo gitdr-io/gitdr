@@ -32,9 +32,10 @@ A single static Go binary, run as a one-shot job. Two pluggable interfaces.
 3. Fan out across repos with bounded concurrency. Each repository in two steps, and nothing is
    written until the first one has finished.
    - Read and prepare, writing nothing: metadata to JSON (issues, PRs/MRs, comments, labels,
-     milestones, wikis, releases), `git clone --mirror`, `git lfs fetch --all`, the LFS objects
-     into a tar, each removed once it is in it, `git bundle create`, then the mirror removed,
-     encryption when it is on, and the SHA-256 of every artifact.
+     milestones, wikis, releases), `git clone --mirror` and the refs it received, held to the
+     source's own listing (below), `git lfs fetch --all`, the LFS objects into a tar, each removed
+     once it is in it, `git bundle create`, held to the refs the clone received, then the mirror
+     removed, encryption when it is on, and the SHA-256 of every artifact.
    - Upload with `PutImmutable` at deterministic, dated keys, largest first, and the `.sha256`
      sidecar last.
 4. Write a signed run-manifest (per-repo status, checksums, versions, timing).
@@ -57,6 +58,28 @@ checksum, and the repository then fails on its metadata. Up to v0.1.20 the metad
 after the bundle was stored, so a rate limit left a bundle under object lock with no metadata
 beside it, and no checksum either. Only the GitHub source marks a failure as likely to pass, so on
 GitLab every metadata failure stores the code first. *Changed in v0.1.21.*
+
+The refs a copy records (§11, `refs`) are the mirror's own, read back once the clone is done:
+`git for-each-ref` and `HEAD`, the shape `git ls-remote` gives. The clone is held to the
+`git ls-remote` taken before it, the listing the unchanged check compares (§11). A branch or tag
+that listing names and the clone lacks fails the repository, with nothing stored, unless the source
+no longer advertises it when asked again, which means it was deleted while the clone ran. The
+source is asked again only then. When that listing could not be made, the clone is held to
+nothing. The bundle written from the mirror is held to the refs the copy records: one that does not
+declare every one of them at the same object, and nothing else, fails the repository, with nothing
+stored. Up to v0.1.22 a copy recorded the listing taken before the clone, so for a repository
+pushed to between the two the record named what the source had before the push, not what the copy
+held: a drill failed the good copy, and the next run copied the repository again although nothing
+had moved since. *Changed in v0.1.23.*
+
+In a mirror whose `HEAD` names a branch that does not exist, `git bundle create --all HEAD`, run in
+the mirror, takes `HEAD` for the path of the mirror's own `HEAD` file and leaves every commit out:
+it writes a bundle of the tags that point at something other than a commit, and exits 0. Up to
+v0.1.22 such a copy was stored and reported as a success, and `verify` and `restore` passed it;
+only a drill's source join failed it. It now fails the repository, with nothing stored and an
+error that starts `the bundle written from the clone does not declare the refs the clone holds`
+and says `HEAD names a branch that does not exist`. Without such a tag the bundle is empty, git
+refuses to write it, and the repository failed already. *Changed in v0.1.23.*
 
 ### Object key layout
 
@@ -609,15 +632,28 @@ it was signed over.** `internal/pipeline/manifest_test.go` pins that round trip,
 breaking it would make every artifact anyone has already stored unverifiable the day they
 upgrade — which nobody would notice until they needed a restore.
 
-`refs` is the ref-to-commit map the source advertised when the copy was made, from
-`git ls-remote`. It exists so the next run can ask the same question and skip a repository
-whose refs have not moved, rather than writing a byte-identical copy of its entire history.
+`refs` is the ref-to-commit map the source advertised when the copy was made, the
+advertisement the clone itself received (§2). It exists so the next run can ask the same
+question with `git ls-remote` and skip a repository whose refs have not moved, rather than
+writing a byte-identical copy of its entire history.
 Before this, `git bundle create --all` ran every night on every repository and the only thing
 stopping a second write was a check on the date, so an organisation's whole history was
 rewritten daily. On WORM storage the customer cannot delete any of it: object lock in
 compliance mode holds against everyone, including the root of the account that owns the
 bucket. Measured on three real organisations, roughly seventy per cent of one does not change
 on a given day.
+
+**Where `refs` comes from, from v0.1.23.** It is read back from the mirror the bundle is written
+from, and the bundle is checked to declare exactly it (§2). Up to v0.1.22 it was a `git ls-remote`
+taken before the clone. The shape is the same: every ref, and `HEAD` when it resolves, an
+annotated tag as its tag object, no peeled `^{}` entries, sorted by name, so the next run compares
+it with its own `git ls-remote` as before. The values differ for a repository pushed to between
+that listing and the clone, and the record now names what the copy holds. A copy an older engine
+recorded can name a commit a branch held before such a push, or a branch the push deleted, which
+the copy does not have: its drill fails the source join, and the next run copies the repository
+again. Every `success` entry now carries `refs` and `copiedAt`; up to v0.1.22 both were left out
+when the listing before the clone failed or listed nothing. `gitdr.manifest/v5` is unchanged.
+*Changed in v0.1.23.*
 
 `copiedAt` is when the artifacts an entry relies on were actually written, and it is carried
 forward through every skip. Without it each skip would restart the age of the copy, the
@@ -779,6 +815,14 @@ Three ref maps, and the drill checks both joins:
 to carry the history the source actually had — which nothing could check before v3 recorded R,
 and which is the half an auditor is really asking about. **A bundle written from a half-fetched
 mirror passes the first check perfectly and fails the second.**
+
+From v0.1.23 R is read back from the mirror the bundle is written from, and a backup fails a
+repository whose bundle does not declare exactly R (§2). For a copy made since, R and B are equal
+when it is made, and a clone that lacks a branch or tag the source advertised before and after it
+fails the backup instead of this join. The second join then holds what came back to the record the
+backup signed. A copy made before keeps the R of a listing taken before its clone, so a push
+between that listing and the clone can still fail its source join. *Changed in v0.1.23.
+`gitdr.drill/v1` is unchanged.*
 
 Both joins report into the same `mismatches` array, and a source failure is prefixed
 `source: `. That prefix is part of `gitdr.drill/v1`, not an implementation detail: it is the

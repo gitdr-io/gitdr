@@ -559,9 +559,9 @@ func (r *backupRun) backupOne(ctx context.Context, repo source.Repo, ret dest.Re
 	// history, and on a typical organisation seven repositories in ten do not move on a given
 	// day.
 	//
-	// The refs are carried into backupRepo rather than fetched twice: what gets recorded in
-	// the manifest must be the state that was compared, or a repository that changed between
-	// the two calls would record refs for a copy that does not contain them.
+	// The listing goes on into backupRepo, which holds the clone to it, and it is not what the
+	// manifest records. A copy records the refs of the mirror its bundle is written from, which
+	// hold any push that landed between this listing and the clone (copiedrefs.go).
 	current := r.currentRefs(ctx, repo)
 	if prev, ok := r.previous[repo.Slug()]; ok {
 		d := decideUnchanged(prev.refs, current, prev.copiedAt, r.now(), r.retentionWindow())
@@ -593,11 +593,11 @@ func (r *backupRun) backupOne(ctx context.Context, repo source.Repo, ret dest.Re
 		}
 	}
 
-	entry := r.backupRepo(ctx, repo, ret, progress)
+	entry, copied := r.backupRepo(ctx, repo, ret, current, progress)
 	// Recorded only on a copy that succeeded. A failed run's refs describe a repository
 	// nothing was written for, and trusting them next time would skip the retry.
-	if entry.Status == StatusSuccess && len(current) > 0 {
-		entry.Refs = refsToEntries(current)
+	if entry.Status == StatusSuccess {
+		entry.Refs = refsToEntries(copied)
 		copiedAt := r.now().UTC()
 		entry.CopiedAt = &copiedAt
 	}
@@ -805,13 +805,17 @@ func (r *backupRun) retention() dest.Retention {
 //
 // Each artifact goes into progress as it lands, so a repository the run stops waiting for is still
 // recorded with what it wrote (fanOut).
-func (r *backupRun) backupRepo(ctx context.Context, repo source.Repo, ret dest.Retention, progress *copyProgress) RepoEntry {
+//
+// advertised is what the source listed before the clone, nil when it could not be listed. What
+// comes back beside the entry is the refs of the mirror the copy was made from, which the caller
+// records on a copy that succeeded.
+func (r *backupRun) backupRepo(ctx context.Context, repo source.Repo, ret dest.Retention, advertised map[string]string, progress *copyProgress) (RepoEntry, map[string]string) {
 	entry := RepoEntry{Slug: repo.Slug(), Status: StatusSuccess}
-	fail := func(err error) RepoEntry {
+	fail := func(err error) (RepoEntry, map[string]string) {
 		entry.Status = StatusFailed
 		entry.Error = err.Error()
 		entry.Reason = "" // a reason belongs to a skip, and an empty repository can still fail
-		return entry
+		return entry, nil
 	}
 
 	tmp, err := os.MkdirTemp("", "gitdr-backup-")
@@ -853,6 +857,15 @@ func (r *backupRun) backupRepo(ctx context.Context, repo source.Repo, ret dest.R
 	}); err != nil {
 		return fail(err)
 	}
+	// The refs the copy is made from, read back from the mirror: nothing changes them before the
+	// bundle is written from it. The clone is held to the listing taken before it (copiedrefs.go).
+	copied, err := r.git.MirrorRefs(ctx, mirror)
+	if err != nil {
+		return fail(fmt.Errorf("read the clone's refs: %w", err))
+	}
+	if err := r.cloneHolds(ctx, repo, cloneURL, advertised, copied); err != nil {
+		return fail(err)
+	}
 	// A repository that was created and never pushed to has no refs, and `git bundle create`
 	// refuses to write an empty bundle. Treating that refusal as a failed repository would
 	// mean one unused project makes every backup of the organisation fail, for ever, while
@@ -892,6 +905,10 @@ func (r *backupRun) backupRepo(ctx context.Context, repo source.Repo, ret dest.R
 	}
 	if hasRefs {
 		if err := r.git.BundleAll(ctx, mirror, bundlePath); err != nil {
+			return fail(err)
+		}
+		// The bundle declares the refs the copy records, or it is not the copy they describe.
+		if err := r.bundleHolds(ctx, bundlePath, copied); err != nil {
 			return fail(err)
 		}
 		files = append(files, &stagedArtifact{kind: "bundle", key: key(".bundle"), path: bundlePath})
@@ -950,7 +967,7 @@ func (r *backupRun) backupRepo(ctx context.Context, repo source.Repo, ret dest.R
 	if metaErr != nil {
 		return fail(fmt.Errorf("metadata: %w", metaErr))
 	}
-	return entry
+	return entry, copied
 }
 
 // fetchLFS fetches every LFS object the mirror's refs point at into the mirror, with `git lfs fetch

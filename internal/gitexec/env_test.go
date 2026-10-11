@@ -228,6 +228,7 @@ func everyGitCommand(g *Git, dir string) []gitCommand {
 		{name: "for-each-ref, HasRefs", run: func() { _, _ = g.HasRefs(ctx, dir) }},
 		{name: "for-each-ref, ListRefs", run: func() { _, _ = g.ListRefs(ctx, dir) }},
 		{name: "rev-parse", run: func() { _, _ = g.HeadOID(ctx, dir) }},
+		{name: "for-each-ref and rev-parse, MirrorRefs", run: func() { _, _ = g.MirrorRefs(ctx, dir) }},
 		{name: "bundle create", run: func() { _ = g.BundleAll(ctx, dir, bundle) }},
 		{name: "init and bundle verify", run: func() { _ = g.BundleVerify(ctx, bundle) }},
 		{name: "init and bundle list-heads", run: func() { _, _ = g.BundleHeads(ctx, bundle) }},
