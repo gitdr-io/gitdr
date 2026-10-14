@@ -67,7 +67,8 @@ jobs:
       - name: Install cosign
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
         with:
-          # >= 2.6 emits Sigstore bundles, which GoReleaser's sign-blob config cannot consume.
+          # v3 signs bundles by default and requires --bundle, which neither GoReleaser's sign-blob
+          # config nor the verify job uses yet. 2.6 keeps the .sig and .pem files; renovate.json holds v3 back.
           cosign-release: 'v2.6.5'
       - name: Install syft (SBOMs)
         uses: anchore/sbom-action/download-syft@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
@@ -149,7 +150,8 @@ jobs:
       - name: Install cosign
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
         with:
-          # >= 2.6 emits Sigstore bundles, which GoReleaser's sign-blob config cannot consume.
+          # v3 signs bundles by default and requires --bundle, which neither GoReleaser's sign-blob
+          # config nor the verify job uses yet. 2.6 keeps the .sig and .pem files; renovate.json holds v3 back.
           cosign-release: 'v2.6.5'
       - name: Log in to GHCR
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
