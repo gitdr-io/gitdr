@@ -17,7 +17,7 @@ jobs:
       # Deny egress by default; see ci.yml. This one only reads the PR's dependency diff and
       # the advisory database, both through the API.
       - name: Harden the runner
-        uses: step-security/harden-runner@351661ca32ac09a36dc5ee2d536e3128f2a3c8ed # v2.22.0
+        uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
         with:
           egress-policy: block
           allowed-endpoints: >
