@@ -29,7 +29,7 @@ func (s *Source) FetchMetadata(ctx context.Context, r source.Repo) ([]byte, erro
 
 	project, _, err := s.client.Projects.GetProject(pid, nil, gitlab.WithContext(ctx))
 	if err != nil {
-		return nil, fmt.Errorf("gitlab: get project %s: %w", r.Slug(), err)
+		return nil, fmt.Errorf("gitlab: get project %s: %w", r.Slug(), source.ScrubRedirect(err))
 	}
 	doc["project"] = project
 
@@ -109,13 +109,14 @@ func nextPage(resp *gitlab.Response, err error) int64 {
 }
 
 // collect paginates a list endpoint. fetch returns (items, nextPage, error); a
-// nextPage of 0 ends iteration.
+// nextPage of 0 ends iteration. A redirect the source refused comes back as the refusal alone; see
+// source.ScrubRedirect.
 func collect[T any](fetch func(page int64) ([]T, int64, error)) ([]T, error) {
 	var all []T
 	for page := int64(1); page != 0; {
 		items, next, err := fetch(page)
 		if err != nil {
-			return nil, err
+			return nil, source.ScrubRedirect(err)
 		}
 		all = append(all, items...)
 		page = next

@@ -97,7 +97,7 @@ Ratings: L/M/H Likelihood times Impact. "Residual" is what remains after the mit
 |---|---|---|---|
 | S | Impersonated VCS endpoint | TLS cert validation, pinned base URL | L×M / low |
 | T | MITM alters fetched repo data | TLS, and corruption is caught later by checksums on the stored artifact | L×M / low |
-| I | Token leaked on the wire or in process args | Token injected via `GIT_CONFIG_*` env, never argv. TLS, redaction | M×H / low |
+| I | Token leaked on the wire or in process args | Token injected via `GIT_CONFIG_*` env, never argv. TLS, redaction. The token goes only to the API base URL's scheme and host, and a redirect off it is refused before anything is sent there or read from it, so no other host can answer as the API and name the clone URLs | M×H / low |
 | D | VCS rate-limits or blocks the run | Bounded concurrency, backoff and rate-limit waits, fail-closed | M×L / low |
 
 ### E2, subprocess: gitdr to git / git-lfs (TB4)

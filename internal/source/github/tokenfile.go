@@ -98,8 +98,9 @@ func (f tokenFile) unreadable(err error) error {
 // tokenTransport authenticates API requests with the token in the token file.
 //
 // Only a request over https to the API host carries it: api.github.com, or the host of
-// source.baseURL. Anything else goes out bare, a redirect to another host included. Go's client
-// already drops the Authorization header on a redirect to another domain, but only when that
+// source.baseURL. Anything else goes out bare. A redirect to another host does not get this far,
+// the source refuses it first (source.StayOnAPI), and this is the rule that would hold if one did.
+// Go's client drops the Authorization header on a redirect to another domain, but only when that
 // header was on the request it was handed, and this transport adds the header after that point.
 // So the rule has to live here, and it is the same rule for the first request and every hop.
 //

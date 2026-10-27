@@ -79,12 +79,13 @@ func newSource(opts Options, logger *slog.Logger, base http.RoundTripper) (*Sour
 		maxWait = DefaultMaxRateLimitWait
 	}
 	s := &Source{host: "github.com", logger: logger, now: time.Now, sleep: sleepContext, budget: &waitBudget{max: maxWait}}
-	apiHost := "api.github.com"
+	// The API base: the one scheme and host a request may carry the token to.
+	apiScheme, apiHost := "https", "api.github.com"
 	if opts.BaseURL != "" {
 		s.host = hostFromURL(opts.BaseURL)
-		apiHost = ""
+		apiScheme, apiHost = "", ""
 		if u, err := url.Parse(opts.BaseURL); err == nil {
-			apiHost = u.Host // empty when unparseable, and then no request carries the token
+			apiScheme, apiHost = u.Scheme, u.Host // empty when unparseable, and then no request carries the token
 		}
 	}
 
@@ -116,9 +117,11 @@ func newSource(opts Options, logger *slog.Logger, base http.RoundTripper) (*Sour
 			tr.BaseURL = strings.TrimRight(opts.BaseURL, "/") // token endpoint must hit GHES too
 		}
 		s.transport = tr
-		rt = tr
+		rt = &appTransport{app: tr, base: base, scheme: apiScheme, host: apiHost}
 	}
-	httpClient := &http.Client{Transport: rt, Timeout: 60 * time.Second}
+	// A redirect never leaves TLS, and never leaves the API.
+	api := &url.URL{Scheme: apiScheme, Host: apiHost}
+	httpClient := &http.Client{Transport: source.KeepTLS(source.StayOnAPI(api, rt)), Timeout: 60 * time.Second}
 
 	clientOpts := []github.ClientOptionsFunc{
 		github.WithHTTPClient(httpClient),
@@ -135,6 +138,37 @@ func newSource(opts Options, logger *slog.Logger, base http.RoundTripper) (*Sour
 	return s, nil
 }
 
+// appTransport authenticates API requests in App mode by tokenTransport's rule: the installation
+// token goes on a request to the API base's scheme and host, and on nothing else.
+//
+// The App's transport mints the token and puts it on every request it is handed, so a request for
+// anywhere else is not handed to it. It goes straight to the network, without an Authorization
+// header and without minting. A redirect to another host does not get this far, the source refuses
+// it first (source.StayOnAPI), and this is the rule that would hold if one did: Go's client drops
+// Authorization on a redirect to another domain only when the header was on the request it was
+// handed, and the App's transport adds it after that point.
+//
+// The scheme is the base's own, where a token file is held to https. The App's transport asks for
+// the token at the base URL too, so a base of plain http gets the token back in the clear before
+// the first API request is sent, and withholding it from the requests after would protect nothing.
+type appTransport struct {
+	app  http.RoundTripper // the App's transport, which mints the token and adds it
+	base http.RoundTripper // the network
+	// scheme and host are compared with the request's exactly, port included, the way tokenTransport
+	// compares the host. An empty host, from a base URL with none, matches nothing.
+	scheme, host string
+}
+
+func (t *appTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if t.host != "" && req.URL.Scheme == t.scheme && req.URL.Host == t.host {
+		return t.app.RoundTrip(req)
+	}
+	// A RoundTripper must not modify the request it was given.
+	out := req.Clone(req.Context())
+	out.Header.Del("Authorization")
+	return t.base.RoundTrip(out)
+}
+
 // UsesTokenFile reports whether the token comes from a token file rather than the App key.
 func (s *Source) UsesTokenFile() bool { return s.tokenFile != nil }
 
@@ -149,7 +183,7 @@ func (s *Source) CheckToken(ctx context.Context) error {
 		return errors.New("github: this source mints its own token; there is no token file to check")
 	}
 	if _, _, err := s.client.Apps.ListRepos(ctx, &github.ListOptions{PerPage: 1}); err != nil {
-		return fmt.Errorf("github: checking the token from source.github.tokenPath: %w", err)
+		return fmt.Errorf("github: checking the token from source.github.tokenPath: %w", source.ScrubRedirect(err))
 	}
 	return nil
 }

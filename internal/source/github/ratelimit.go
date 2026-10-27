@@ -55,11 +55,13 @@ const (
 //
 // A limit it gives up on, and a 5xx that outlasts its tries, are marked source.ErrTransient: the
 // pipeline then stores nothing for the repository, since the next run will probably get through.
+// A redirect the source refused is neither, and comes back at once as the refusal alone; see
+// source.ScrubRedirect.
 func (s *Source) call(ctx context.Context, fn func(context.Context) error) error {
 	reqCtx := ctx
 	waits, serverErrors := 0, 0
 	for {
-		err := fn(reqCtx)
+		err := source.ScrubRedirect(fn(reqCtx))
 		if err == nil {
 			return nil
 		}

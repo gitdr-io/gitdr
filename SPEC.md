@@ -394,6 +394,16 @@ or a SAS. See §4, Azure.
   bundles don't buffer) wrapped by a key from `GITDR_ENCRYPTION_KEY`. A KMS can wrap and
   unwrap the data key later without changing the format. Checksums cover the stored
   ciphertext, so `verify` stays key-free and `restore` needs the key.
+- Requests stay on the API. A source follows a redirect only to the scheme and host of its base
+  URL (`https://api.github.com` or `https://gitlab.com` when none is set). A redirect anywhere
+  else, another host, port or scheme, fails the request before anything is sent there or read
+  from it, and the error names the two hosts and nothing more of either URL. So a base URL of
+  plain http whose server redirects to https fails too; set the https URL. The credential goes
+  only to that scheme and host. A GitHub token file only ever goes over https. An App token and
+  a GitLab token go over the base URL's own scheme, so a base URL of plain http sends them in the
+  clear, as before. Up to v0.1.23 the sources followed a redirect to any host and read its
+  answer as the API's, clone URLs included, and an App token and a GitLab token went along,
+  plain http included. *Changed in v0.1.24.*
 - Integrity. SHA-256 per artifact plus a signed run-manifest, checked by `gitdr verify`.
   `verify` reads up to `backup.concurrency` (`GITDR_BACKUP_CONCURRENCY`) artifacts at once, four
   by default, and streams each through SHA-256 without holding it. It reports them in the

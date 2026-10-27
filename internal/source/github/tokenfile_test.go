@@ -14,7 +14,6 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -302,10 +301,11 @@ type closeRecorder struct {
 
 func (c *closeRecorder) Close() error { c.closed = true; return nil }
 
-// A redirect off the API host goes out bare, and a redirect that stays on it keeps the token.
-// Two real servers, and Go's own client following the redirect, because the client's rule for
-// dropping a header on a redirect only covers headers it was handed, and this one is not.
-func TestARedirectOffTheAPIHostGoesOutBare(t *testing.T) {
+// A redirect that stays on the API host keeps the token, and a redirect off it is refused before
+// anything is sent there. Two real servers, and Go's own client following the redirect through the
+// source's own transport. Up to v0.1.24 the hop off the API went out without the token, and its
+// answer was read as the API's.
+func TestARedirectOffTheAPIHostIsRefused(t *testing.T) {
 	tok := canaryToken(t)
 	path := filepath.Join(t.TempDir(), "github-token")
 	replaceTokenFile(t, path, tok)
@@ -332,21 +332,31 @@ func TestARedirectOffTheAPIHostGoesOutBare(t *testing.T) {
 	}))
 	defer api.Close()
 
-	u, err := url.Parse(api.URL)
+	s, err := newSource(Options{BaseURL: api.URL, TokenPath: path}, nil, api.Client().Transport)
 	if err != nil {
 		t.Fatal(err)
 	}
-	client := &http.Client{Transport: &tokenTransport{base: api.Client().Transport, file: tokenFile{path: path}, host: u.Host}}
-	for _, p := range []string{"/away", "/moved"} {
-		resp, err := client.Get(api.URL + p)
-		if err != nil {
-			t.Fatal(err)
-		}
+	client := s.client.Client()
+	resp, err := client.Get(api.URL + "/away")
+	if resp != nil {
 		_ = resp.Body.Close()
 	}
+	if want := "refusing a redirect from " + api.URL + " to " + elsewhere.URL + ": it leaves the API"; err == nil || !strings.Contains(err.Error(), want) {
+		t.Errorf("GET /away = %v; want it to say %q", err, want)
+	}
+	resp, err = client.Get(api.URL + "/moved")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
 
+	mu.Lock()
+	defer mu.Unlock()
+	if _, ok := seen["elsewhere"]; ok {
+		t.Error("the redirect off the API host was followed")
+	}
 	bearer := "Bearer " + tok
-	for name, want := range map[string]string{"/away": bearer, "elsewhere": "", "/moved": bearer, "/here": bearer} {
+	for name, want := range map[string]string{"/away": bearer, "/moved": bearer, "/here": bearer} {
 		if got, ok := seen[name]; !ok || got != want {
 			t.Errorf("%s: Authorization = %q (seen %v), want %q", name, got, ok, want)
 		}
