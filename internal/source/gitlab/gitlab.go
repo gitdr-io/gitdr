@@ -13,7 +13,7 @@ import (
 	"path"
 	"strings"
 
-	gitlab "gitlab.com/gitlab-org/api/client-go/v2"
+	gitlab "gitlab.com/gitlab-org/api/client-go/v3"
 
 	"gitdr.io/gitdr/internal/source"
 )
@@ -62,7 +62,7 @@ func New(opts Options, logger *slog.Logger) (*Source, error) {
 func (s *Source) ListRepos(ctx context.Context, f source.Filter) ([]source.Repo, error) {
 	opt := &gitlab.ListProjectsOptions{
 		ListOptions: gitlab.ListOptions{PerPage: 100},
-		Membership:  gitlab.Ptr(true),
+		Membership:  new(true),
 	}
 	var out []source.Repo
 	for {

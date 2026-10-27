@@ -7,7 +7,7 @@ import (
 	"path"
 	"time"
 
-	gitlab "gitlab.com/gitlab-org/api/client-go/v2"
+	gitlab "gitlab.com/gitlab-org/api/client-go/v3"
 
 	"gitdr.io/gitdr/internal/source"
 )

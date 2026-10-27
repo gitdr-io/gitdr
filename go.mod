@@ -6,7 +6,7 @@ require (
 	cloud.google.com/go/storage v1.69.0
 	github.com/Azure/azure-sdk-for-go/sdk/azcore v1.23.3
 	github.com/Azure/azure-sdk-for-go/sdk/azidentity v1.15.0
-	github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/storage/armstorage v1.8.1
+	github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/storage/armstorage/v4 v4.3.0
 	github.com/Azure/azure-sdk-for-go/sdk/storage/azblob v1.8.2
 	github.com/aws/aws-sdk-go-v2 v1.47.3
 	github.com/aws/aws-sdk-go-v2/config v1.33.9
@@ -14,8 +14,8 @@ require (
 	github.com/aws/smithy-go v1.28.5
 	github.com/bradleyfalzon/ghinstallation/v2 v2.19.0
 	github.com/fsouza/fake-gcs-server v1.56.1
-	github.com/google/go-github/v90 v90.0.0
-	gitlab.com/gitlab-org/api/client-go/v2 v2.64.0
+	github.com/google/go-github/v93 v93.0.0
+	gitlab.com/gitlab-org/api/client-go/v3 v3.29.0
 	google.golang.org/api v0.305.0
 	gopkg.in/yaml.v3 v3.0.1
 )

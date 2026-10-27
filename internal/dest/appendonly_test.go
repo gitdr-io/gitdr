@@ -205,7 +205,7 @@ func forEachFile(t *testing.T, check func(*testing.T, string, *ast.File, *token.
 // a list of what not to call is always behind. What the code may reach is short and fixed, so
 // that is what is listed. It is checked with the type checker rather than by name, because
 // `x.Update` means nothing until you know what x is.
-const armstoragePath = "github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/storage/armstorage"
+const armstoragePath = "github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/storage/armstorage/v4"
 
 var armstorageAllowed = map[string]bool{
 	"NewBlobContainersClient":     true, // the one client

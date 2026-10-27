@@ -22,7 +22,7 @@ import (
 	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
-	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/storage/armstorage"
+	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/storage/armstorage/v4"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/blob"
 	azcontainer "github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/container"
 

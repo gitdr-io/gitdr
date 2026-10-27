@@ -17,7 +17,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/google/go-github/v90/github"
+	"github.com/google/go-github/v93/github"
 
 	"gitdr.io/gitdr/internal/gitexec"
 	"gitdr.io/gitdr/internal/source"
